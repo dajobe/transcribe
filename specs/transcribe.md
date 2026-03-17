@@ -2,26 +2,38 @@
 
 ## Overview
 
-`transcribe` is a macOS command-line tool that combines [WhisperKit](https://github.com/argmaxinc/WhisperKit) for speech-to-text and SpeakerKit for speaker diarization into a single local pipeline.
+`transcribe` is a macOS command-line tool that combines
+[WhisperKit](https://github.com/argmaxinc/WhisperKit) for speech-to-text and
+SpeakerKit for speaker diarization into a single local pipeline.
 
-Given an audio file, the tool produces a timestamped transcript with optional speaker labels. All processing runs on-device on Apple Silicon. The tool must not require cloud APIs, API keys, Python, or HuggingFace authentication.
+Given an audio file, the tool produces a timestamped transcript with
+optional speaker labels. All processing runs on-device on Apple Silicon. The
+tool must not require cloud APIs, API keys, Python, or HuggingFace
+authentication.
 
 ## Motivation
 
-Current transcription plus diarization options on macOS are either operationally heavy or incomplete:
+Current transcription plus diarization options on macOS are either
+operationally heavy or incomplete:
 
-- `whisperx` provides good features but depends on a non-trivial Python environment and gated pyannote assets.
+- `whisperx` provides good features but depends on a non-trivial Python
+  environment and gated pyannote assets.
 - `whisper.cpp` is fast but does not provide built-in diarization.
-- `whisperkit-cli` provides strong CoreML-accelerated transcription but does not expose diarization as a first-class CLI workflow.
+- `whisperkit-cli` provides strong CoreML-accelerated transcription but does
+  not expose diarization as a first-class CLI workflow.
 
-WhisperKit and SpeakerKit already exist in the same Swift package. The missing piece is a production-quality CLI that wires them together with sensible defaults and stable output contracts.
+WhisperKit and SpeakerKit already exist in the same Swift package. The
+missing piece is a production-quality CLI that wires them together with
+sensible defaults and stable output contracts.
 
 ## Goals
 
-1. Provide a single binary for batch transcription with optional diarization.
+1. Provide a single binary for batch transcription with optional
+   diarization.
 2. Use CoreML acceleration on Apple Silicon.
 3. Produce output that is useful for both humans and downstream tooling.
-4. Require minimal configuration for the common case of recorded meetings and interviews.
+4. Require minimal configuration for the common case of recorded meetings
+   and interviews.
 5. Keep execution fully local with no cloud dependency surface.
 
 ## Non-Goals
@@ -53,16 +65,21 @@ Dependencies are vendored through Swift Package Manager:
 - `SpeakerKit`
 - `swift-argument-parser`
 
-The runtime must not depend on Python, ffmpeg, Homebrew packages, or external services.
+The runtime must not depend on Python, ffmpeg, Homebrew packages, or
+external services.
 
 ## User Stories
 
-- As a user, I can run `transcribe meeting.m4a` and receive a transcript plus machine-readable JSON.
+- As a user, I can run `transcribe meeting.m4a` and receive a transcript
+  plus machine-readable JSON.
 - As a user, I can force the language or let it auto-detect.
 - As a user, I can disable diarization when I only want transcription.
-- As a user, I can constrain diarization with minimum and maximum speaker counts.
-- As a user, I can script the tool in shell pipelines without log noise contaminating stdout.
-- As a user, I can re-run the tool without re-downloading models on every invocation.
+- As a user, I can constrain diarization with minimum and maximum speaker
+  counts.
+- As a user, I can script the tool in shell pipelines without log noise
+  contaminating stdout.
+- As a user, I can re-run the tool without re-downloading models on every
+  invocation.
 
 ## CLI Contract
 
@@ -94,25 +111,32 @@ OPTIONS:
 
 ### Supported Input Formats
 
-At minimum, the tool should accept formats supported by WhisperKit's audio loading path, expected to include:
+At minimum, the tool should accept formats supported by WhisperKit's audio
+loading path, expected to include:
 
 - `mp3`
 - `wav`
 - `m4a`
 - `flac`
 
-If support differs in practice, the implementation must reflect actual supported formats in `--help` output and error messages.
+If support differs in practice, the implementation must reflect actual
+supported formats in `--help` output and error messages.
 
 ### Argument Semantics
 
 - `--format all` expands to `txt,json,srt,vtt`.
-- `--stdout` is only valid when `txt` is requested, either explicitly or through `all`.
-- `--stdout` writes transcript text to stdout and suppresses the `.txt` file.
+- `--stdout` is only valid when `txt` is requested, either explicitly or
+  through `all`.
+- `--stdout` writes transcript text to stdout and suppresses the `.txt`
+  file.
 - Logs and diagnostics must always go to stderr.
-- `--min-speakers` and `--max-speakers` are only valid when diarization is enabled.
-- If both `--min-speakers` and `--max-speakers` are provided, `min <= max` is required.
+- `--min-speakers` and `--max-speakers` are only valid when diarization is
+  enabled.
+- If both `--min-speakers` and `--max-speakers` are provided, `min <= max`
+  is required.
 - If `--max-speakers` is omitted, no upper bound is applied.
-- If output files already exist and `--overwrite` is not set, the command must fail before starting expensive work.
+- If output files already exist and `--overwrite` is not set, the command
+  must fail before starting expensive work.
 
 ### Exit Codes
 
@@ -145,7 +169,8 @@ transcribe interview.wav --stdout --format txt,json -o ./transcripts
 
 ### Output File Naming
 
-Given an input file `meeting.mp3` and output directory `./out`, generated files are:
+Given an input file `meeting.mp3` and output directory `./out`, generated
+files are:
 
 - `./out/meeting.txt`
 - `./out/meeting.json`
@@ -154,13 +179,17 @@ Given an input file `meeting.mp3` and output directory `./out`, generated files 
 
 The basename is derived from the input filename without its extension.
 
-Writes should be atomic where practical: write to a temporary file in the target directory, then rename into place.
+Writes should be atomic where practical: write to a temporary file in the
+target directory, then rename into place.
 
 ### Plain Text (`.txt`)
 
-Plain text is intended for humans. Consecutive transcript spans with the same speaker label should be merged into a single paragraph block for readability.
+Plain text is intended for humans. Consecutive transcript spans with the
+same speaker label should be merged into a single paragraph block for
+readability.
 
-If diarization is disabled or unavailable, speaker headings should be omitted.
+If diarization is disabled or unavailable, speaker headings should be
+omitted.
 
 Example with diarization:
 
@@ -184,7 +213,8 @@ the infrastructure migration timeline.
 
 ### JSON (`.json`)
 
-JSON is the stable machine-readable contract and must preserve original segment boundaries.
+JSON is the stable machine-readable contract and must preserve original
+segment boundaries.
 
 Rules:
 
@@ -265,7 +295,8 @@ by talking about the infrastructure migration timeline.
 
 ### Degraded Behavior
 
-The tool should prefer partial success over hard failure when transcription can still be delivered.
+The tool should prefer partial success over hard failure when transcription
+can still be delivered.
 
 | Condition | Required behavior |
 |-----------|-------------------|
@@ -289,7 +320,9 @@ The tool should prefer partial success over hard failure when transcription can 
 
 ### Concurrency
 
-When diarization is enabled, transcription and diarization should run concurrently because both operate on the same prepared audio but do not depend on each other.
+When diarization is enabled, transcription and diarization should run
+concurrently because both operate on the same prepared audio but do not
+depend on each other.
 
 Use Swift structured concurrency via `async let` or a task group.
 
@@ -297,17 +330,23 @@ Use Swift structured concurrency via `async let` or a task group.
 
 - Whisper and diarization model assets should be downloaded once and reused.
 - `--model-dir` controls the cache root for both model families.
-- Subsequent runs should not trigger re-download if the required assets are already present.
+- Subsequent runs should not trigger re-download if the required assets are
+  already present.
 
 ### Performance Target
 
-The tool should aim for materially faster-than-real-time throughput on typical Apple Silicon hardware for common meeting recordings, while treating correctness and operational simplicity as higher priority than benchmark optimization.
+The tool should aim for materially faster-than-real-time throughput on
+typical Apple Silicon hardware for common meeting recordings, while treating
+correctness and operational simplicity as higher priority than benchmark
+optimization.
 
-The spec does not require a hard benchmark, but verbose output should include enough timing data to measure real-world performance.
+The spec does not require a hard benchmark, but verbose output should
+include enough timing data to measure real-world performance.
 
 ## Logging and Diagnostics
 
-When `--verbose` is set, the tool should emit progress messages to stderr only.
+When `--verbose` is set, the tool should emit progress messages to stderr
+only.
 
 Example:
 
@@ -367,17 +406,23 @@ Audio File
 
 ### Design Decisions
 
-**Single audio load path.** Audio should be decoded once and reused by both transcription and diarization to avoid redundant work.
+**Single audio load path.** Audio should be decoded once and reused by both
+transcription and diarization to avoid redundant work.
 
-**Machine-readable JSON as the source of truth.** Human-readable outputs may merge or reflow text, but JSON should preserve transcript structure as closely as possible.
+**Machine-readable JSON as the source of truth.** Human-readable outputs may
+merge or reflow text, but JSON should preserve transcript structure as
+closely as possible.
 
-**Graceful degradation.** If diarization is unavailable or weak, transcription should still succeed whenever possible.
+**Graceful degradation.** If diarization is unavailable or weak,
+transcription should still succeed whenever possible.
 
-**Readable defaults.** Text output should optimize for meeting-readability, while JSON optimizes for downstream processing.
+**Readable defaults.** Text output should optimize for meeting-readability,
+while JSON optimizes for downstream processing.
 
 ## Implementation Notes
 
-The implementation must validate actual WhisperKit and SpeakerKit APIs at build time. The following sketch is illustrative only.
+The implementation must validate actual WhisperKit and SpeakerKit APIs at
+build time. The following sketch is illustrative only.
 
 ```swift
 import ArgumentParser
@@ -454,7 +499,8 @@ swift build -c release
 cp .build/release/transcribe ~/.local/bin/
 ```
 
-Support for Homebrew packaging is desirable but out of scope for the first implementation.
+Support for Homebrew packaging is desirable but out of scope for the first
+implementation.
 
 ### Package Definition Sketch
 
@@ -495,19 +541,60 @@ At minimum, the project should cover:
 - Short audio where diarization is skipped
 - Golden-file tests for txt, json, srt, and vtt output
 
-If fixture size is a concern, short deterministic audio clips should be checked into the repository and larger manual benchmark files kept out of git.
+If fixture size is a concern, short deterministic audio clips should be
+checked into the repository and larger manual benchmark files kept out of
+git.
 
 ## Open Questions
 
-- Should `--stdout` emit text only, or should a future version support `json` to stdout as well?
-- Should the default model remain `large-v3`, or should a smaller default be used for startup latency and disk footprint?
-- Does WhisperKit expose enough control over model cache location for both transcription and diarization assets, or is extra cache management needed?
-- Are word timestamps always available for the selected model family, or only for some configurations?
+- Should `--stdout` emit text only, or should a future version support
+  `json` to stdout as well?
+- Should the default model remain `large-v3`, or should a smaller default be
+  used for startup latency and disk footprint?
+- Does WhisperKit expose enough control over model cache location for both
+  transcription and diarization assets, or is extra cache management needed?
+- Are word timestamps always available for the selected model family, or
+  only for some configurations?
+
+## Implementation Readiness
+
+### Implementation Notes
+
+- **Speaker strategies:** The spec names `subsegment` and `segment` but does
+  not define their semantics; behavior comes from whatever SpeakerKit
+  exposes. Document the chosen strategy behavior in code or README once
+  known.
+- **JSON schema:** The JSON example and test plan ("JSON schema stability")
+  define the canonical shape. No formal JSON Schema document is required for
+  implementation; tests can assert structure.
+- **Illustrative sketch:** The Swift code in Implementation Notes is
+  intentionally illustrative. Do not assume API names or signatures;
+  validate against the actual WhisperKit and SpeakerKit packages.
+
+### Pre-Implementation Spike
+
+Before coding the main implementation, complete the following research and
+confirm or update the spec accordingly.
+
+| Spike item | Goal | How to verify |
+|------------|------|----------------|
+| **Package layout** | Confirm SpeakerKit is part of the WhisperKit repo and learn exact SPM product/library names. | Clone WhisperKit, inspect `Package.swift` for targets and products; confirm `SpeakerKit` (or equivalent) exists and is consumable. |
+| **WhisperKit API** | Learn actual entry points for loading audio, initializing the pipeline, and transcribing. | Build a minimal Swift app or test that loads audio, creates WhisperKit, runs transcription; note types for audio in/out and segment structure. |
+| **SpeakerKit API** | Learn diarization entry points, min/max speaker params, and how results are returned (e.g. labels per segment or per time range). | Same minimal app: call diarization on the same audio; confirm how speaker labels map to time ranges or segments. |
+| **Merge / strategy** | Confirm whether "merge speaker info into transcript" is provided by the library (e.g. `addSpeakerInfo(to:strategy:)`) or must be implemented by aligning segment timestamps with diarization output. | Check WhisperKit/SpeakerKit docs and APIs for any built-in merge; if none, design alignment logic and document in spec or Implementation Notes. |
+| **Supported formats** | List formats WhisperKit actually accepts for its audio loading path. | Run or read WhisperKit code for audio loading (e.g. AVFoundation path); update "Supported Input Formats" and `--help` text to match. |
+| **Model cache location** | Confirm whether both Whisper and diarization models can be stored under `--model-dir` or if separate or vendor-specific paths apply. | Check WhisperKit/SpeakerKit init options and docs for cache/config paths; resolve Open Question on cache and document default. |
+| **Word-level timestamps** | Determine if word timestamps are always available for the default model (and others) or only in certain configs. | Run transcription with default model; inspect result type for optional `words`; check docs. Update JSON contract or warnings if conditional. |
+
+Spike deliverables: short notes or a spike doc (in repo or spec) recording
+actual types, method names, and any spec or Package.swift updates (e.g.
+dependency versions, product names).
 
 ## References
 
 - [WhisperKit GitHub](https://github.com/argmaxinc/WhisperKit)
-- [Argmax SpeakerKit announcement](https://www.argmaxinc.com/blog/speakerkit)
-- [WhisperKit CoreML models](https://huggingface.co/argmaxinc/whisperkit-coreml)
+- [Argmax SpeakerKit
+  announcement](https://www.argmaxinc.com/blog/speakerkit)
+- [WhisperKit CoreML
+  models](https://huggingface.co/argmaxinc/whisperkit-coreml)
 - [swift-argument-parser](https://github.com/apple/swift-argument-parser)
-
