@@ -103,6 +103,15 @@ GPU, Neural Engine, and CPU rather than forcing every component onto the
 GPU. Use `--verbose` to print the selected compute backend for WhisperKit
 and SpeakerKit.
 
+### Performance
+
+- Use `.build/release/transcribe` for normal transcription runs. Debug
+  builds are intended for development and can be slower.
+- The default `auto` mode is tuned for the fastest backend mix the models
+  support, which may use a combination of GPU, Neural Engine, and CPU.
+- Use `--verbose` to print the selected WhisperKit and SpeakerKit compute
+  backends at startup.
+
 ### Supported Audio Formats
 
 `mp3`, `wav`, `m4a`, `flac`
