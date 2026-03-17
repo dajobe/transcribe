@@ -36,14 +36,40 @@ the download begins.
 
 ## Live transcription/diarization progress
 
-Show a live-updating terminal progress bar during transcription and
-diarization when connected to an interactive terminal (isatty). For example:
+Show live progress during transcription and diarization when stderr is a
+TTY, so the user has a sense of when things will finish. Fall back to simple
+log lines when not a TTY.
 
-    Transcribing foobar.mp3 ETA 1m50s [###     ] 30%
+Because transcription and diarization run in **parallel** (separate tasks),
+a single combined progress bar is not accurate. Instead, use **two lines**
+that update in place via terminal cursor control:
 
-Updates in place on a single line. Should include elapsed time, ETA, a
-visual bar, and percentage. Only display when stderr is a TTY; fall back to
-simple log lines otherwise.
+- **Line 1:** Transcription progress (e.g. segments or windows done, % if
+  derivable, elapsed).
+- **Line 2:** Diarization progress (e.g. segmenter/embedder phase,
+  fractionCompleted from the API).
+
+On each callback from either task, move cursor up, redraw both lines (e.g.
+`\r`, `\033[K` to clear to EOL, then `\033[A` to go up and redraw the other
+line), and serialize updates (lock or actor) so output doesn’t interleave.
+Only enable when `isatty(stderr)`; otherwise keep current verbose log lines.
+
+**Research (feasibility):**
+
+- **WhisperKit** exposes `transcribe(audioArray:decodeOptions:callback:)`
+  with `TranscriptionCallback = ((TranscriptionProgress) -> Bool?)?`. We can
+  pass a callback and get progress during decoding (e.g. tokens/text so far,
+  timings). Use it to drive the “transcription” line.
+
+- **SpeakerKit** exposes `diarize(audioArray:options:progressCallback:)`
+  with `progressCallback: (Progress) -> Void`. The diarizer updates a single
+  `Progress` (e.g. 0–100) across segmenter and embedder phases. Use it to
+  drive the “diarization” line.
+
+- **Two-line TTY updates** are standard: carriage return, ANSI escape codes
+  (e.g. `\033[A` up, `\033[K` clear to end of line). Ensure updates are
+  serialized so one callback doesn’t write between the other’s two line
+  draws.
 
 ## Add TSV output format
 
