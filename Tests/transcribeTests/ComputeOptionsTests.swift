@@ -5,7 +5,7 @@ import XCTest
 @testable import transcribe
 
 final class ComputeOptionsTests: XCTestCase {
-    func testAutoPrefersGPUWhenAvailable() {
+    func testAutoUsesRecommendedBackendMix() {
         let options = RuntimeComputeOptions.resolve(
             audioEncoder: .auto,
             textDecoder: .auto,
@@ -14,14 +14,12 @@ final class ComputeOptionsTests: XCTestCase {
         )
 
         let whisperDefaults = ModelComputeOptions()
-        let expectedWhisper = RuntimeComputeOptions.canPreferGPU ? MLComputeUnits.cpuAndGPU : whisperDefaults.audioEncoderCompute
-        let expectedSpeakerSegmenter = RuntimeComputeOptions.canPreferGPU ? MLComputeUnits.cpuAndGPU : ModelInfo.segmenter().computeUnits
-        let expectedSpeakerEmbedder = RuntimeComputeOptions.canPreferGPU ? MLComputeUnits.cpuAndGPU : ModelInfo.embedder().computeUnits
-
-        XCTAssertEqual(options.whisperPreferred.audioEncoderCompute.rawValue, expectedWhisper.rawValue)
-        XCTAssertEqual(options.whisperPreferred.textDecoderCompute.rawValue, expectedWhisper.rawValue)
-        XCTAssertEqual(options.speakerPreferred.segmenter.rawValue, expectedSpeakerSegmenter.rawValue)
-        XCTAssertEqual(options.speakerPreferred.embedder.rawValue, expectedSpeakerEmbedder.rawValue)
+        XCTAssertEqual(options.whisperPreferred.audioEncoderCompute.rawValue, whisperDefaults.audioEncoderCompute.rawValue)
+        XCTAssertEqual(options.whisperPreferred.textDecoderCompute.rawValue, whisperDefaults.textDecoderCompute.rawValue)
+        XCTAssertNil(options.whisperFallback)
+        XCTAssertEqual(options.speakerPreferred.segmenter.rawValue, ModelInfo.segmenter().computeUnits.rawValue)
+        XCTAssertEqual(options.speakerPreferred.embedder.rawValue, ModelInfo.embedder().computeUnits.rawValue)
+        XCTAssertNil(options.speakerFallback)
     }
 
     func testExplicitComputeDisablesFallbackForThatChoice() {

@@ -97,11 +97,11 @@ it only when `--min-speakers` and `--max-speakers` are both set to the same
 value. Otherwise diarization runs unconstrained and warns if the detected
 count falls outside the requested bounds.
 
-By default, `auto` now prefers GPU/Metal-backed Core ML for both WhisperKit
-and SpeakerKit when that backend is available. If a model cannot be loaded
-with the preferred GPU setting, `transcribe` falls back to a compatible
-backend for that kit. Use `--verbose` to print the selected compute backend
-for WhisperKit and SpeakerKit.
+By default, `auto` uses the recommended backend mix for each WhisperKit and
+SpeakerKit model. On Apple Silicon this typically means a combination of
+GPU, Neural Engine, and CPU rather than forcing every component onto the
+GPU. Use `--verbose` to print the selected compute backend for WhisperKit
+and SpeakerKit.
 
 ### Supported Audio Formats
 

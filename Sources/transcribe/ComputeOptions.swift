@@ -1,8 +1,5 @@
 import ArgumentParser
 import CoreML
-#if canImport(Metal)
-import Metal
-#endif
 import SpeakerKit
 import WhisperKit
 
@@ -61,16 +58,6 @@ struct RuntimeComputeOptions {
     let speakerPreferred: SpeakerComputeOptions
     let speakerFallback: SpeakerComputeOptions?
 
-    static var canPreferGPU: Bool {
-        #if targetEnvironment(simulator)
-        return false
-        #elseif canImport(Metal)
-        return MTLCreateSystemDefaultDevice() != nil
-        #else
-        return false
-        #endif
-    }
-
     static func resolve(
         audioEncoder: ComputeUnitsOption,
         textDecoder: ComputeUnitsOption,
@@ -80,11 +67,10 @@ struct RuntimeComputeOptions {
         let whisperDefaults = ModelComputeOptions()
         let speakerSegmenterDefault = ModelInfo.segmenter().computeUnits
         let speakerEmbedderDefault = ModelInfo.embedder().computeUnits
-        let gpuDefault: MLComputeUnits = canPreferGPU ? .cpuAndGPU : .cpuOnly
 
         let whisperPreferred = ModelComputeOptions(
-            audioEncoderCompute: audioEncoder.resolvedValue ?? (canPreferGPU ? gpuDefault : whisperDefaults.audioEncoderCompute),
-            textDecoderCompute: textDecoder.resolvedValue ?? (canPreferGPU ? gpuDefault : whisperDefaults.textDecoderCompute)
+            audioEncoderCompute: audioEncoder.resolvedValue ?? whisperDefaults.audioEncoderCompute,
+            textDecoderCompute: textDecoder.resolvedValue ?? whisperDefaults.textDecoderCompute
         )
         let whisperFallback = ModelComputeOptions(
             audioEncoderCompute: audioEncoder.resolvedValue ?? whisperDefaults.audioEncoderCompute,
@@ -92,8 +78,8 @@ struct RuntimeComputeOptions {
         )
 
         let speakerPreferred = SpeakerComputeOptions(
-            segmenter: segmenter.resolvedValue ?? (canPreferGPU ? gpuDefault : speakerSegmenterDefault),
-            embedder: embedder.resolvedValue ?? (canPreferGPU ? gpuDefault : speakerEmbedderDefault)
+            segmenter: segmenter.resolvedValue ?? speakerSegmenterDefault,
+            embedder: embedder.resolvedValue ?? speakerEmbedderDefault
         )
         let speakerFallback = SpeakerComputeOptions(
             segmenter: segmenter.resolvedValue ?? speakerSegmenterDefault,

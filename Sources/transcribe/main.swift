@@ -61,25 +61,25 @@ struct Transcribe: AsyncParsableCommand {
 
     @Option(
         name: .long,
-        help: "Compute units for the Whisper audio encoder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto prefers GPU/Metal)"
+        help: "Compute units for the Whisper audio encoder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto uses the recommended backend mix)"
     )
     var audioEncoderCompute: ComputeUnitsOption = .auto
 
     @Option(
         name: .long,
-        help: "Compute units for the Whisper text decoder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto prefers GPU/Metal)"
+        help: "Compute units for the Whisper text decoder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto uses the recommended backend mix)"
     )
     var textDecoderCompute: ComputeUnitsOption = .auto
 
     @Option(
         name: .long,
-        help: "Compute units for the SpeakerKit segmenter: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto prefers GPU/Metal)"
+        help: "Compute units for the SpeakerKit segmenter: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto uses the recommended backend mix)"
     )
     var segmenterCompute: ComputeUnitsOption = .auto
 
     @Option(
         name: .long,
-        help: "Compute units for the SpeakerKit embedder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto prefers GPU/Metal)"
+        help: "Compute units for the SpeakerKit embedder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto uses the recommended backend mix)"
     )
     var embedderCompute: ComputeUnitsOption = .auto
 
