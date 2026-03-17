@@ -36,27 +36,49 @@ func loadPreparedAudio(audioPath: String, logger: VerboseLogger? = nil) throws -
 func initializeWhisperKit(
     model: String,
     modelDir: String,
+    computeOptions: RuntimeComputeOptions,
     verbose: Bool,
     logger: VerboseLogger? = nil
 ) async throws -> WhisperKit {
     let expandedModelDir = (modelDir as NSString).expandingTildeInPath
     let modelDirURL = URL(fileURLWithPath: expandedModelDir)
-    let config = WhisperKitConfig(
-        model: model,
-        downloadBase: modelDirURL,
-        verbose: verbose,
-        load: true,
-        download: true
-    )
+    func makeConfig(_ selectedCompute: ModelComputeOptions) -> WhisperKitConfig {
+        WhisperKitConfig(
+            model: model,
+            downloadBase: modelDirURL,
+            computeOptions: selectedCompute,
+            verbose: verbose,
+            load: true,
+            download: true
+        )
+    }
 
     logger?.log("Using model cache: \(expandedModelDir)")
-    let whisperKit: WhisperKit
+    let preferredConfig = makeConfig(computeOptions.whisperPreferred)
     do {
-        whisperKit = try await WhisperKit(config)
+        let whisperKit = try await WhisperKit(preferredConfig)
+        logger?.log("Selected WhisperKit compute: \(RuntimeComputeOptions.whisperSummary(computeOptions.whisperPreferred))")
+        return whisperKit
     } catch {
+        if let fallback = computeOptions.whisperFallback {
+            logger?.log("WhisperKit could not use preferred GPU/Metal compute (\(error.localizedDescription)); falling back.")
+            do {
+                let whisperKit = try await WhisperKit(makeConfig(fallback))
+                logger?.log("Selected WhisperKit compute: \(RuntimeComputeOptions.whisperSummary(fallback))")
+                return whisperKit
+            } catch {
+                throw TranscribeError(
+                    message: "Model initialization failed after GPU/Metal fallback: \(error.localizedDescription)",
+                    exitCode: .modelFailure
+                )
+            }
+        }
+
         logger?.log("Model load failed, retrying once...")
         do {
-            whisperKit = try await WhisperKit(config)
+            let whisperKit = try await WhisperKit(preferredConfig)
+            logger?.log("Selected WhisperKit compute: \(RuntimeComputeOptions.whisperSummary(computeOptions.whisperPreferred))")
+            return whisperKit
         } catch {
             throw TranscribeError(
                 message: "Model initialization failed after retry: \(error.localizedDescription)",
@@ -64,12 +86,11 @@ func initializeWhisperKit(
             )
         }
     }
-
-    return whisperKit
 }
 
 func initializeSpeakerKit(
     modelDir: String,
+    computeOptions: RuntimeComputeOptions,
     verbose: Bool,
     logger: VerboseLogger? = nil
 ) async throws -> SpeakerKit {
@@ -81,13 +102,46 @@ func initializeSpeakerKit(
         verbose: verbose
     )
 
-    let speakerKit: SpeakerKit
+    func loadSpeakerKit(using selectedCompute: RuntimeComputeOptions.SpeakerComputeOptions) async throws -> SpeakerKit {
+        let speakerManager = SpeakerKitModelManager(
+            config: speakerConfig,
+            segmenterModelInfo: .segmenter(computeUnits: selectedCompute.segmenter),
+            embedderModelInfo: .embedder(computeUnits: selectedCompute.embedder)
+        )
+        if speakerConfig.download {
+            try await speakerManager.downloadModels()
+        }
+        try await speakerManager.loadModels()
+        guard let models = speakerManager.models as? PyannoteModels else {
+            throw SpeakerKitError.modelUnavailable("Failed to load SpeakerKit models")
+        }
+        return try SpeakerKit(models: models)
+    }
+
     do {
-        speakerKit = try await SpeakerKit(speakerConfig)
+        let speakerKit = try await loadSpeakerKit(using: computeOptions.speakerPreferred)
+        logger?.log("Selected SpeakerKit compute: \(computeOptions.speakerPreferred.summary)")
+        return speakerKit
     } catch {
+        if let fallback = computeOptions.speakerFallback {
+            logger?.log("SpeakerKit could not use preferred GPU/Metal compute (\(error.localizedDescription)); falling back.")
+            do {
+                let speakerKit = try await loadSpeakerKit(using: fallback)
+                logger?.log("Selected SpeakerKit compute: \(fallback.summary)")
+                return speakerKit
+            } catch {
+                throw TranscribeError(
+                    message: "SpeakerKit initialization failed after GPU/Metal fallback: \(error.localizedDescription). Use --no-diarize for transcript-only.",
+                    exitCode: .modelFailure
+                )
+            }
+        }
+
         logger?.log("SpeakerKit load failed, retrying once...")
         do {
-            speakerKit = try await SpeakerKit(speakerConfig)
+            let speakerKit = try await loadSpeakerKit(using: computeOptions.speakerPreferred)
+            logger?.log("Selected SpeakerKit compute: \(computeOptions.speakerPreferred.summary)")
+            return speakerKit
         } catch {
             throw TranscribeError(
                 message: "SpeakerKit initialization failed: \(error.localizedDescription). Use --no-diarize for transcript-only.",
@@ -95,8 +149,6 @@ func initializeSpeakerKit(
             )
         }
     }
-
-    return speakerKit
 }
 
 func buildTranscriptionOutput(
@@ -125,6 +177,7 @@ func runTranscriptionOnly(
     model: String,
     modelDir: String,
     language: String?,
+    computeOptions: RuntimeComputeOptions,
     verbose: Bool,
     wordTimestamps: Bool = false,
     logger: VerboseLogger? = nil
@@ -132,6 +185,7 @@ func runTranscriptionOnly(
     let whisperKit = try await initializeWhisperKit(
         model: model,
         modelDir: modelDir,
+        computeOptions: computeOptions,
         verbose: verbose,
         logger: logger
     )
@@ -166,6 +220,7 @@ func runTranscriptionOnly(
     model: String,
     modelDir: String,
     language: String?,
+    computeOptions: RuntimeComputeOptions,
     verbose: Bool,
     wordTimestamps: Bool = false,
     logger: VerboseLogger? = nil
@@ -177,6 +232,7 @@ func runTranscriptionOnly(
         model: model,
         modelDir: modelDir,
         language: language,
+        computeOptions: computeOptions,
         verbose: verbose,
         wordTimestamps: wordTimestamps,
         logger: logger
@@ -233,6 +289,7 @@ func runTranscriptionWithDiarization(
     minSpeakers: Int?,
     maxSpeakers: Int?,
     speakerStrategy: SpeakerInfoStrategy,
+    computeOptions: RuntimeComputeOptions,
     verbose: Bool,
     logger: VerboseLogger? = nil
 ) async throws -> TranscriptionOutput {
@@ -247,6 +304,7 @@ func runTranscriptionWithDiarization(
             model: model,
             modelDir: modelDir,
             language: language,
+            computeOptions: computeOptions,
             verbose: verbose,
             wordTimestamps: false,
             logger: logger
@@ -258,11 +316,13 @@ func runTranscriptionWithDiarization(
     let whisperKit = try await initializeWhisperKit(
         model: model,
         modelDir: modelDir,
+        computeOptions: computeOptions,
         verbose: verbose,
         logger: logger
     )
     let speakerKit = try await initializeSpeakerKit(
         modelDir: modelDir,
+        computeOptions: computeOptions,
         verbose: verbose,
         logger: logger
     )

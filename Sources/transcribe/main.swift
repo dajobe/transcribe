@@ -59,6 +59,30 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Print progress, timing, and cache details to stderr")
     var verbose: Bool = false
 
+    @Option(
+        name: .long,
+        help: "Compute units for the Whisper audio encoder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto prefers GPU/Metal)"
+    )
+    var audioEncoderCompute: ComputeUnitsOption = .auto
+
+    @Option(
+        name: .long,
+        help: "Compute units for the Whisper text decoder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto prefers GPU/Metal)"
+    )
+    var textDecoderCompute: ComputeUnitsOption = .auto
+
+    @Option(
+        name: .long,
+        help: "Compute units for the SpeakerKit segmenter: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto prefers GPU/Metal)"
+    )
+    var segmenterCompute: ComputeUnitsOption = .auto
+
+    @Option(
+        name: .long,
+        help: "Compute units for the SpeakerKit embedder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto prefers GPU/Metal)"
+    )
+    var embedderCompute: ComputeUnitsOption = .auto
+
     /// Resolved list of output formats (txt, json, srt, vtt).
     var resolvedFormats: [String] {
         let f = format.lowercased().trimmingCharacters(in: .whitespaces)
@@ -148,6 +172,12 @@ struct Transcribe: AsyncParsableCommand {
     private func runPipeline() async throws {
         let startDate = Date()
         let logger = VerboseLogger(verbose: verbose, startDate: startDate)
+        let computeOptions = RuntimeComputeOptions.resolve(
+            audioEncoder: audioEncoderCompute,
+            textDecoder: textDecoderCompute,
+            segmenter: segmenterCompute,
+            embedder: embedderCompute
+        )
 
         let resolvedModel = try await resolveModel(explicit: model, logger: logger)
 
@@ -167,6 +197,7 @@ struct Transcribe: AsyncParsableCommand {
                 model: resolvedModel,
                 modelDir: modelDir,
                 language: language,
+                computeOptions: computeOptions,
                 verbose: verbose,
                 wordTimestamps: false,
                 logger: logger
@@ -181,6 +212,7 @@ struct Transcribe: AsyncParsableCommand {
                 minSpeakers: minSpeakers,
                 maxSpeakers: maxSpeakers,
                 speakerStrategy: strategy,
+                computeOptions: computeOptions,
                 verbose: verbose,
                 logger: logger
             )
