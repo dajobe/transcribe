@@ -234,6 +234,17 @@ func writeOutputs(
     let dir = resolvedOutputDir(outputDir)
     let basename = outputBasename(audioPath: audioPath)
 
+    if !FileManager.default.fileExists(atPath: dir) {
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        } catch {
+            throw TranscribeError(
+                message: "Cannot create output directory: \(error.localizedDescription)",
+                exitCode: .outputWrite
+            )
+        }
+    }
+
     try checkOverwrite(
         outputDir: outputDir,
         basename: basename,
