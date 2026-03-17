@@ -15,3 +15,8 @@ struct VerboseLogger {
         FileHandle.standardError.write(line.data(using: .utf8)!)
     }
 }
+
+func emitWarning(_ message: String) {
+    let line = "Warning: \(message)\n"
+    FileHandle.standardError.write(line.data(using: .utf8)!)
+}

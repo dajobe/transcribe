@@ -40,12 +40,15 @@ func writeAtomically(content: Data, to path: String) throws {
     let dir = (path as NSString).deletingLastPathComponent
     let name = (path as NSString).lastPathComponent
     let tempPath = (dir as NSString).appendingPathComponent(".\(name).tmp.\(ProcessInfo.processInfo.processIdentifier)")
+    let tempURL = URL(fileURLWithPath: tempPath)
+    let targetURL = URL(fileURLWithPath: path)
     do {
-        try content.write(to: URL(fileURLWithPath: tempPath))
+        try content.write(to: tempURL)
         if FileManager.default.fileExists(atPath: path) {
-            try FileManager.default.removeItem(atPath: path)
+            _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: tempURL)
+        } else {
+            try FileManager.default.moveItem(at: tempURL, to: targetURL)
         }
-        try FileManager.default.moveItem(atPath: tempPath, toPath: path)
     } catch {
         try? FileManager.default.removeItem(atPath: tempPath)
         throw TranscribeError(message: "Failed to write output: \(error.localizedDescription)", exitCode: .outputWrite)
@@ -150,7 +153,7 @@ func renderJSON(output: TranscriptionOutput, audioFile: String, model: String, v
 
 // MARK: - Plain text (merge consecutive same-speaker segments)
 
-func renderTxt(output: TranscriptionOutput, includeSpeakerAndTime: Bool) -> String {
+func renderTxt(output: TranscriptionOutput) -> String {
     var lines: [String] = []
     var currentSpeaker: String? = nil
     var currentBlock: [String] = []
@@ -161,12 +164,10 @@ func renderTxt(output: TranscriptionOutput, includeSpeakerAndTime: Bool) -> Stri
         guard !currentBlock.isEmpty else { return }
         let text = currentBlock.joined(separator: " ").trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return }
-        if includeSpeakerAndTime {
-            if let sp = currentSpeaker {
-                lines.append("\(sp) [\(formatTimeRange(seconds: blockStart)) - \(formatTimeRange(seconds: blockEnd))]")
-            } else {
-                lines.append("[\(formatTimeRange(seconds: blockStart)) - \(formatTimeRange(seconds: blockEnd))]")
-            }
+        if let sp = currentSpeaker {
+            lines.append("\(sp) [\(formatTimeRange(seconds: blockStart)) - \(formatTimeRange(seconds: blockEnd))]")
+        } else {
+            lines.append("[\(formatTimeRange(seconds: blockStart)) - \(formatTimeRange(seconds: blockEnd))]")
         }
         lines.append(text)
         lines.append("")
@@ -187,7 +188,7 @@ func renderTxt(output: TranscriptionOutput, includeSpeakerAndTime: Bool) -> Stri
     }
     flushBlock()
 
-    return lines.joined(separator: "\n")
+    return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 // MARK: - SRT
@@ -232,7 +233,6 @@ func writeOutputs(
 ) throws {
     let dir = resolvedOutputDir(outputDir)
     let basename = outputBasename(audioPath: audioPath)
-    let includeSpeakerAndTime = output.diarizationEnabled || output.segments.contains { $0.speaker != nil }
 
     try checkOverwrite(
         outputDir: outputDir,
@@ -249,7 +249,7 @@ func writeOutputs(
             let path = (dir as NSString).appendingPathComponent("\(basename).json")
             try writeAtomically(content: data, to: path)
         case "txt":
-            let text = renderTxt(output: output, includeSpeakerAndTime: includeSpeakerAndTime)
+            let text = renderTxt(output: output)
             if writeTxtToStdout {
                 FileHandle.standardOutput.write((text + "\n").data(using: .utf8)!)
             } else {

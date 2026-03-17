@@ -2,6 +2,11 @@ import Foundation
 import SpeakerKit
 import WhisperKit
 
+struct PreparedAudio {
+    let samples: [Float]
+    let durationSeconds: Double
+}
+
 /// Converts WhisperKit [TranscriptionResult] to our [TranscriptSegment].
 func segmentsFromTranscriptionResults(_ results: [TranscriptionResult]) -> [TranscriptSegment] {
     results.flatMap { result in
@@ -20,22 +25,20 @@ func segmentsFromTranscriptionResults(_ results: [TranscriptionResult]) -> [Tran
     }
 }
 
-/// Runs transcription-only path: load audio, init WhisperKit, transcribe, return segments.
-/// - Parameter wordTimestamps: Enable word-level timestamps (required for diarization merge later).
-func runTranscriptionOnly(
-    audioPath: String,
-    model: String,
-    modelDir: String,
-    language: String?,
-    verbose: Bool,
-    wordTimestamps: Bool = false,
-    logger: VerboseLogger? = nil
-) async throws -> TranscriptionOutput {
+func loadPreparedAudio(audioPath: String, logger: VerboseLogger? = nil) throws -> PreparedAudio {
     logger?.log("Loading audio: \((audioPath as NSString).lastPathComponent)")
     let audioArray = try AudioLoader.loadAudio(fromPath: audioPath)
     let durationSeconds = Double(audioArray.count) / Double(WhisperKit.sampleRate)
     logger?.log("Audio loaded (\(String(format: "%.1f", durationSeconds))s, 16kHz mono)")
+    return PreparedAudio(samples: audioArray, durationSeconds: durationSeconds)
+}
 
+func initializeWhisperKit(
+    model: String,
+    modelDir: String,
+    verbose: Bool,
+    logger: VerboseLogger? = nil
+) async throws -> WhisperKit {
     let expandedModelDir = (modelDir as NSString).expandingTildeInPath
     let config = WhisperKitConfig(
         model: model,
@@ -46,7 +49,6 @@ func runTranscriptionOnly(
     )
 
     logger?.log("Using model cache: \(expandedModelDir)")
-    logger?.log("Starting transcription...")
     let whisperKit: WhisperKit
     do {
         whisperKit = try await WhisperKit(config)
@@ -62,6 +64,77 @@ func runTranscriptionOnly(
         }
     }
 
+    return whisperKit
+}
+
+func initializeSpeakerKit(
+    modelDir: String,
+    verbose: Bool,
+    logger: VerboseLogger? = nil
+) async throws -> SpeakerKit {
+    let expandedModelDir = (modelDir as NSString).expandingTildeInPath
+    let speakerConfig = PyannoteConfig(
+        downloadBase: URL(fileURLWithPath: expandedModelDir),
+        modelFolder: nil,
+        download: true,
+        verbose: verbose
+    )
+
+    let speakerKit: SpeakerKit
+    do {
+        speakerKit = try await SpeakerKit(speakerConfig)
+    } catch {
+        logger?.log("SpeakerKit load failed, retrying once...")
+        do {
+            speakerKit = try await SpeakerKit(speakerConfig)
+        } catch {
+            throw TranscribeError(
+                message: "SpeakerKit initialization failed: \(error.localizedDescription). Use --no-diarize for transcript-only.",
+                exitCode: .modelFailure
+            )
+        }
+    }
+
+    return speakerKit
+}
+
+func buildTranscriptionOutput(
+    from results: [TranscriptionResult],
+    durationSeconds: Double,
+    diarizationEnabled: Bool
+) -> TranscriptionOutput {
+    let segments = segmentsFromTranscriptionResults(results)
+    var warnings: [String] = []
+    if segments.isEmpty {
+        warnings.append("No speech detected; output contains no segments.")
+    }
+
+    return TranscriptionOutput(
+        segments: segments,
+        language: results.first?.language,
+        durationSeconds: durationSeconds,
+        diarizationEnabled: diarizationEnabled,
+        warnings: warnings
+    )
+}
+
+func runTranscriptionOnly(
+    audioArray: [Float],
+    durationSeconds: Double,
+    model: String,
+    modelDir: String,
+    language: String?,
+    verbose: Bool,
+    wordTimestamps: Bool = false,
+    logger: VerboseLogger? = nil
+) async throws -> TranscriptionOutput {
+    let whisperKit = try await initializeWhisperKit(
+        model: model,
+        modelDir: modelDir,
+        verbose: verbose,
+        logger: logger
+    )
+
     var decodeOptions = DecodingOptions(
         wordTimestamps: wordTimestamps,
         chunkingStrategy: .vad
@@ -70,19 +143,42 @@ func runTranscriptionOnly(
         decodeOptions.language = lang
     }
 
+    logger?.log("Starting transcription...")
     let results = try await whisperKit.transcribe(
         audioArray: audioArray,
         decodeOptions: decodeOptions
     )
 
-    let segments = segmentsFromTranscriptionResults(results)
-    let detectedLanguage = results.first?.language
-    logger?.log("Transcription complete (\(segments.count) segments)")
-    return TranscriptionOutput(
-        segments: segments,
-        language: detectedLanguage,
+    let output = buildTranscriptionOutput(
+        from: results,
         durationSeconds: durationSeconds,
         diarizationEnabled: false
+    )
+    logger?.log("Transcription complete (\(output.segments.count) segments)")
+    return output
+}
+
+/// Runs transcription-only path: load audio, init WhisperKit, transcribe, return segments.
+/// - Parameter wordTimestamps: Enable word-level timestamps (required for diarization merge later).
+func runTranscriptionOnly(
+    audioPath: String,
+    model: String,
+    modelDir: String,
+    language: String?,
+    verbose: Bool,
+    wordTimestamps: Bool = false,
+    logger: VerboseLogger? = nil
+) async throws -> TranscriptionOutput {
+    let preparedAudio = try loadPreparedAudio(audioPath: audioPath, logger: logger)
+    return try await runTranscriptionOnly(
+        audioArray: preparedAudio.samples,
+        durationSeconds: preparedAudio.durationSeconds,
+        model: model,
+        modelDir: modelDir,
+        language: language,
+        verbose: verbose,
+        wordTimestamps: wordTimestamps,
+        logger: logger
     )
 }
 
@@ -139,15 +235,14 @@ func runTranscriptionWithDiarization(
     verbose: Bool,
     logger: VerboseLogger? = nil
 ) async throws -> TranscriptionOutput {
-    logger?.log("Loading audio: \((audioPath as NSString).lastPathComponent)")
-    let audioArray = try AudioLoader.loadAudio(fromPath: audioPath)
-    let durationSeconds = Double(audioArray.count) / Double(WhisperKit.sampleRate)
-    logger?.log("Audio loaded (\(String(format: "%.1f", durationSeconds))s, 16kHz mono)")
+    let preparedAudio = try loadPreparedAudio(audioPath: audioPath, logger: logger)
+    let audioArray = preparedAudio.samples
+    let durationSeconds = preparedAudio.durationSeconds
 
     if durationSeconds < minDiarizationDurationSeconds {
-        logger?.log("Audio too short (\(String(format: "%.1f", durationSeconds))s), skipping diarization")
         var out = try await runTranscriptionOnly(
-            audioPath: audioPath,
+            audioArray: audioArray,
+            durationSeconds: durationSeconds,
             model: model,
             modelDir: modelDir,
             language: language,
@@ -159,40 +254,17 @@ func runTranscriptionWithDiarization(
         return out
     }
 
-    let expandedModelDir = (modelDir as NSString).expandingTildeInPath
-    let whisperConfig = WhisperKitConfig(
+    let whisperKit = try await initializeWhisperKit(
         model: model,
-        modelFolder: expandedModelDir,
+        modelDir: modelDir,
         verbose: verbose,
-        load: true,
-        download: true
+        logger: logger
     )
-
-    let speakerConfig = PyannoteConfig(
-        downloadBase: URL(fileURLWithPath: expandedModelDir),
-        modelFolder: nil,
-        download: true,
-        verbose: verbose
+    let speakerKit = try await initializeSpeakerKit(
+        modelDir: modelDir,
+        verbose: verbose,
+        logger: logger
     )
-
-    logger?.log("Using model cache: \(expandedModelDir)")
-    logger?.log("Starting transcription...")
-    logger?.log("Starting diarization...")
-    let whisperKit = try await WhisperKit(whisperConfig)
-    let speakerKit: SpeakerKit
-    do {
-        speakerKit = try await SpeakerKit(speakerConfig)
-    } catch {
-        logger?.log("SpeakerKit load failed, retrying once...")
-        do {
-            speakerKit = try await SpeakerKit(speakerConfig)
-        } catch {
-            throw TranscribeError(
-                message: "SpeakerKit initialization failed: \(error.localizedDescription). Use --no-diarize for transcript-only.",
-                exitCode: .modelFailure
-            )
-        }
-    }
 
     let decodeOptions: DecodingOptions = {
         var opts = DecodingOptions(
@@ -205,14 +277,16 @@ func runTranscriptionWithDiarization(
         return opts
     }()
 
-    let numberOfSpeakers: Int?
-    if let min = minSpeakers, let max = maxSpeakers, min == max {
-        numberOfSpeakers = min
-    } else {
-        numberOfSpeakers = maxSpeakers ?? minSpeakers
-    }
+    let numberOfSpeakers: Int? = {
+        guard let min = minSpeakers, let max = maxSpeakers, min == max else {
+            return nil
+        }
+        return min
+    }()
     let diarizationOptions = PyannoteDiarizationOptions(numberOfSpeakers: numberOfSpeakers)
 
+    logger?.log("Starting transcription...")
+    logger?.log("Starting diarization...")
     async let transcriptionTask: [TranscriptionResult] = whisperKit.transcribe(
         audioArray: audioArray,
         decodeOptions: decodeOptions
@@ -229,19 +303,27 @@ func runTranscriptionWithDiarization(
     logger?.log("Diarization complete (\(diarizationResult.speakerCount) speakers detected)")
     logger?.log("Merging speaker labels with strategy=\(speakerStrategy == .segment ? "segment" : "subsegment")")
     let merged = diarizationResult.addSpeakerInfo(to: results, strategy: speakerStrategy)
+    let transcriptOnlySegments = segmentsFromTranscriptionResults(results)
     var segments = segmentsFromSpeakerSegments(merged)
 
     if segments.isEmpty || diarizationResult.speakerCount == 0 {
         logger?.log("No speakers detected, using transcript-only")
-        segments = segmentsFromTranscriptionResults(results)
+        segments = transcriptOnlySegments
     }
 
     var warnings: [String] = []
     let speakersDetected = diarizationResult.speakerCount
-    if speakersDetected == 0 || segments.isEmpty {
+    if transcriptOnlySegments.isEmpty {
+        warnings.append("No speech detected; output contains no segments.")
+    } else if speakersDetected == 0 || segments.isEmpty {
         warnings.append("Diarization returned no speakers; segment labels omitted.")
-    } else if let min = minSpeakers, speakersDetected < min {
-        warnings.append("Diarization detected \(speakersDetected) speaker(s), fewer than --min-speakers (\(min)).")
+    } else {
+        if let min = minSpeakers, speakersDetected < min {
+            warnings.append("Diarization detected \(speakersDetected) speaker(s), fewer than --min-speakers (\(min)).")
+        }
+        if let max = maxSpeakers, speakersDetected > max {
+            warnings.append("Diarization detected \(speakersDetected) speaker(s), more than --max-speakers (\(max)).")
+        }
     }
 
     return TranscriptionOutput(

@@ -117,13 +117,18 @@ struct Transcribe: AsyncParsableCommand {
             )
         }
 
-        if !noDiarize {
-            if let min = minSpeakers, let max = maxSpeakers, min > max {
-                throw TranscribeError(
-                    message: "--min-speakers (\(min)) must be less than or equal to --max-speakers (\(max)).",
-                    exitCode: .invalidUsage
-                )
-            }
+        if noDiarize && (minSpeakers != nil || maxSpeakers != nil) {
+            throw TranscribeError(
+                message: "--min-speakers and --max-speakers are only valid when diarization is enabled.",
+                exitCode: .invalidUsage
+            )
+        }
+
+        if let min = minSpeakers, let max = maxSpeakers, min > max {
+            throw TranscribeError(
+                message: "--min-speakers (\(min)) must be less than or equal to --max-speakers (\(max)).",
+                exitCode: .invalidUsage
+            )
         }
     }
 
@@ -168,6 +173,9 @@ struct Transcribe: AsyncParsableCommand {
 
         var out = output
         out.speakerStrategy = speakerStrategy
+        for warning in out.warnings {
+            emitWarning(warning)
+        }
 
         let outputFiles = resolvedFormats.filter { fmt in fmt != "txt" || !stdout }.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
         logger.log("Writing outputs: \(outputFiles)")

@@ -68,4 +68,18 @@ final class CLITests: XCTestCase {
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 2, "min-speakers > max-speakers should exit 2")
     }
+
+    func testSpeakerOptionsWithNoDiarizeExitTwo() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["/tmp/any.wav", "--no-diarize", "--min-speakers", "2"]
+        let pipe = Pipe()
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let stderr = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 2, "speaker options with --no-diarize should exit 2")
+        XCTAssertTrue(stderr.contains("only valid when diarization is enabled"), "stderr should explain the invalid combination")
+    }
 }
