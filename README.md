@@ -20,6 +20,21 @@ swift build -c release
 cp .build/release/transcribe ~/.local/bin/
 ```
 
+Ensure `~/.local/bin` is on your `PATH` if you use that install location.
+
+## Testing
+
+Run the test suite from the package root:
+
+```bash
+swift test
+```
+
+Tests cover CLI parsing, invalid option combinations, missing-file handling,
+and overwrite protection. For manual benchmarking with a longer audio file,
+run without committing the file to the repo (see [spec Test
+Plan](specs/transcribe.md)).
+
 ## Usage
 
 ```text
