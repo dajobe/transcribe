@@ -2,7 +2,10 @@
 
 ## Non-obvious behaviors
 
-## Workflow
-
-* **Shell scripts:** Run `shellcheck` to validate.
-* **Markdown:** Run `format-markdown FILE` to format.
+* **WhisperKit model download:** `initializeWhisperKit` must use
+  `downloadBase` (not `modelFolder`) in `WhisperKitConfig`. Using
+  `modelFolder` tells WhisperKit the models are already present and skips
+  the download, breaking first run.
+* **Overwrite check runs twice:** Once early in `runPipeline` (fail fast
+  before expensive transcription) and again inside `writeOutputs` (guard the
+  actual write). This is intentional, not redundant code.
