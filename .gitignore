@@ -1,0 +1,35 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode (if used)
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Model cache (optional: uncomment if you want to ignore local cache)
+# .cache/
+
+# Editor / IDE
+*.swp
+*~
+.claude/
+.cursor/
+.idea/
+*.xcuserstate
+
+# Environment and secrets
+.env
+.env.local
+*.pem
+
+# Large or generated test assets (keep short fixtures in repo per spec)
+# *.m4a
+# *.mp3
+# *.wav
