@@ -180,6 +180,7 @@ func runTranscriptionOnly(
     computeOptions: RuntimeComputeOptions,
     verbose: Bool,
     wordTimestamps: Bool = false,
+    isTTY: Bool = false,
     logger: VerboseLogger? = nil
 ) async throws -> TranscriptionOutput {
     let whisperKit = try await initializeWhisperKit(
@@ -198,11 +199,27 @@ func runTranscriptionOnly(
         decodeOptions.language = lang
     }
 
-    logger?.log("Starting transcription...")
-    let results = try await whisperKit.transcribe(
-        audioArray: audioArray,
-        decodeOptions: decodeOptions
-    )
+    let liveDisplay: LiveProgressDisplay? = isTTY ? LiveProgressDisplay(showDiarizationLine: false) : nil
+
+    if !isTTY {
+        logger?.log("Starting transcription...")
+    }
+    let results: [TranscriptionResult]
+    if let display = liveDisplay {
+        results = try await whisperKit.transcribe(
+            audioArray: audioArray,
+            decodeOptions: decodeOptions
+        ) { progress in
+            Task { await display.updateTranscription(progress: progress) }
+            return nil
+        }
+        await display.finish()
+    } else {
+        results = try await whisperKit.transcribe(
+            audioArray: audioArray,
+            decodeOptions: decodeOptions
+        )
+    }
 
     let output = buildTranscriptionOutput(
         from: results,
@@ -223,6 +240,7 @@ func runTranscriptionOnly(
     computeOptions: RuntimeComputeOptions,
     verbose: Bool,
     wordTimestamps: Bool = false,
+    isTTY: Bool = false,
     logger: VerboseLogger? = nil
 ) async throws -> TranscriptionOutput {
     let preparedAudio = try loadPreparedAudio(audioPath: audioPath, logger: logger)
@@ -235,6 +253,7 @@ func runTranscriptionOnly(
         computeOptions: computeOptions,
         verbose: verbose,
         wordTimestamps: wordTimestamps,
+        isTTY: isTTY,
         logger: logger
     )
 }
@@ -291,6 +310,7 @@ func runTranscriptionWithDiarization(
     speakerStrategy: SpeakerInfoStrategy,
     computeOptions: RuntimeComputeOptions,
     verbose: Bool,
+    isTTY: Bool = false,
     logger: VerboseLogger? = nil
 ) async throws -> TranscriptionOutput {
     let preparedAudio = try loadPreparedAudio(audioPath: audioPath, logger: logger)
@@ -307,6 +327,7 @@ func runTranscriptionWithDiarization(
             computeOptions: computeOptions,
             verbose: verbose,
             wordTimestamps: false,
+            isTTY: isTTY,
             logger: logger
         )
         out.warnings.append("Audio shorter than \(Int(minDiarizationDurationSeconds))s; diarization skipped.")
@@ -346,19 +367,46 @@ func runTranscriptionWithDiarization(
     }()
     let diarizationOptions = PyannoteDiarizationOptions(numberOfSpeakers: numberOfSpeakers)
 
-    logger?.log("Starting transcription...")
-    logger?.log("Starting diarization...")
-    async let transcriptionTask: [TranscriptionResult] = whisperKit.transcribe(
-        audioArray: audioArray,
-        decodeOptions: decodeOptions
-    )
-    async let diarizationTask: DiarizationResult = speakerKit.diarize(
-        audioArray: audioArray,
-        options: diarizationOptions
-    )
+    let liveDisplay: LiveProgressDisplay? = isTTY ? LiveProgressDisplay(showDiarizationLine: true) : nil
 
-    let results = try await transcriptionTask
-    let diarizationResult = try await diarizationTask
+    if !isTTY {
+        logger?.log("Starting transcription...")
+        logger?.log("Starting diarization...")
+    }
+
+    let results: [TranscriptionResult]
+    let diarizationResult: DiarizationResult
+    if let display = liveDisplay {
+        async let transTask: [TranscriptionResult] = whisperKit.transcribe(
+            audioArray: audioArray,
+            decodeOptions: decodeOptions
+        ) { progress in
+            Task { await display.updateTranscription(progress: progress) }
+            return nil
+        }
+        async let diarTask: DiarizationResult = speakerKit.diarize(
+            audioArray: audioArray,
+            options: diarizationOptions
+        ) { progress in
+            let frac = progress.fractionCompleted
+            let count = progress.completedUnitCount
+            Task { await display.updateDiarization(fractionCompleted: frac, completedUnitCount: count) }
+        }
+        results = try await transTask
+        diarizationResult = try await diarTask
+        await display.finish()
+    } else {
+        async let transTask: [TranscriptionResult] = whisperKit.transcribe(
+            audioArray: audioArray,
+            decodeOptions: decodeOptions
+        )
+        async let diarTask: DiarizationResult = speakerKit.diarize(
+            audioArray: audioArray,
+            options: diarizationOptions
+        )
+        results = try await transTask
+        diarizationResult = try await diarTask
+    }
 
     logger?.log("Transcription complete (\(results.flatMap { $0.segments }.count) segments)")
     logger?.log("Diarization complete (\(diarizationResult.speakerCount) speakers detected)")

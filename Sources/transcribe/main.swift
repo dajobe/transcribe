@@ -190,6 +190,7 @@ struct Transcribe: AsyncParsableCommand {
             overwrite: overwrite
         )
 
+        let isTTY = isStderrTTY()
         let output: TranscriptionOutput
         if noDiarize {
             output = try await runTranscriptionOnly(
@@ -200,6 +201,7 @@ struct Transcribe: AsyncParsableCommand {
                 computeOptions: computeOptions,
                 verbose: verbose,
                 wordTimestamps: false,
+                isTTY: isTTY,
                 logger: logger
             )
         } else {
@@ -214,6 +216,7 @@ struct Transcribe: AsyncParsableCommand {
                 speakerStrategy: strategy,
                 computeOptions: computeOptions,
                 verbose: verbose,
+                isTTY: isTTY,
                 logger: logger
             )
         }

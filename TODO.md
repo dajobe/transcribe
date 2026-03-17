@@ -34,7 +34,7 @@ the download begins.
   directly: create manager, call `downloadModels(progressCallback:)`, then
   `SpeakerKit(models: manager.models!)`.
 
-## Live transcription/diarization progress
+## Live transcription/diarization progress (done)
 
 Show live progress during transcription and diarization when stderr is a
 TTY, so the user has a sense of when things will finish. Fall back to simple
