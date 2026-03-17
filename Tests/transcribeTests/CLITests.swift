@@ -31,7 +31,8 @@ final class CLITests: XCTestCase {
         process.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8) ?? ""
-        XCTAssertTrue(output.contains("0.1.0"), "Version output should contain 0.1.0, got: \(output)")
+        XCTAssertTrue(output.range(of: #"^\d+\.\d+\.\d+\s*$"#, options: .regularExpression) != nil,
+                      "Version output should be a semver string, got: \(output)")
         XCTAssertEqual(process.terminationStatus, 0)
     }
 

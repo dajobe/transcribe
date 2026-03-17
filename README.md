@@ -160,7 +160,7 @@ the infrastructure migration timeline.
     "diarization_enabled": true,
     "speaker_strategy": "subsegment",
     "speakers_detected": 2,
-    "transcribe_version": "0.1.0",
+    "transcribe_version": "X.Y.Z",
     "created_at": "2026-03-16T19:30:00Z"
   },
   "warnings": [],
@@ -185,6 +185,17 @@ the infrastructure migration timeline.
 | 3    | Input file problem                       |
 | 4    | Model download or initialization failure |
 | 5    | Output write failure                     |
+
+## Releasing
+
+The version is defined in `Sources/transcribe/main.swift` and extracted by
+the Makefile. To release a new version:
+
+1. Update `static let version` in `Sources/transcribe/main.swift`
+2. Commit the version bump
+3. Run `make release` to build and create an annotated git tag
+4. Push: `git push && git push origin vX.Y.Z`
+5. Run `make changelog` to generate release notes from the commit log
 
 ## License
 

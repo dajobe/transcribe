@@ -48,7 +48,7 @@ final class OutputWriterTests: XCTestCase {
             output: output,
             audioFile: "/tmp/sample.wav",
             model: "large-v3",
-            version: "0.1.0"
+            version: Transcribe.version
         )
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let metadata = try XCTUnwrap(json["metadata"] as? [String: Any])
