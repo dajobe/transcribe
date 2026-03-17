@@ -75,7 +75,7 @@ transcribe meeting.mp3 \
 
 | Option                    | Description                                                                                |
 |---------------------------|--------------------------------------------------------------------------------------------|
-| `-m, --model <name>`      | Whisper model (default: `large-v3`)                                                        |
+| `-m, --model <name>`      | Whisper model (default: auto-select for device)                                            |
 | `-l, --language <code>`   | Language code (default: auto-detect)                                                       |
 | `-o, --output-dir <path>` | Output directory (default: `.`)                                                            |
 | `-f, --format <fmt>`      | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `all` (default: `txt,json`) |
@@ -188,4 +188,21 @@ the infrastructure migration timeline.
 
 ## License
 
-TBD
+This project is licensed under the [MIT License](LICENSE).
+
+### Dependency licenses
+
+| Dependency | License |
+|---|---|
+| [WhisperKit](https://github.com/argmaxinc/WhisperKit) | MIT |
+| [SpeakerKit](https://github.com/argmaxinc/WhisperKit) | MIT |
+| [swift-argument-parser](https://github.com/apple/swift-argument-parser) | Apache 2.0 |
+
+Speaker diarization uses
+[pyannote](https://github.com/pyannote/pyannote-audio) community models
+licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/).
+Attribution:
+
+> Plaquet, A., & Bredin, H. (2023). Powering speaker diarization by
+> multi-scale neural embeddings and non-autoregressive clustering.
+> *IEEE ICASSP 2023*.
