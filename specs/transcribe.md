@@ -134,6 +134,11 @@ supported formats in `--help` output and error messages.
   enabled.
 - If both `--min-speakers` and `--max-speakers` are provided, `min <= max`
   is required.
+- If both `--min-speakers` and `--max-speakers` are provided and equal, the
+  tool passes a fixed speaker-count hint to SpeakerKit.
+- If only one bound is provided, or if `min < max`, the tool runs
+  diarization without a fixed count hint and warns when the detected speaker
+  count falls outside the requested range.
 - If `--max-speakers` is omitted, no upper bound is applied.
 - If output files already exist and `--overwrite` is not set, the command
   must fail before starting expensive work.
@@ -303,6 +308,7 @@ can still be delivered.
 | Audio too short for diarization | Warn to stderr, skip diarization, continue with transcription-only output |
 | Diarization returns no speakers | Continue with transcript-only output, set `speaker` to `null`, record warning |
 | Diarization returns fewer than `--min-speakers` | Continue with detected count, warn to stderr, record warning |
+| Diarization returns more than `--max-speakers` when no fixed speaker-count hint was available | Continue with detected count, warn to stderr, record warning |
 | No speech detected | Produce valid empty output files and warn to stderr |
 | Requested diarization but SpeakerKit unavailable after init failure | Fail with exit code `4` |
 

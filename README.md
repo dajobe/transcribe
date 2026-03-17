@@ -31,9 +31,9 @@ swift test
 ```
 
 Tests cover CLI parsing, invalid option combinations, missing-file handling,
-and overwrite protection. For manual benchmarking with a longer audio file,
-run without committing the file to the repo (see [spec Test
-Plan](specs/transcribe.md)).
+output rendering, atomic writes, and overwrite protection. For manual
+benchmarking with a longer audio file, run without committing the file to
+the repo (see [spec Test Plan](specs/transcribe.md)).
 
 ## Usage
 
@@ -74,6 +74,11 @@ transcribe interview.wav --stdout --format txt,json -o ./transcripts
 | `--overwrite`             | Replace existing output files                                                              |
 | `--verbose`               | Print progress and timing to stderr                                                        |
 
+When SpeakerKit can accept an exact speaker count hint, `transcribe` passes
+it only when `--min-speakers` and `--max-speakers` are both set to the same
+value. Otherwise diarization runs unconstrained and warns if the detected
+count falls outside the requested bounds.
+
 ### Supported Audio Formats
 
 `mp3`, `wav`, `m4a`, `flac`
@@ -100,6 +105,14 @@ the infrastructure migration timeline.
 SPEAKER_1 [00:00:13 - 00:00:28]
 Sure, happy to be here. We've been looking at the Q2 window for
 the cutover, but there are some dependencies I want to flag.
+```
+
+Without diarization, speaker labels are omitted but time ranges remain:
+
+```text
+[00:00:00 - 00:00:12]
+Welcome, thanks for joining. I wanted to start by talking about
+the infrastructure migration timeline.
 ```
 
 ### JSON output
