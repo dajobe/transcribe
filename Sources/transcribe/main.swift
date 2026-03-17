@@ -23,8 +23,8 @@ struct Transcribe: AsyncParsableCommand {
     @Argument(help: "Path to the input audio file")
     var audioFile: String
 
-    @Option(name: [.short, .long], help: "Whisper model to use (default: large-v3)")
-    var model: String = "large-v3"
+    @Option(name: [.short, .long], help: "Whisper model to use (default: auto-select for device)")
+    var model: String?
 
     @Option(name: [.short, .long], help: "Language code such as \"en\"; default is auto-detect")
     var language: String?
@@ -89,6 +89,19 @@ struct Transcribe: AsyncParsableCommand {
         }
     }
 
+    /// Resolves the whisper model name: uses explicit value if provided,
+    /// otherwise asks WhisperKit for the recommended model for this device.
+    private func resolveModel(explicit: String?, logger: VerboseLogger) async throws -> String {
+        if let explicit {
+            logger.log("Using model: \(explicit)")
+            return explicit
+        }
+        let recommended = WhisperKit.recommendedModels()
+        let modelName = recommended.default
+        logger.log("Auto-selected model: \(modelName)")
+        return modelName
+    }
+
     /// Validates options and combinations; invalid usage throws with exit code 2.
     private func validateUsage() throws {
         let formats = resolvedFormats
@@ -136,6 +149,8 @@ struct Transcribe: AsyncParsableCommand {
         let startDate = Date()
         let logger = VerboseLogger(verbose: verbose, startDate: startDate)
 
+        let resolvedModel = try await resolveModel(explicit: model, logger: logger)
+
         let basename = outputBasename(audioPath: audioFile)
         try checkOverwrite(
             outputDir: outputDir,
@@ -149,7 +164,7 @@ struct Transcribe: AsyncParsableCommand {
         if noDiarize {
             output = try await runTranscriptionOnly(
                 audioPath: audioFile,
-                model: model,
+                model: resolvedModel,
                 modelDir: modelDir,
                 language: language,
                 verbose: verbose,
@@ -160,7 +175,7 @@ struct Transcribe: AsyncParsableCommand {
             let strategy = SpeakerInfoStrategy(from: speakerStrategy) ?? .subsegment
             output = try await runTranscriptionWithDiarization(
                 audioPath: audioFile,
-                model: model,
+                model: resolvedModel,
                 modelDir: modelDir,
                 language: language,
                 minSpeakers: minSpeakers,
@@ -187,7 +202,7 @@ struct Transcribe: AsyncParsableCommand {
             formats: resolvedFormats,
             writeTxtToStdout: wantsTxt && stdout,
             overwrite: overwrite,
-            model: model,
+            model: resolvedModel,
             version: Self.version
         )
 
