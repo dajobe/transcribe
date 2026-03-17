@@ -40,9 +40,10 @@ func initializeWhisperKit(
     logger: VerboseLogger? = nil
 ) async throws -> WhisperKit {
     let expandedModelDir = (modelDir as NSString).expandingTildeInPath
+    let modelDirURL = URL(fileURLWithPath: expandedModelDir)
     let config = WhisperKitConfig(
         model: model,
-        modelFolder: expandedModelDir,
+        downloadBase: modelDirURL,
         verbose: verbose,
         load: true,
         download: true
