@@ -20,6 +20,10 @@ swift build -c release
 cp .build/release/transcribe ~/.local/bin/
 ```
 
+The optimized binary is written to `.build/release/transcribe`. Use the
+release build for normal transcription runs; debug builds are primarily for
+development and can be slower.
+
 Ensure `~/.local/bin` is on your `PATH` if you use that install location.
 
 ## Testing
@@ -44,6 +48,9 @@ transcribe <audio-file> [options]
 ### Examples
 
 ```bash
+# Run the optimized release build directly
+.build/release/transcribe meeting.mp3
+
 # Transcribe with speaker diarization, output txt + json
 transcribe meeting.mp3
 
@@ -55,6 +62,13 @@ transcribe lecture.m4a --no-diarize --model medium
 
 # Transcript to stdout and JSON to disk
 transcribe interview.wav --stdout --format txt,json -o ./transcripts
+
+# Override compute units explicitly
+transcribe meeting.mp3 \
+  --audio-encoder-compute cpuAndGPU \
+  --text-decoder-compute cpuAndGPU \
+  --segmenter-compute cpuAndGPU \
+  --embedder-compute cpuAndGPU
 ```
 
 ### Options
@@ -73,11 +87,21 @@ transcribe interview.wav --stdout --format txt,json -o ./transcripts
 | `--model-dir <path>`      | Model cache directory (default: `~/.cache/transcribe`)                                     |
 | `--overwrite`             | Replace existing output files                                                              |
 | `--verbose`               | Print progress and timing to stderr                                                        |
+| `--audio-encoder-compute <units>` | Whisper audio encoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine` |
+| `--text-decoder-compute <units>`  | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
+| `--segmenter-compute <units>`     | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`   |
+| `--embedder-compute <units>`      | SpeakerKit embedder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`    |
 
 When SpeakerKit can accept an exact speaker count hint, `transcribe` passes
 it only when `--min-speakers` and `--max-speakers` are both set to the same
 value. Otherwise diarization runs unconstrained and warns if the detected
 count falls outside the requested bounds.
+
+By default, `auto` now prefers GPU/Metal-backed Core ML for both WhisperKit
+and SpeakerKit when that backend is available. If a model cannot be loaded
+with the preferred GPU setting, `transcribe` falls back to a compatible
+backend for that kit. Use `--verbose` to print the selected compute backend
+for WhisperKit and SpeakerKit.
 
 ### Supported Audio Formats
 
