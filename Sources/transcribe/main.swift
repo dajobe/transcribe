@@ -29,8 +29,14 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: [.short, .long], help: "Language code such as \"en\"; default is auto-detect")
     var language: String?
 
-    @Option(name: [.short, .long], help: "Directory for output files (default: current directory)")
+    @Option(
+        name: [.short, .long],
+        help: "Directory for output files (default: current directory). ~ expands to your home directory (not /tmp)."
+    )
     var outputDir: String = "."
+
+    @Option(name: .long, help: "Output file prefix (default: input filename without extension)")
+    var outputPrefix: String?
 
     @Option(name: [.short, .long], help: "Output formats, comma-separated: txt, json, srt, vtt, all (default: txt,json)")
     var format: String = "txt,json"
@@ -181,7 +187,7 @@ struct Transcribe: AsyncParsableCommand {
 
         let resolvedModel = try await resolveModel(explicit: model, logger: logger)
 
-        let basename = outputBasename(audioPath: audioFile)
+        let basename = outputPrefix ?? outputBasename(audioPath: audioFile)
         try checkOverwrite(
             outputDir: outputDir,
             basename: basename,
@@ -228,12 +234,14 @@ struct Transcribe: AsyncParsableCommand {
         }
 
         let outputFiles = resolvedFormats.filter { fmt in fmt != "txt" || !stdout }.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
-        logger.log("Writing outputs: \(outputFiles)")
+        let resolvedDir = resolvedOutputDir(outputDir)
+        logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
 
         try writeOutputs(
             output: out,
             audioPath: audioFile,
             outputDir: outputDir,
+            basename: basename,
             formats: resolvedFormats,
             writeTxtToStdout: wantsTxt && stdout,
             overwrite: overwrite,

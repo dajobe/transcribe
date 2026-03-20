@@ -225,6 +225,7 @@ func writeOutputs(
     output: TranscriptionOutput,
     audioPath: String,
     outputDir: String,
+    basename: String,
     formats: [String],
     writeTxtToStdout: Bool,
     overwrite: Bool,
@@ -232,7 +233,6 @@ func writeOutputs(
     version: String
 ) throws {
     let dir = resolvedOutputDir(outputDir)
-    let basename = outputBasename(audioPath: audioPath)
 
     if !FileManager.default.fileExists(atPath: dir) {
         do {
