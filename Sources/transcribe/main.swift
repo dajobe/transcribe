@@ -8,7 +8,7 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
-    static let version = "1.0.2"
+    static let version = "1.1.0"
 
     static var configuration = CommandConfiguration(
         abstract: "On-device meeting transcription with optional speaker diarization.",
@@ -65,6 +65,15 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Print progress, timing, and cache details to stderr")
     var verbose: Bool = false
 
+    @Flag(name: .long, help: "Do not record timing statistics or use prior runs for ETA hints")
+    var noTimingStats: Bool = false
+
+    @Flag(
+        name: .long,
+        help: "Log progress/ETA as plain stderr lines (throttled to ~1/s) for testing without a TTY; use with a pipe or file"
+    )
+    var debugProgressLog: Bool = false
+
     @Option(
         name: .long,
         help: "Whisper audio encoder compute units; auto selects the recommended backend mix"
@@ -101,6 +110,13 @@ struct Transcribe: AsyncParsableCommand {
     /// True if txt is among requested output formats.
     var wantsTxt: Bool {
         resolvedFormats.contains("txt")
+    }
+
+    /// Timing history for ETA (unless `--no-timing-stats` or `TRANSCRIBE_TIMING_STATS=0`).
+    private var timingStatsEnabled: Bool {
+        if noTimingStats { return false }
+        if ProcessInfo.processInfo.environment["TRANSCRIBE_TIMING_STATS"] == "0" { return false }
+        return true
     }
 
     func run() async throws {
@@ -187,6 +203,14 @@ struct Transcribe: AsyncParsableCommand {
 
         let resolvedModel = try await resolveModel(explicit: model, logger: logger)
 
+        let historicalRatio: Double? = {
+            guard timingStatsEnabled else { return nil }
+            guard let recs = try? TimingStore.loadRecent(model: resolvedModel, diarizationEnabled: !noDiarize) else {
+                return nil
+            }
+            return TimingStore.medianWallSecondsPerAudioSecond(records: recs)
+        }()
+
         let basename = outputPrefix ?? outputBasename(audioPath: audioFile)
         try checkOverwrite(
             outputDir: outputDir,
@@ -196,10 +220,15 @@ struct Transcribe: AsyncParsableCommand {
             overwrite: overwrite
         )
 
-        let isTTY = isStderrTTY()
+        let liveProgressMode: LiveProgressRenderMode? = {
+            if debugProgressLog { return .lineLog(minInterval: 1.0) }
+            if isStderrTTY() { return .tty }
+            return nil
+        }()
         let output: TranscriptionOutput
+        var phases: PhaseTimings
         if noDiarize {
-            output = try await runTranscriptionOnly(
+            let (out, ph) = try await runTranscriptionOnly(
                 audioPath: audioFile,
                 model: resolvedModel,
                 modelDir: modelDir,
@@ -207,12 +236,16 @@ struct Transcribe: AsyncParsableCommand {
                 computeOptions: computeOptions,
                 verbose: verbose,
                 wordTimestamps: false,
-                isTTY: isTTY,
+                liveProgressMode: liveProgressMode,
+                pipelineStartDate: startDate,
+                historicalWallSecondsPerAudioSecond: historicalRatio,
                 logger: logger
             )
+            output = out
+            phases = ph
         } else {
             let strategy = SpeakerInfoStrategy(from: speakerStrategy) ?? .subsegment
-            output = try await runTranscriptionWithDiarization(
+            let (out, ph) = try await runTranscriptionWithDiarization(
                 audioPath: audioFile,
                 model: resolvedModel,
                 modelDir: modelDir,
@@ -222,9 +255,13 @@ struct Transcribe: AsyncParsableCommand {
                 speakerStrategy: strategy,
                 computeOptions: computeOptions,
                 verbose: verbose,
-                isTTY: isTTY,
+                liveProgressMode: liveProgressMode,
+                pipelineStartDate: startDate,
+                historicalWallSecondsPerAudioSecond: historicalRatio,
                 logger: logger
             )
+            output = out
+            phases = ph
         }
 
         var out = output
@@ -237,19 +274,44 @@ struct Transcribe: AsyncParsableCommand {
         let resolvedDir = resolvedOutputDir(outputDir)
         logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
 
-        try writeOutputs(
-            output: out,
-            audioPath: audioFile,
-            outputDir: outputDir,
-            basename: basename,
-            formats: resolvedFormats,
-            writeTxtToStdout: wantsTxt && stdout,
-            overwrite: overwrite,
-            model: resolvedModel,
-            version: Self.version
-        )
+        let (_, writeMs) = try WallClock.measureMs {
+            try writeOutputs(
+                output: out,
+                audioPath: audioFile,
+                outputDir: outputDir,
+                basename: basename,
+                formats: resolvedFormats,
+                writeTxtToStdout: wantsTxt && stdout,
+                overwrite: overwrite,
+                model: resolvedModel,
+                version: Self.version
+            )
+        }
 
-        let totalSec = Int(Date().timeIntervalSince(startDate))
+        let endedAt = Date()
+        let totalMs = Int64(endedAt.timeIntervalSince(startDate) * 1000.0)
+
+        if timingStatsEnabled {
+            let expanded = (audioFile as NSString).expandingTildeInPath
+            let fileBytes = (try? FileManager.default.attributesOfItem(atPath: expanded)[.size] as? NSNumber)?.int64Value ?? 0
+            let record = RunTimingRecord(
+                endedAt: endedAt,
+                transcribeVersion: Self.version,
+                model: resolvedModel,
+                diarizationEnabled: out.diarizationEnabled,
+                inputBasename: (audioFile as NSString).lastPathComponent,
+                fileBytes: fileBytes,
+                audioDurationS: out.durationSeconds,
+                segmentCount: out.segments.count,
+                speakersDetected: out.speakersDetected,
+                phases: phases,
+                writeOutputsMs: writeMs,
+                totalMs: totalMs
+            )
+            try? TimingStore.append(record)
+        }
+
+        let totalSec = Int(endedAt.timeIntervalSince(startDate))
         logger.log("Done. Total: \(totalSec / 60)m \(totalSec % 60)s")
     }
 }

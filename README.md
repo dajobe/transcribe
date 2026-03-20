@@ -87,6 +87,8 @@ transcribe meeting.mp3 \
 | `--model-dir <path>`      | Model cache directory (default: `~/.cache/transcribe`)                                     |
 | `--overwrite`             | Replace existing output files                                                              |
 | `--verbose`               | Print progress and timing to stderr                                                        |
+| `--debug-progress-log`    | Log progress/ETA as plain stderr lines (~1/s) without a TTY (e.g. capture to a file or pipe) |
+| `--no-timing-stats`       | Do not save timing history or use prior runs for ETA hints on the transcription line       |
 | `--audio-encoder-compute <units>` | Whisper audio encoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine` |
 | `--text-decoder-compute <units>`  | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
 | `--segmenter-compute <units>`     | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`   |
@@ -102,6 +104,13 @@ SpeakerKit model. On Apple Silicon this typically means a combination of
 GPU, Neural Engine, and CPU rather than forcing every component onto the
 GPU. Use `--verbose` to print the selected compute backend for WhisperKit
 and SpeakerKit.
+
+### Timing statistics
+
+Successful runs can append timing records for ETA hints on the **transcription**
+progress line. Disable with `--no-timing-stats` or `TRANSCRIBE_TIMING_STATS=0`.
+
+Full schema, paths, and ETA behavior: **[specs/timing-history.md](specs/timing-history.md)**.
 
 ### Performance
 
