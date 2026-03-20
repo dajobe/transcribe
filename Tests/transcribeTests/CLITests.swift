@@ -83,4 +83,46 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(process.terminationStatus, 2, "speaker options with --no-diarize should exit 2")
         XCTAssertTrue(stderr.contains("only valid when diarization is enabled"), "stderr should explain the invalid combination")
     }
+
+    func testEmptyFormatExitTwo() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["/tmp/any.wav", "--format", ""]
+        let pipe = Pipe()
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let stderr = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 2, "empty --format should exit 2")
+        XCTAssertTrue(stderr.contains("--format must include at least one"), "stderr should explain the empty format list")
+    }
+
+    func testZeroMinSpeakersExitTwo() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["/tmp/any.wav", "--min-speakers", "0"]
+        let pipe = Pipe()
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let stderr = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 2, "zero --min-speakers should exit 2")
+        XCTAssertTrue(stderr.contains("--min-speakers must be greater than 0"), "stderr should explain the invalid speaker count")
+    }
+
+    func testNegativeMaxSpeakersExitTwo() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["/tmp/any.wav", "--max-speakers=-1"]
+        let pipe = Pipe()
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let stderr = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 2, "negative --max-speakers should exit 2")
+        XCTAssertTrue(stderr.contains("--max-speakers must be greater than 0"), "stderr should explain the invalid speaker count")
+    }
 }

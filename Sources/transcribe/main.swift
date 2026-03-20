@@ -100,11 +100,7 @@ struct Transcribe: AsyncParsableCommand {
 
     /// Resolved list of output formats (txt, json, srt, vtt).
     var resolvedFormats: [String] {
-        let f = format.lowercased().trimmingCharacters(in: .whitespaces)
-        if f == "all" {
-            return ["txt", "json", "srt", "vtt"]
-        }
-        return f.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        parseOutputFormats(format)
     }
 
     /// True if txt is among requested output formats.
@@ -151,9 +147,14 @@ struct Transcribe: AsyncParsableCommand {
     /// Validates options and combinations; invalid usage throws with exit code 2.
     private func validateUsage() throws {
         let formats = resolvedFormats
-        let validFormats = Set(["txt", "json", "srt", "vtt"])
+        if formats.isEmpty {
+            throw TranscribeError(
+                message: "--format must include at least one of: txt, json, srt, vtt, all.",
+                exitCode: .invalidUsage
+            )
+        }
         for f in formats {
-            if !validFormats.contains(f) {
+            if !validOutputFormats.contains(f) {
                 throw TranscribeError(
                     message: "Unsupported format '\(f)'. Supported: txt, json, srt, vtt, all.",
                     exitCode: .invalidUsage
@@ -179,6 +180,20 @@ struct Transcribe: AsyncParsableCommand {
         if noDiarize && (minSpeakers != nil || maxSpeakers != nil) {
             throw TranscribeError(
                 message: "--min-speakers and --max-speakers are only valid when diarization is enabled.",
+                exitCode: .invalidUsage
+            )
+        }
+
+        if let min = minSpeakers, min <= 0 {
+            throw TranscribeError(
+                message: "--min-speakers must be greater than 0.",
+                exitCode: .invalidUsage
+            )
+        }
+
+        if let max = maxSpeakers, max <= 0 {
+            throw TranscribeError(
+                message: "--max-speakers must be greater than 0.",
                 exitCode: .invalidUsage
             )
         }
