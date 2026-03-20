@@ -8,7 +8,7 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
-    static let version = "1.0.1"
+    static let version = "1.0.2"
 
     static var configuration = CommandConfiguration(
         abstract: "On-device meeting transcription with optional speaker diarization.",
@@ -31,14 +31,14 @@ struct Transcribe: AsyncParsableCommand {
 
     @Option(
         name: [.short, .long],
-        help: "Directory for output files (default: current directory). ~ expands to your home directory (not /tmp)."
+        help: "Directory for output files. ~ expands to your home directory (not /tmp)."
     )
     var outputDir: String = "."
 
     @Option(name: .long, help: "Output file prefix (default: input filename without extension)")
     var outputPrefix: String?
 
-    @Option(name: [.short, .long], help: "Output formats, comma-separated: txt, json, srt, vtt, all (default: txt,json)")
+    @Option(name: [.short, .long], help: "Output formats, comma-separated: txt, json, srt, vtt, all")
     var format: String = "txt,json"
 
     @Flag(help: "Write the primary transcript to stdout instead of a text file")
@@ -53,10 +53,10 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Disable diarization and produce transcript-only output")
     var noDiarize: Bool = false
 
-    @Option(name: .long, help: "Speaker merge strategy: subsegment or segment (default: subsegment)")
+    @Option(name: .long, help: "Speaker merge strategy: subsegment or segment")
     var speakerStrategy: String = "subsegment"
 
-    @Option(name: .long, help: "Directory used for downloaded model caches (default: ~/.cache/transcribe)")
+    @Option(name: .long, help: "Directory used for downloaded model caches")
     var modelDir: String = "~/.cache/transcribe"
 
     @Flag(help: "Replace existing output files")
@@ -67,25 +67,25 @@ struct Transcribe: AsyncParsableCommand {
 
     @Option(
         name: .long,
-        help: "Compute units for the Whisper audio encoder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto uses the recommended backend mix)"
+        help: "Whisper audio encoder compute units; auto selects the recommended backend mix"
     )
     var audioEncoderCompute: ComputeUnitsOption = .auto
 
     @Option(
         name: .long,
-        help: "Compute units for the Whisper text decoder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto uses the recommended backend mix)"
+        help: "Whisper text decoder compute units; auto selects the recommended backend mix"
     )
     var textDecoderCompute: ComputeUnitsOption = .auto
 
     @Option(
         name: .long,
-        help: "Compute units for the SpeakerKit segmenter: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto uses the recommended backend mix)"
+        help: "SpeakerKit segmenter compute units; auto selects the recommended backend mix"
     )
     var segmenterCompute: ComputeUnitsOption = .auto
 
     @Option(
         name: .long,
-        help: "Compute units for the SpeakerKit embedder: auto, all, cpuOnly, cpuAndGPU, cpuAndNeuralEngine (default: auto uses the recommended backend mix)"
+        help: "SpeakerKit embedder compute units; auto selects the recommended backend mix"
     )
     var embedderCompute: ComputeUnitsOption = .auto
 

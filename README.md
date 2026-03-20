@@ -77,7 +77,7 @@ transcribe meeting.mp3 \
 |---------------------------|--------------------------------------------------------------------------------------------|
 | `-m, --model <name>`      | Whisper model (default: auto-select for device)                                            |
 | `-l, --language <code>`   | Language code (default: auto-detect)                                                       |
-| `-o, --output-dir <path>` | Output directory (default: `.`)                                                            |
+| `-o, --output-dir <path>` | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                  |
 | `-f, --format <fmt>`      | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `all` (default: `txt,json`) |
 | `--stdout`                | Write transcript text to stdout instead of a file                                          |
 | `--min-speakers <n>`      | Minimum speakers for diarization                                                           |
