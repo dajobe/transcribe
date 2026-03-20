@@ -73,8 +73,16 @@ struct RuntimeComputeOptions {
             textDecoderCompute: textDecoder.resolvedValue ?? whisperDefaults.textDecoderCompute
         )
         let whisperFallback = ModelComputeOptions(
-            audioEncoderCompute: audioEncoder.resolvedValue ?? whisperDefaults.audioEncoderCompute,
-            textDecoderCompute: textDecoder.resolvedValue ?? whisperDefaults.textDecoderCompute
+            melCompute: .cpuOnly,
+            audioEncoderCompute: fallbackComputeUnit(
+                for: audioEncoder,
+                preferred: whisperPreferred.audioEncoderCompute
+            ),
+            textDecoderCompute: fallbackComputeUnit(
+                for: textDecoder,
+                preferred: whisperPreferred.textDecoderCompute
+            ),
+            prefillCompute: .cpuOnly
         )
 
         let speakerPreferred = SpeakerComputeOptions(
@@ -82,8 +90,8 @@ struct RuntimeComputeOptions {
             embedder: embedder.resolvedValue ?? speakerEmbedderDefault
         )
         let speakerFallback = SpeakerComputeOptions(
-            segmenter: segmenter.resolvedValue ?? speakerSegmenterDefault,
-            embedder: embedder.resolvedValue ?? speakerEmbedderDefault
+            segmenter: fallbackComputeUnit(for: segmenter, preferred: speakerPreferred.segmenter),
+            embedder: fallbackComputeUnit(for: embedder, preferred: speakerPreferred.embedder)
         )
 
         return RuntimeComputeOptions(
@@ -96,6 +104,13 @@ struct RuntimeComputeOptions {
 
     static func whisperSummary(_ whisper: ModelComputeOptions) -> String {
         "mel=\(whisper.melCompute.displayName), encoder=\(whisper.audioEncoderCompute.displayName), decoder=\(whisper.textDecoderCompute.displayName), prefill=\(whisper.prefillCompute.displayName)"
+    }
+
+    private static func fallbackComputeUnit(
+        for option: ComputeUnitsOption,
+        preferred: MLComputeUnits
+    ) -> MLComputeUnits {
+        option == .auto ? .cpuOnly : preferred
     }
 }
 
