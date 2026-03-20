@@ -227,12 +227,12 @@ func runTranscriptionOnly(
                 audioArray: audioArray,
                 decodeOptions: decodeOptions
             ) { progress in
-                Task { await display.updateTranscription(progress: progress) }
+                display.updateTranscription(progress: progress)
                 return nil
             }
         }
         phases.transcribeOnlyMs = tMs
-        phases.decodingWindows = await display.finish()
+        phases.decodingWindows = display.finish()
         results = res
     } else {
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
@@ -440,7 +440,7 @@ func runTranscriptionWithDiarization(
                 audioArray: audioArray,
                 decodeOptions: decodeOptions
             ) { progress in
-                Task { await display.updateTranscription(progress: progress) }
+                display.updateTranscription(progress: progress)
                 return nil
             }
             async let diarTask: DiarizationResult = speakerKit.diarize(
@@ -449,14 +449,14 @@ func runTranscriptionWithDiarization(
             ) { progress in
                 let frac = progress.fractionCompleted
                 let count = progress.completedUnitCount
-                Task { await display.updateDiarization(fractionCompleted: frac, completedUnitCount: count) }
+                display.updateDiarization(fractionCompleted: frac, completedUnitCount: count)
             }
             let r = try await transTask
             let d = try await diarTask
             return (r, d)
         }
         phases.parallelMs = pMs
-        phases.decodingWindows = await display.finish()
+        phases.decodingWindows = display.finish()
         results = pair.0
         diarizationResult = pair.1
     } else {

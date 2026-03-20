@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Append-only JSON Lines store and helpers for ETA prediction.
 enum TimingStore {
@@ -16,14 +19,7 @@ enum TimingStore {
         }
         line.append("\n")
         guard let out = line.data(using: .utf8) else { return }
-        if FileManager.default.fileExists(atPath: url.path) {
-            let handle = try FileHandle(forWritingTo: url)
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: out)
-        } else {
-            try out.write(to: url)
-        }
+        try appendLine(out, to: url)
     }
 
     /// Reads up to `limit` recent records matching model and diarization flag (newest last).
@@ -64,4 +60,44 @@ enum TimingStore {
         }
         return (sorted[mid - 1] + sorted[mid]) / 2.0
     }
+}
+
+private func appendLine(_ data: Data, to url: URL) throws {
+#if canImport(Darwin)
+    let fd = open(url.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o644))
+    guard fd >= 0 else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+    }
+    defer { close(fd) }
+
+    guard flock(fd, LOCK_EX) == 0 else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+    }
+    defer { flock(fd, LOCK_UN) }
+
+    try data.withUnsafeBytes { buffer in
+        guard let baseAddress = buffer.baseAddress else { return }
+        var bytesRemaining = buffer.count
+        var offset = 0
+
+        while bytesRemaining > 0 {
+            let bytesWritten = write(fd, baseAddress.advanced(by: offset), bytesRemaining)
+            if bytesWritten < 0 {
+                throw POSIXError(.init(rawValue: errno) ?? .EIO)
+            }
+
+            bytesRemaining -= bytesWritten
+            offset += bytesWritten
+        }
+    }
+#else
+    if FileManager.default.fileExists(atPath: url.path) {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+    } else {
+        try data.write(to: url)
+    }
+#endif
 }

@@ -28,11 +28,12 @@ private let clearToEndOfLine = "\(esc)[K"
 private let cursorUp = "\(esc)[A"
 
 /// Live progress for transcription (and optionally diarization): TTY in-place redraw or line-log mode for pipes/tests.
-/// Updates are serialized via the actor so concurrent callbacks do not interleave output.
+/// Updates are serialized on a private queue so sync progress callbacks can safely forward updates.
 /// Both lines are formatted at redraw time so elapsed (and ETA) always use current time.
-actor LiveProgressDisplay {
+final class LiveProgressDisplay {
     private let startDate: Date
     private let stderr: FileHandle
+    private let queue = DispatchQueue(label: "transcribe.live-progress")
     private var transcriptionWindows: Int = 0
     private var diarizationFraction: Double?
     private var diarizationUnitCount: Int64?
@@ -43,6 +44,7 @@ actor LiveProgressDisplay {
     private let renderMode: LiveProgressRenderMode
     private var lastLineLogEmit: Date?
     private var lastLineLogSignature: String?
+    private var isFinished: Bool = false
 
     /// - Parameters:
     ///   - startDate: Pipeline start (elapsed includes load/init when set from `runPipeline`).
@@ -67,32 +69,45 @@ actor LiveProgressDisplay {
 
     /// Update the transcription line from WhisperKit progress (windows done).
     func updateTranscription(progress: TranscriptionProgress) {
-        transcriptionWindows = Int(progress.timings.totalDecodingWindows)
-        redraw()
+        queue.async {
+            guard !self.isFinished else { return }
+            self.transcriptionWindows = Int(progress.timings.totalDecodingWindows)
+            self.redraw()
+        }
     }
 
     /// Update the diarization line from SpeakerKit Progress (fractionCompleted, phase hint).
-    /// Takes scalar values to avoid Sendable issues when called from progressCallback.
+    /// Takes scalar values to avoid type-capture issues when called from progressCallback.
     func updateDiarization(fractionCompleted: Double, completedUnitCount: Int64) {
-        guard showDiarizationLine else { return }
-        diarizationFraction = fractionCompleted
-        diarizationUnitCount = completedUnitCount
-        redraw()
+        queue.async {
+            guard self.showDiarizationLine, !self.isFinished else { return }
+            self.diarizationFraction = fractionCompleted
+            self.diarizationUnitCount = completedUnitCount
+            self.redraw()
+        }
     }
 
     /// Clear the progress lines and leave cursor after them so subsequent output is clean.
     /// Returns last observed decoding window count (for timing records).
     func finish() -> Int? {
-        switch renderMode {
-        case .lineLog:
-            emitLineLogSnapshot(throttled: false)
-            stderr.write("\n".data(using: .utf8)!)
-        case .tty:
-            redrawTTY(clearOnly: true)
-            stderr.write("\n".data(using: .utf8)!)
+        queue.sync {
+            guard !isFinished else {
+                let windows = transcriptionWindows
+                return windows > 0 ? windows : nil
+            }
+
+            isFinished = true
+            switch renderMode {
+            case .lineLog:
+                emitLineLogSnapshot(throttled: false)
+                stderr.write("\n".data(using: .utf8)!)
+            case .tty:
+                redrawTTY(clearOnly: true)
+                stderr.write("\n".data(using: .utf8)!)
+            }
+            let windows = transcriptionWindows
+            return windows > 0 ? windows : nil
         }
-        let w = transcriptionWindows
-        return w > 0 ? w : nil
     }
 
     private func formatElapsed(since date: Date) -> String {

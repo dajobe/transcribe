@@ -21,8 +21,8 @@ final class LiveProgressTests: XCTestCase {
         defer { writeHandle.closeFile() }
 
         let display = LiveProgressDisplay(stderr: writeHandle, showDiarizationLine: true)
-        await display.updateDiarization(fractionCompleted: 0.5, completedUnitCount: 40)
-        _ = await display.finish()
+        display.updateDiarization(fractionCompleted: 0.5, completedUnitCount: 40)
+        _ = display.finish()
         writeHandle.closeFile()
 
         var data = Data()
@@ -46,8 +46,8 @@ final class LiveProgressTests: XCTestCase {
         defer { writeHandle.closeFile() }
 
         let display = LiveProgressDisplay(stderr: writeHandle, showDiarizationLine: false)
-        await display.updateDiarization(fractionCompleted: 0.25, completedUnitCount: 20)
-        _ = await display.finish()
+        display.updateDiarization(fractionCompleted: 0.25, completedUnitCount: 20)
+        _ = display.finish()
         writeHandle.closeFile()
 
         var data = Data()
@@ -82,9 +82,9 @@ final class LiveProgressTests: XCTestCase {
             historicalWallSecondsPerAudioSecond: 0.1,
             renderMode: .lineLog(minInterval: 0)
         )
-        await display.updateTranscription(progress: progress0)
-        await display.updateTranscription(progress: progress3)
-        _ = await display.finish()
+        display.updateTranscription(progress: progress0)
+        display.updateTranscription(progress: progress3)
+        _ = display.finish()
         writeHandle.closeFile()
 
         var data = Data()
@@ -102,6 +102,30 @@ final class LiveProgressTests: XCTestCase {
         XCTAssertTrue(transLines.contains { $0.contains("encoding") }, "First snapshot should show encoding, got: \(transLines)")
         XCTAssertTrue(transLines.contains { $0.contains("3 windows") }, "Should show window count, got: \(transLines)")
         XCTAssertFalse(output.contains(cursorUpEscape), "Line-log output must not use cursor-up ANSI")
+    }
+
+    func testUpdatesAfterFinishAreIgnored() throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let display = LiveProgressDisplay(stderr: writeHandle, showDiarizationLine: true)
+        _ = display.finish()
+        display.updateDiarization(fractionCompleted: 0.75, completedUnitCount: 99)
+        writeHandle.closeFile()
+
+        var data = Data()
+        while true {
+            let chunk = try readHandle.read(upToCount: 1024) ?? Data()
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        readHandle.closeFile()
+
+        let output = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertFalse(output.contains("75%"), "updates after finish should be dropped, got: \(output)")
+        XCTAssertFalse(output.contains("embedder"), "updates after finish should be dropped, got: \(output)")
     }
 
     private var cursorUpEscape: String { "\u{1B}[A" }

@@ -110,4 +110,60 @@ final class TimingStoreTests: XCTestCase {
         XCTAssertEqual(loaded.count, 1)
         XCTAssertEqual(loaded[0].model, "alpha")
     }
+
+    func testConcurrentAppendsPreserveAllRecords() throws {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcribe-jsonl-concurrent-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        let prev = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+        setenv("XDG_STATE_HOME", temp.path, 1)
+        defer {
+            if let prev {
+                setenv("XDG_STATE_HOME", prev, 1)
+            } else {
+                unsetenv("XDG_STATE_HOME")
+            }
+        }
+
+        let queue = DispatchQueue(label: "transcribe-tests.timing-store", attributes: .concurrent)
+        let group = DispatchGroup()
+        let phases = PhaseTimings()
+        let totalRecords = 40
+        let lock = NSLock()
+        var appendErrors: [Error] = []
+
+        for index in 0 ..< totalRecords {
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                let record = RunTimingRecord(
+                    endedAt: Date(),
+                    transcribeVersion: "1.1.0",
+                    model: "alpha",
+                    diarizationEnabled: false,
+                    inputBasename: "file-\(index).wav",
+                    fileBytes: 100,
+                    audioDurationS: 60,
+                    segmentCount: 1,
+                    speakersDetected: nil,
+                    phases: phases,
+                    writeOutputsMs: 1,
+                    totalMs: 6000
+                )
+                do {
+                    try TimingStore.append(record)
+                } catch {
+                    lock.lock()
+                    appendErrors.append(error)
+                    lock.unlock()
+                }
+            }
+        }
+
+        XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+        XCTAssertTrue(appendErrors.isEmpty, "concurrent append errors: \(appendErrors)")
+
+        let loaded = try TimingStore.loadRecent(model: "alpha", diarizationEnabled: false, limit: 100)
+        XCTAssertEqual(loaded.count, totalRecords)
+    }
 }
