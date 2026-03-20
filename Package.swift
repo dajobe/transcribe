@@ -20,7 +20,10 @@ let package = Package(
         ),
         .testTarget(
             name: "transcribeTests",
-            dependencies: ["transcribe"]
+            dependencies: [
+                "transcribe",
+                .product(name: "WhisperKit", package: "WhisperKit"),
+            ]
         ),
     ]
 )

@@ -1,4 +1,5 @@
 import XCTest
+import WhisperKit
 @testable import transcribe
 
 final class LiveProgressTests: XCTestCase {
@@ -21,7 +22,7 @@ final class LiveProgressTests: XCTestCase {
 
         let display = LiveProgressDisplay(stderr: writeHandle, showDiarizationLine: true)
         await display.updateDiarization(fractionCompleted: 0.5, completedUnitCount: 40)
-        await display.finish()
+        _ = await display.finish()
         writeHandle.closeFile()
 
         var data = Data()
@@ -46,7 +47,7 @@ final class LiveProgressTests: XCTestCase {
 
         let display = LiveProgressDisplay(stderr: writeHandle, showDiarizationLine: false)
         await display.updateDiarization(fractionCompleted: 0.25, completedUnitCount: 20)
-        await display.finish()
+        _ = await display.finish()
         writeHandle.closeFile()
 
         var data = Data()
@@ -61,4 +62,47 @@ final class LiveProgressTests: XCTestCase {
         // With showDiarizationLine: false, updateDiarization is a no-op; we only get clear + newline from finish()
         XCTAssertFalse(output.contains("Diarization:"), "Single-line mode should not show diarization, got: \(output)")
     }
+
+    /// Line-log mode emits newline-terminated snapshots (no ANSI cursor motion); `minInterval: 0` logs every update.
+    func testLineLogModeEmitsSeparatedLines() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let timings0 = TranscriptionTimings(totalDecodingWindows: 0)
+        let progress0 = TranscriptionProgress(timings: timings0, text: "", tokens: [])
+        let timings3 = TranscriptionTimings(totalDecodingWindows: 3)
+        let progress3 = TranscriptionProgress(timings: timings3, text: "", tokens: [])
+
+        let display = LiveProgressDisplay(
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            audioDurationSeconds: 100,
+            historicalWallSecondsPerAudioSecond: 0.1,
+            renderMode: .lineLog(minInterval: 0)
+        )
+        await display.updateTranscription(progress: progress0)
+        await display.updateTranscription(progress: progress3)
+        _ = await display.finish()
+        writeHandle.closeFile()
+
+        var data = Data()
+        while true {
+            let chunk = try readHandle.read(upToCount: 4096) ?? Data()
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        readHandle.closeFile()
+
+        let output = String(data: data, encoding: .utf8) ?? ""
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        let transLines = lines.filter { $0.hasPrefix("Transcription:") }
+        XCTAssertGreaterThanOrEqual(transLines.count, 2, "Expected at least two transcription snapshots, got: \(output)")
+        XCTAssertTrue(transLines.contains { $0.contains("encoding") }, "First snapshot should show encoding, got: \(transLines)")
+        XCTAssertTrue(transLines.contains { $0.contains("3 windows") }, "Should show window count, got: \(transLines)")
+        XCTAssertFalse(output.contains(cursorUpEscape), "Line-log output must not use cursor-up ANSI")
+    }
+
+    private var cursorUpEscape: String { "\u{1B}[A" }
 }
