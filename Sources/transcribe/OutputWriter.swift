@@ -19,6 +19,13 @@ func checkOverwrite(
     writeTxtFile: Bool,
     overwrite: Bool
 ) throws {
+    if basename.contains("/") || basename.contains("..") {
+        throw TranscribeError(
+            message: "Output filename prefix cannot contain '/' or '..'",
+            exitCode: .invalidUsage
+        )
+    }
+
     guard !overwrite else { return }
     let dir = resolvedOutputDir(outputDir)
     let extMap = ["txt": "txt", "json": "json", "srt": "srt", "vtt": "vtt"]
@@ -39,7 +46,7 @@ func checkOverwrite(
 func writeAtomically(content: Data, to path: String) throws {
     let dir = (path as NSString).deletingLastPathComponent
     let name = (path as NSString).lastPathComponent
-    let tempPath = (dir as NSString).appendingPathComponent(".\(name).tmp.\(ProcessInfo.processInfo.processIdentifier)")
+    let tempPath = (dir as NSString).appendingPathComponent(".\(name).tmp.\(UUID().uuidString)")
     let tempURL = URL(fileURLWithPath: tempPath)
     let targetURL = URL(fileURLWithPath: path)
     do {
