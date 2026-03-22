@@ -53,7 +53,7 @@ history. No critical or high-severity issues found. Attack surface is
 narrow: local-only CLI with no network listeners, web interfaces, or
 databases.
 
-### Path traversal via --output-prefix (Low)
+### [FIXED] Path traversal via --output-prefix (Low)
 
 `OutputWriter.swift` uses the `--output-prefix` value directly as a filename
 component without sanitizing directory separators. A value like
@@ -62,14 +62,16 @@ impact since the user controls their own invocation, but matters if the tool
 is ever called with untrusted input.
 
 **Fix:** Validate that `outputPrefix` contains no `/` or `..` components.
+(Fixed 2026-03-22)
 
-### Predictable temp file name in writeAtomically (Low)
+### [FIXED] Predictable temp file name in writeAtomically (Low)
 
 `OutputWriter.swift:42` constructs the temp file name using the PID, which
 is predictable. On a shared system another process could pre-create a
 symlink at that path to redirect the write.
 
-**Fix:** Use a UUID or `mkstemp`-equivalent for temp file names.
+**Fix:** Use a UUID or `mkstemp`-equivalent for temp file names. (Fixed
+2026-03-22)
 
 ### Timing history file permissions (Informational)
 

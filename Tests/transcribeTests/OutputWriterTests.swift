@@ -64,6 +64,23 @@ final class OutputWriterTests: XCTestCase {
         XCTAssertEqual(words.count, 1)
     }
 
+    func testCheckOverwriteFailsOnPathTraversal() throws {
+        XCTAssertThrowsError(
+            try checkOverwrite(
+                outputDir: "/tmp",
+                basename: "../../etc/passwd",
+                formats: ["txt"],
+                writeTxtFile: true,
+                overwrite: true
+            )
+        ) { error in
+            guard let transcribeError = error as? TranscribeError else {
+                return XCTFail("Unexpected error type: \(error)")
+            }
+            XCTAssertEqual(transcribeError.exitCode, .invalidUsage)
+        }
+    }
+
     func testCheckOverwriteFailsWhenOutputExists() throws {
         let tempDir = try makeTemporaryDirectory()
         let existingFile = tempDir.appendingPathComponent("meeting.json")
