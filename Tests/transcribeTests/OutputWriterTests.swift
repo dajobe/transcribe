@@ -102,6 +102,109 @@ final class OutputWriterTests: XCTestCase {
         }
     }
 
+    func testRenderMarkdownIncludesTitleMetadataAndTranscript() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: "SPEAKER_0", start: 0, end: 5, text: "Hello.", words: nil),
+                TranscriptSegment(speaker: "SPEAKER_1", start: 5, end: 10, text: "Hi there.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 10,
+            diarizationEnabled: true,
+            speakersDetected: 2,
+            speakerStrategy: "subsegment",
+            warnings: []
+        )
+
+        let md = renderMarkdown(
+            output: output,
+            audioFile: "/tmp/my meeting.wav",
+            model: "large-v3",
+            version: "9.9.9"
+        )
+
+        XCTAssertTrue(md.hasPrefix("# my meeting"))
+        XCTAssertTrue(md.contains("## Metadata"))
+        XCTAssertTrue(md.contains("`my meeting.wav`"))
+        XCTAssertTrue(md.contains("- **Diarization:** on"))
+        XCTAssertTrue(md.contains("## Transcript"))
+        XCTAssertTrue(md.contains("## **SPEAKER_0**"))
+        XCTAssertTrue(md.contains("Hello."))
+        XCTAssertTrue(md.contains("## **SPEAKER_1**"))
+        XCTAssertTrue(md.contains("Hi there."))
+    }
+
+    func testRenderMarkdownSanitizesSpeakerHeading() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: "BAD#NAME", start: 0, end: 1, text: "x", words: nil),
+            ],
+            language: nil,
+            durationSeconds: 1,
+            diarizationEnabled: true,
+            speakersDetected: 1,
+            speakerStrategy: "subsegment",
+            warnings: []
+        )
+
+        let md = renderMarkdown(
+            output: output,
+            audioFile: "a.wav",
+            model: "m",
+            version: "1"
+        )
+        XCTAssertTrue(md.contains("## **BADNAME**"))
+    }
+
+    func testCheckOverwriteFailsWhenMdExists() throws {
+        let tempDir = try makeTemporaryDirectory()
+        let existingFile = tempDir.appendingPathComponent("meeting.md")
+        try Data("#".utf8).write(to: existingFile)
+
+        XCTAssertThrowsError(
+            try checkOverwrite(
+                outputDir: tempDir.path,
+                basename: "meeting",
+                formats: ["md"],
+                writeTxtFile: false,
+                overwrite: false
+            )
+        ) { error in
+            guard let transcribeError = error as? TranscribeError else {
+                return XCTFail("Unexpected error type: \(error)")
+            }
+            XCTAssertEqual(transcribeError.exitCode, .outputWrite)
+        }
+    }
+
+    func testWriteOutputsMarkdownEndsWithSingleTrailingNewline() throws {
+        let tempDir = try makeTemporaryDirectory()
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: nil, start: 0, end: 1, text: "Hello.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 1,
+            diarizationEnabled: false
+        )
+
+        try writeOutputs(
+            output: output,
+            audioPath: "/tmp/meeting.wav",
+            outputDir: tempDir.path,
+            basename: "meeting",
+            formats: ["md"],
+            writeTxtToStdout: false,
+            overwrite: false,
+            model: "large-v3",
+            version: "1.2.3"
+        )
+
+        let contents = try String(contentsOf: tempDir.appendingPathComponent("meeting.md"), encoding: .utf8)
+        XCTAssertTrue(contents.hasSuffix("\n"))
+        XCTAssertFalse(contents.hasSuffix("\n\n"))
+    }
+
     func testWriteAtomicallyReplacesExistingFileContents() throws {
         let tempDir = try makeTemporaryDirectory()
         let fileURL = tempDir.appendingPathComponent("meeting.txt")

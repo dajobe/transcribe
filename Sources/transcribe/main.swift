@@ -15,7 +15,7 @@ struct Transcribe: AsyncParsableCommand {
         discussion: """
             Transcribes an audio file using WhisperKit and optionally adds speaker \
             labels using SpeakerKit. All processing runs on-device on Apple Silicon. \
-            Output formats: txt, json, srt, vtt (use --format to select).
+            Output formats: txt, json, srt, vtt, md (use --format to select).
             """,
         version: version
     )
@@ -38,7 +38,7 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "Output file prefix (default: input filename without extension)")
     var outputPrefix: String?
 
-    @Option(name: [.short, .long], help: "Output formats, comma-separated: txt, json, srt, vtt, all")
+    @Option(name: [.short, .long], help: "Output formats, comma-separated: txt, json, srt, vtt, md, all")
     var format: String = "txt,json"
 
     @Flag(help: "Write the primary transcript to stdout instead of a text file")
@@ -98,7 +98,7 @@ struct Transcribe: AsyncParsableCommand {
     )
     var embedderCompute: ComputeUnitsOption = .auto
 
-    /// Resolved list of output formats (txt, json, srt, vtt).
+    /// Resolved list of output formats (txt, json, srt, vtt, md).
     var resolvedFormats: [String] {
         parseOutputFormats(format)
     }
@@ -149,14 +149,14 @@ struct Transcribe: AsyncParsableCommand {
         let formats = resolvedFormats
         if formats.isEmpty {
             throw TranscribeError(
-                message: "--format must include at least one of: txt, json, srt, vtt, all.",
+                message: "--format must include at least one of: txt, json, srt, vtt, md, all.",
                 exitCode: .invalidUsage
             )
         }
         for f in formats {
             if !validOutputFormats.contains(f) {
                 throw TranscribeError(
-                    message: "Unsupported format '\(f)'. Supported: txt, json, srt, vtt, all.",
+                    message: "Unsupported format '\(f)'. Supported: txt, json, srt, vtt, md, all.",
                     exitCode: .invalidUsage
                 )
             }

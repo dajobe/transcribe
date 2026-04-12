@@ -28,7 +28,7 @@ func checkOverwrite(
 
     guard !overwrite else { return }
     let dir = resolvedOutputDir(outputDir)
-    let extMap = ["txt": "txt", "json": "json", "srt": "srt", "vtt": "vtt"]
+    let extMap = ["txt": "txt", "json": "json", "srt": "srt", "vtt": "vtt", "md": "md"]
     for f in formats {
         guard let ext = extMap[f] else { continue }
         if f == "txt" && !writeTxtFile { continue }
@@ -198,6 +198,99 @@ func renderTxt(output: TranscriptionOutput) -> String {
     return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+// MARK: - Markdown
+
+/// Strips characters that would break ATX headings or confuse block structure.
+func markdownSanitizeHeadingFragment(_ s: String) -> String {
+    s.replacingOccurrences(of: "#", with: "")
+        .replacingOccurrences(of: "\n", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func renderMarkdown(
+    output: TranscriptionOutput,
+    audioFile: String,
+    model: String,
+    version: String
+) -> String {
+    let basename = (audioFile as NSString).lastPathComponent
+    let title = markdownSanitizeHeadingFragment((basename as NSString).deletingPathExtension)
+    let titleLine = title.isEmpty ? "# Transcript" : "# \(title)"
+
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    let createdAt = formatter.string(from: Date())
+
+    var metaLines: [String] = [
+        "## Metadata",
+        "",
+        "- **Source:** `\(basename)`",
+        "- **Duration:** \(String(format: "%.1f", output.durationSeconds))s",
+        "- **Model:** `\(model)`",
+    ]
+    if let lang = output.language {
+        metaLines.append("- **Language:** `\(lang)`")
+    }
+    metaLines.append("- **Diarization:** \(output.diarizationEnabled ? "on" : "off")")
+    if output.diarizationEnabled {
+        metaLines.append("- **Speaker strategy:** `\(output.speakerStrategy)`")
+    }
+    if let n = output.speakersDetected {
+        metaLines.append("- **Speakers detected:** \(n)")
+    }
+    metaLines.append(contentsOf: [
+        "- **transcribe:** `\(version)`",
+        "- **Created:** \(createdAt)",
+        "",
+        "## Transcript",
+        "",
+    ])
+
+    var bodyLines: [String] = []
+    var currentSpeaker: String? = nil
+    var currentBlock: [String] = []
+    var blockStart: Double = 0
+    var blockEnd: Double = 0
+
+    func flushBlock() {
+        guard !currentBlock.isEmpty else { return }
+        let text = currentBlock.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return }
+        let timeRange = "_\(formatTimeRange(seconds: blockStart)) – \(formatTimeRange(seconds: blockEnd))_"
+        if let sp = currentSpeaker {
+            let safe = markdownSanitizeHeadingFragment(sp)
+            bodyLines.append("## **\(safe)** — \(timeRange)")
+        } else {
+            bodyLines.append("## \(timeRange)")
+        }
+        bodyLines.append("")
+        bodyLines.append(text)
+        bodyLines.append("")
+        currentBlock = []
+    }
+
+    for seg in output.segments {
+        if seg.speaker != currentSpeaker {
+            flushBlock()
+            currentSpeaker = seg.speaker
+            blockStart = seg.start
+            blockEnd = seg.end
+            currentBlock = [seg.text]
+        } else {
+            blockEnd = seg.end
+            currentBlock.append(seg.text)
+        }
+    }
+    flushBlock()
+
+    let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    let meta = metaLines.joined(separator: "\n")
+    if body.isEmpty {
+        return "\(titleLine)\n\n\(meta)\n"
+    }
+    return "\(titleLine)\n\n\(meta)\n\(body)\n"
+}
+
 // MARK: - SRT
 
 func renderSRT(output: TranscriptionOutput) -> String {
@@ -282,6 +375,10 @@ func writeOutputs(
             let text = renderVTT(output: output)
             let path = (dir as NSString).appendingPathComponent("\(basename).vtt")
             try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
+        case "md":
+            let text = renderMarkdown(output: output, audioFile: audioPath, model: model, version: version)
+            let path = (dir as NSString).appendingPathComponent("\(basename).md")
+            try writeAtomically(content: text.data(using: .utf8)!, to: path)
         default:
             break
         }
