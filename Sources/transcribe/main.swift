@@ -8,7 +8,7 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
-    static let version = "1.1.1"
+    static let version = "1.2.0"
 
     static var configuration = CommandConfiguration(
         abstract: "On-device meeting transcription with optional speaker diarization.",
