@@ -132,11 +132,14 @@ Full schema, paths, and ETA behavior:
 
 To transcribe files automatically when they are added to a folder, use macOS
 **Automator** with a **Folder Action** workflow that runs
-**`scripts/folder-action-transcribe.sh`**.
+**`scripts/folder-action-transcribe.sh`**. An optional **example wrapper** that
+sets log/output paths and `TRANSCRIBE_BIN` is **`scripts/folder-script.sh`**
+(edit the `root_dir` and paths inside to match your layout; it invokes
+`folder-action-transcribe.sh` from the same directory).
 
 1. Build and install the `transcribe` binary (see [Build and
    Install](#build-and-install)).
-2. `chmod +x scripts/folder-action-transcribe.sh`
+2. `chmod +x scripts/folder-action-transcribe.sh` (and `folder-script.sh` if you use it)
 3. Open **Automator**, create **Folder Action**, choose the watched folder, add
    **Run Shell Script**, shell `/bin/bash`, and pass input **as arguments** to
    the script (path to the checked-in script or a copy).
