@@ -137,8 +137,13 @@ each new item as an argument).
    work. If **`flock`** is missing, the script runs without locking and logs a
    warning to stderr once.
 
-10. **Logging** — If **`TRANSCRIBE_LOG`** is set, append one line per invocation
-    (timestamp, path, exit status).
+10. **Logging** — If **`TRANSCRIBE_LOG`** is set, append lines with an **ISO 8601
+    UTC** timestamp prefix (`YYYY-MM-DDThh:mm:ssZ`). For each file path processed:
+    - **`event=start`** — beginning of handling (after the path is resolved).
+    - **`event=end`** — always logged on exit, with **`path=`**, **`exit=`** (exit
+      code), **`duration_s=`** (wall-clock seconds from start to end), and
+      optionally **`reason=`** (e.g. `skip-non-audio`, `skip-unstable`,
+      `transcribe-failed` when the child exits non-zero).
 
 ### Exit codes
 

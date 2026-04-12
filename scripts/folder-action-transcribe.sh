@@ -3,21 +3,33 @@
 # See specs/folder-action-markdown.md for environment variables and behavior.
 set -euo pipefail
 
-log_line() {
-  if [[ -n "${TRANSCRIBE_LOG:-}" ]]; then
-    printf '%s %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*" >>"${TRANSCRIBE_LOG}" 2>/dev/null || true
-  fi
+# ISO 8601 UTC (second precision), e.g. 2026-04-12T19:35:55Z
+iso_utc() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-log_result() {
-  local status="$1"
-  local path="$2"
-  local code="$3"
-  log_line "status=${status} path=${path} exit=${code}"
+log_line() {
+  if [[ -n "${TRANSCRIBE_LOG:-}" ]]; then
+    printf '%s %s\n' "$(iso_utc)" "$*" >>"${TRANSCRIBE_LOG}" 2>/dev/null || true
+  fi
 }
 
 warn() {
   echo "$*" >&2
+}
+
+# Globals set in main() before trap; used by end_log on EXIT.
+f=""
+start_epoch=""
+REASON=""
+
+end_log() {
+  local code=$?
+  [[ -n "${start_epoch:-}" ]] || return 0
+  local end_epoch
+  end_epoch=$(date +%s)
+  local dur=$((end_epoch - start_epoch))
+  log_line "event=end path=${f} exit=${code} duration_s=${dur}${REASON:+ reason=${REASON}}"
 }
 
 file_size() {
@@ -72,30 +84,34 @@ main() {
     exit 2
   fi
 
-  local f="$1"
-  f="$(cd -- "$(dirname -- "$f")" && pwd -P)/$(basename -- "$f")"
+  f="$(cd -- "$(dirname -- "$1")" && pwd -P)/$(basename -- "$1")"
+
+  start_epoch=$(date +%s)
+  REASON=""
+  log_line "event=start path=${f}"
+  trap end_log EXIT
 
   local base
   base="$(basename "$f")"
 
   if [[ "$base" == .* ]]; then
-    log_result "skip-hidden" "$f" 0
+    REASON=skip-hidden
     exit 0
   fi
   case "$base" in
     *.tmp)
-      log_result "skip-tmp" "$f" 0
+      REASON=skip-tmp
       exit 0
       ;;
   esac
 
   if ! is_allowed_audio "$base"; then
-    log_result "skip-non-audio" "$f" 0
+    REASON=skip-non-audio
     exit 0
   fi
 
   if ! wait_stable_file "$f"; then
-    log_result "skip-unstable" "$f" 0
+    REASON=skip-unstable
     exit 0
   fi
 
@@ -109,7 +125,7 @@ main() {
   local stem="${base%.*}"
   if [[ "${TRANSCRIBE_SKIP_IF_MD_EXISTS:-0}" == "1" ]]; then
     if [[ -e "${outdir}/${stem}.md" ]]; then
-      log_result "skip-existing-md" "$f" 0
+      REASON=skip-existing-md
       exit 0
     fi
   fi
@@ -144,7 +160,9 @@ main() {
   local code=$?
   set -e
 
-  log_result "done" "$f" "$code"
+  if [[ "$code" -ne 0 ]]; then
+    REASON=transcribe-failed
+  fi
   exit "$code"
 }
 
