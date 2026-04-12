@@ -76,8 +76,9 @@ transcribe meeting.mp3 \
 
 ### Options
 
+
 | Option                            | Description                                                                                      |
-|:----------------------------------|:-------------------------------------------------------------------------------------------------|
+| --------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `-m, --model <name>`              | Whisper model (default: auto-select for device)                                                  |
 | `-l, --language <code>`           | Language code (default: auto-detect)                                                             |
 | `-o, --output-dir <path>`         | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                         |
@@ -96,6 +97,7 @@ transcribe meeting.mp3 \
 | `--text-decoder-compute <units>`  | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
 | `--segmenter-compute <units>`     | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
 | `--embedder-compute <units>`      | SpeakerKit embedder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`   |
+
 
 When SpeakerKit can accept an exact speaker count hint, `transcribe` passes it
 only when `--min-speakers` and `--max-speakers` are both set to the same value.
@@ -118,11 +120,11 @@ Full schema, paths, and ETA behavior:
 ### Performance
 
 - Use `.build/release/transcribe` for normal transcription runs. Debug builds
-  are intended for development and can be slower.
+are intended for development and can be slower.
 - The default `auto` mode is tuned for the fastest backend mix the models
-  support, which may use a combination of GPU, Neural Engine, and CPU.
+support, which may use a combination of GPU, Neural Engine, and CPU.
 - Use `--verbose` to print the selected WhisperKit and SpeakerKit compute
-  backends at startup.
+backends at startup.
 
 ### Supported Audio Formats
 
@@ -132,25 +134,26 @@ Full schema, paths, and ETA behavior:
 
 To transcribe files automatically when they are added to a folder, use macOS
 **Automator** with a **Folder Action** workflow that runs
-**`scripts/folder-action-transcribe.sh`**. An optional **example wrapper** that
-sets log/output paths and `TRANSCRIBE_BIN` is **`scripts/folder-script.sh`**
+`**scripts/folder-action-transcribe.sh`**. An optional **example wrapper** that
+sets log/output paths and `TRANSCRIBE_BIN` is `**scripts/folder-script.sh`**
 (edit the `root_dir` and paths inside to match your layout; it invokes
 `folder-action-transcribe.sh` from the same directory).
 
 1. Build and install the `transcribe` binary (see [Build and
-   Install](#build-and-install)).
+  Install](#build-and-install)).
 2. `chmod +x scripts/folder-action-transcribe.sh` (and `folder-script.sh` if you use it)
 3. Open **Automator**, create **Folder Action**, choose the watched folder, add
-   **Run Shell Script**, shell `/bin/bash`, and pass input **as arguments** to
+  **Run Shell Script**, shell `/bin/bash`, and pass input **as arguments** to
    the script (path to the checked-in script or a copy).
 4. Optionally set environment variables in the shell script step or a wrapper
-   (see below).
+  (see below).
 
 Full behavior, stable-file wait, and exit codes:
 **[specs/folder-action-markdown.md](specs/folder-action-markdown.md)**.
 
+
 | Variable                       | Meaning                                                                 |
-|:-------------------------------|:------------------------------------------------------------------------|
+| ------------------------------ | ----------------------------------------------------------------------- |
 | `TRANSCRIBE_BIN`               | Path to `transcribe` (default: `transcribe` on `PATH`)                  |
 | `TRANSCRIBE_OUTPUT_DIR`        | If set, `-o` for all runs; if unset, outputs go next to each input file |
 | `TRANSCRIBE_FORMAT`            | `--format` value (default: `md`)                                        |
@@ -160,6 +163,14 @@ Full behavior, stable-file wait, and exit codes:
 | `TRANSCRIBE_LOCK_FILE`         | If set and `flock` exists, serialize concurrent runs                    |
 | `TRANSCRIBE_SKIP_IF_MD_EXISTS` | If `1`, skip when `basename.md` already exists in the output dir        |
 | `TRANSCRIBE_LOG`               | Append one log line per run to this file                                |
+| `TRANSCRIBE_SCRIPT_DIR`        | Directory containing `folder-action-transcribe.sh` (if the wrapper cannot resolve it) |
+| `TRANSCRIBE_SMOKE_LOG`         | If set, append debug lines (argc, `script_dir`, helper present) to this path |
+
+**Troubleshooting**
+
+- **Nothing runs, no log:** Set **Pass input** to **as arguments** (not “to stdin”). If `argc=0` in a smoke log, that was the issue.
+- **Smoke log (`argc=1` but still no transcription):** The wrapper must find **`folder-action-transcribe.sh`** next to itself. If you **paste** the script into Automator, `script_dir` is wrong — set **`TRANSCRIBE_SCRIPT_DIR`** to the directory that contains both scripts (e.g. `export TRANSCRIBE_SCRIPT_DIR=$HOME/bin` in the shell block), or use **File → Open** and run the script file by path instead of pasting. Enable **`TRANSCRIBE_SMOKE_LOG=/tmp/folder-action-smoke.log`** to log `script_dir` and whether the helper exists.
+- **Extensions:** Allowed audio types only; see the log for `skip-non-audio` if needed.
 
 ## Output
 
@@ -223,14 +234,16 @@ the infrastructure migration timeline.
 
 ## Exit Codes
 
+
 | Code | Meaning                                  |
-|:-----|:-----------------------------------------|
+| ---- | ---------------------------------------- |
 | 0    | Success                                  |
 | 1    | Runtime failure                          |
 | 2    | Invalid CLI usage                        |
 | 3    | Input file problem                       |
 | 4    | Model download or initialization failure |
 | 5    | Output write failure                     |
+
 
 ## Releasing
 
@@ -249,11 +262,13 @@ This project is licensed under the [MIT License](LICENSE).
 
 ### Dependency licenses
 
+
 | Dependency                                                              | License    |
-|:------------------------------------------------------------------------|:-----------|
+| ----------------------------------------------------------------------- | ---------- |
 | [WhisperKit](https://github.com/argmaxinc/WhisperKit)                   | MIT        |
 | [SpeakerKit](https://github.com/argmaxinc/WhisperKit)                   | MIT        |
 | [swift-argument-parser](https://github.com/apple/swift-argument-parser) | Apache 2.0 |
+
 
 Speaker diarization uses [pyannote](https://github.com/pyannote/pyannote-audio)
 community models licensed under
@@ -262,3 +277,4 @@ community models licensed under
 > Plaquet, A., & Bredin, H. (2023). Powering speaker diarization by
 > multi-scale neural embeddings and non-autoregressive clustering.
 > *IEEE ICASSP 2023*.
+
