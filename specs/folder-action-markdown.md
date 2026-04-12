@@ -83,6 +83,12 @@ Only applies to **`txt`**. Markdown is always written as **`basename.md`** when
 
 **Path:** `scripts/folder-action-transcribe.sh`
 
+**Optional wrapper:** `scripts/folder-script.sh` is an example Automator driver
+that sets log/output paths, `TRANSCRIBE_BIN`, and `TRANSCRIBE_LOCK_FILE`, then
+invokes `folder-action-transcribe.sh` from the **same directory** as the wrapper
+(resolved via `BASH_SOURCE`). Edit the `root_dir` / paths inside for your
+machine; `chmod +x` both scripts.
+
 **Invocation:** A single argument: the POSIX path to the file that was added
 (Automator “Folder Action receives files and folders added to …” should pass
 each new item as an argument).
