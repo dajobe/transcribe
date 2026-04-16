@@ -78,6 +78,18 @@ is_allowed_audio() {
   esac
 }
 
+# Matches Sources/transcribe/Errors.swift ExitCode (transcribe binary).
+transcribe_exit_meaning() {
+  case "$1" in
+    1) echo "runtime" ;;
+    2) echo "invalid-usage" ;;
+    3) echo "input-file" ;;
+    4) echo "model" ;;
+    5) echo "output-write" ;;
+    *) echo "other" ;;
+  esac
+}
+
 main() {
   if [[ "$#" -lt 1 || -z "${1:-}" ]]; then
     warn "folder-action-transcribe: missing file path argument"
@@ -141,28 +153,48 @@ main() {
   fi
 
   local flock_warned=0
-  run_cmd() {
-    if [[ -n "${TRANSCRIBE_LOCK_FILE:-}" ]] && command -v flock >/dev/null 2>&1; then
-      local lockfile="${TRANSCRIBE_LOCK_FILE/#\~/$HOME}"
-      touch "$lockfile"
-      flock "$lockfile" "$@"
-    else
-      if [[ -n "${TRANSCRIBE_LOCK_FILE:-}" && "$flock_warned" -eq 0 ]]; then
-        warn "folder-action-transcribe: flock not found; ignoring TRANSCRIBE_LOCK_FILE"
-        flock_warned=1
-      fi
-      "$@"
-    fi
-  }
+  local err_tmp
+  err_tmp=$(mktemp "${TMPDIR:-/tmp}/transcribe-fa.XXXXXX")
 
   set +e
-  run_cmd "${cmd[@]}"
+  if [[ -n "${TRANSCRIBE_LOCK_FILE:-}" ]] && command -v flock >/dev/null 2>&1; then
+    local lockfile="${TRANSCRIBE_LOCK_FILE/#\~/$HOME}"
+    touch "$lockfile"
+    flock "$lockfile" "${cmd[@]}" 2>"$err_tmp"
+  else
+    if [[ -n "${TRANSCRIBE_LOCK_FILE:-}" && "$flock_warned" -eq 0 ]]; then
+      warn "folder-action-transcribe: flock not found; ignoring TRANSCRIBE_LOCK_FILE"
+      flock_warned=1
+    fi
+    "${cmd[@]}" 2>"$err_tmp"
+  fi
   local code=$?
   set -e
 
   if [[ "$code" -ne 0 ]]; then
     REASON=transcribe-failed
+    local mean
+    mean=$(transcribe_exit_meaning "$code")
+    log_line "transcribe-exit=${code} meaning=${mean}"
+    if [[ -s "$err_tmp" ]]; then
+      # One line for the main log (transcribe prints newlines to stderr).
+      local summ
+      summ=$(tr '\n' ' ' <"$err_tmp" | sed 's/  */ /g' | head -c 2000)
+      log_line "transcribe-stderr: ${summ}"
+      if [[ -n "${TRANSCRIBE_LOG:-}" ]]; then
+        local persistent="${TRANSCRIBE_STDERR_LOG:-${TRANSCRIBE_LOG%/*}/transcribe.stderr.log}"
+        {
+          echo "=== $(iso_utc) exit=${code} meaning=${mean} path=${f} ==="
+          cat "$err_tmp"
+          echo
+        } >>"$persistent" 2>/dev/null || true
+      fi
+    else
+      log_line "transcribe-stderr: (empty — run the same command in Terminal to see output)"
+    fi
   fi
+  rm -f "$err_tmp"
+
   exit "$code"
 }
 

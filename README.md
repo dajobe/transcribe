@@ -162,7 +162,8 @@ Full behavior, stable-file wait, and exit codes:
 | `TRANSCRIBE_MAX_STABLE_WAIT`   | Max seconds to wait for a stable file (default: `3600`)                 |
 | `TRANSCRIBE_LOCK_FILE`         | If set and `flock` exists, serialize concurrent runs                    |
 | `TRANSCRIBE_SKIP_IF_MD_EXISTS` | If `1`, skip when `basename.md` already exists in the output dir        |
-| `TRANSCRIBE_LOG`               | Append one log line per run to this file                                |
+| `TRANSCRIBE_LOG`               | Structured events (`event=start` / `event=end`, etc.); see the spec |
+| `TRANSCRIBE_STDERR_LOG`        | Full `transcribe` stderr on failure (default: `transcribe.stderr.log` next to `TRANSCRIBE_LOG`) |
 | `TRANSCRIBE_SCRIPT_DIR`        | Directory containing `folder-action-transcribe.sh` (if the wrapper cannot resolve it) |
 | `TRANSCRIBE_SMOKE_LOG`         | If set, append debug lines (argc, `script_dir`, helper present) to this path |
 
@@ -171,6 +172,7 @@ Full behavior, stable-file wait, and exit codes:
 - **Nothing runs, no log:** Set **Pass input** to **as arguments** (not “to stdin”). If `argc=0` in a smoke log, that was the issue.
 - **Smoke log (`argc=1` but still no transcription):** The wrapper must find **`folder-action-transcribe.sh`** next to itself. If you **paste** the script into Automator, `script_dir` is wrong — set **`TRANSCRIBE_SCRIPT_DIR`** to the directory that contains both scripts (e.g. `export TRANSCRIBE_SCRIPT_DIR=$HOME/bin` in the shell block), or use **File → Open** and run the script file by path instead of pasting. Enable **`TRANSCRIBE_SMOKE_LOG=/tmp/folder-action-smoke.log`** to log `script_dir` and whether the helper exists.
 - **Extensions:** Allowed audio types only; see the log for `skip-non-audio` if needed.
+- **`event=end` with `exit=4` / `reason=transcribe-failed`:** Model download or load failed. Check the same log for **`transcribe-exit=`**, **`meaning=model`**, and **`transcribe-stderr:`** (and **`transcribe.stderr.log`** next to your main log for the full stderr block). Run **`transcribe`** on that file in Terminal for the same message.
 
 ## Output
 

@@ -144,6 +144,14 @@ each new item as an argument).
       code), **`duration_s=`** (wall-clock seconds from start to end), and
       optionally **`reason=`** (e.g. `skip-non-audio`, `skip-unstable`,
       `transcribe-failed` when the child exits non-zero).
+    - When **`transcribe` exits non-zero:** **`transcribe-exit=`** and
+      **`meaning=`** (maps to the binary’s exit codes: `runtime`, `invalid-usage`,
+      `input-file`, **`model`** (exit 4), **`output-write`** (exit 5), `other`).
+      Then **`transcribe-stderr:`** with a single-line summary of stderr (the
+      binary’s error message). Full stderr for that run is also appended to
+      **`TRANSCRIBE_STDERR_LOG`** if set, otherwise
+      **`dirname(TRANSCRIBE_LOG)/transcribe.stderr.log`** when **`TRANSCRIBE_LOG`**
+      is set.
 
 ### Exit codes
 
