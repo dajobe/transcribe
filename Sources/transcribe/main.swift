@@ -8,7 +8,7 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
-    static let version = "1.2.0"
+    static let version = "1.3.0"
 
     static var configuration = CommandConfiguration(
         abstract: "On-device meeting transcription with optional speaker diarization.",
@@ -20,7 +20,7 @@ struct Transcribe: AsyncParsableCommand {
         version: version
     )
 
-    @Argument(help: "Path to the input audio file")
+    @Argument(help: "Path to an audio file, or a directory of audio clips to be concatenated and transcribed as one recording (top-level only, natural-sorted by filename)")
     var audioFile: String
 
     @Option(name: [.short, .long], help: "Whisper model to use (default: auto-select for device)")
@@ -216,6 +216,22 @@ struct Transcribe: AsyncParsableCommand {
             embedder: embedderCompute
         )
 
+        let resolvedInput = try InputResolver.resolve(audioFile)
+        let inputAudioPath: String
+        let inputAudioPaths: [String]?
+        let inputAudioFileNames: [String]?
+        switch resolvedInput {
+        case .file(let path):
+            inputAudioPath = path
+            inputAudioPaths = nil
+            inputAudioFileNames = nil
+        case .directory(let path, let files):
+            inputAudioPath = path
+            inputAudioPaths = files
+            inputAudioFileNames = files.map { ($0 as NSString).lastPathComponent }
+            logger.log("Input is a directory: \(files.count) audio file\(files.count == 1 ? "" : "s")")
+        }
+
         let resolvedModel = try await resolveModel(explicit: model, logger: logger)
 
         let historicalRatio: Double? = {
@@ -226,7 +242,7 @@ struct Transcribe: AsyncParsableCommand {
             return TimingStore.medianWallSecondsPerAudioSecond(records: recs)
         }()
 
-        let basename = outputPrefix ?? outputBasename(audioPath: audioFile)
+        let basename = outputPrefix ?? InputResolver.basename(for: resolvedInput)
         try checkOverwrite(
             outputDir: outputDir,
             basename: basename,
@@ -243,38 +259,74 @@ struct Transcribe: AsyncParsableCommand {
         let output: TranscriptionOutput
         var phases: PhaseTimings
         if noDiarize {
-            let (out, ph) = try await runTranscriptionOnly(
-                audioPath: audioFile,
-                model: resolvedModel,
-                modelDir: modelDir,
-                language: language,
-                computeOptions: computeOptions,
-                verbose: verbose,
-                wordTimestamps: false,
-                liveProgressMode: liveProgressMode,
-                pipelineStartDate: startDate,
-                historicalWallSecondsPerAudioSecond: historicalRatio,
-                logger: logger
-            )
+            let (out, ph): (TranscriptionOutput, PhaseTimings)
+            if let paths = inputAudioPaths {
+                (out, ph) = try await runTranscriptionOnly(
+                    audioPaths: paths,
+                    model: resolvedModel,
+                    modelDir: modelDir,
+                    language: language,
+                    computeOptions: computeOptions,
+                    verbose: verbose,
+                    wordTimestamps: false,
+                    liveProgressMode: liveProgressMode,
+                    pipelineStartDate: startDate,
+                    historicalWallSecondsPerAudioSecond: historicalRatio,
+                    logger: logger
+                )
+            } else {
+                (out, ph) = try await runTranscriptionOnly(
+                    audioPath: inputAudioPath,
+                    model: resolvedModel,
+                    modelDir: modelDir,
+                    language: language,
+                    computeOptions: computeOptions,
+                    verbose: verbose,
+                    wordTimestamps: false,
+                    liveProgressMode: liveProgressMode,
+                    pipelineStartDate: startDate,
+                    historicalWallSecondsPerAudioSecond: historicalRatio,
+                    logger: logger
+                )
+            }
             output = out
             phases = ph
         } else {
             let strategy = SpeakerInfoStrategy(from: speakerStrategy) ?? .subsegment
-            let (out, ph) = try await runTranscriptionWithDiarization(
-                audioPath: audioFile,
-                model: resolvedModel,
-                modelDir: modelDir,
-                language: language,
-                minSpeakers: minSpeakers,
-                maxSpeakers: maxSpeakers,
-                speakerStrategy: strategy,
-                computeOptions: computeOptions,
-                verbose: verbose,
-                liveProgressMode: liveProgressMode,
-                pipelineStartDate: startDate,
-                historicalWallSecondsPerAudioSecond: historicalRatio,
-                logger: logger
-            )
+            let (out, ph): (TranscriptionOutput, PhaseTimings)
+            if let paths = inputAudioPaths {
+                (out, ph) = try await runTranscriptionWithDiarization(
+                    audioPaths: paths,
+                    model: resolvedModel,
+                    modelDir: modelDir,
+                    language: language,
+                    minSpeakers: minSpeakers,
+                    maxSpeakers: maxSpeakers,
+                    speakerStrategy: strategy,
+                    computeOptions: computeOptions,
+                    verbose: verbose,
+                    liveProgressMode: liveProgressMode,
+                    pipelineStartDate: startDate,
+                    historicalWallSecondsPerAudioSecond: historicalRatio,
+                    logger: logger
+                )
+            } else {
+                (out, ph) = try await runTranscriptionWithDiarization(
+                    audioPath: inputAudioPath,
+                    model: resolvedModel,
+                    modelDir: modelDir,
+                    language: language,
+                    minSpeakers: minSpeakers,
+                    maxSpeakers: maxSpeakers,
+                    speakerStrategy: strategy,
+                    computeOptions: computeOptions,
+                    verbose: verbose,
+                    liveProgressMode: liveProgressMode,
+                    pipelineStartDate: startDate,
+                    historicalWallSecondsPerAudioSecond: historicalRatio,
+                    logger: logger
+                )
+            }
             output = out
             phases = ph
         }
@@ -292,7 +344,8 @@ struct Transcribe: AsyncParsableCommand {
         let (_, writeMs) = try WallClock.measureMs {
             try writeOutputs(
                 output: out,
-                audioPath: audioFile,
+                audioPath: inputAudioPath,
+                audioFiles: inputAudioFileNames,
                 outputDir: outputDir,
                 basename: basename,
                 formats: resolvedFormats,
@@ -307,14 +360,22 @@ struct Transcribe: AsyncParsableCommand {
         let totalMs = Int64(endedAt.timeIntervalSince(startDate) * 1000.0)
 
         if timingStatsEnabled {
-            let expanded = (audioFile as NSString).expandingTildeInPath
-            let fileBytes = (try? FileManager.default.attributesOfItem(atPath: expanded)[.size] as? NSNumber)?.int64Value ?? 0
+            let fileBytes: Int64 = {
+                if let paths = inputAudioPaths {
+                    return paths.reduce(into: Int64(0)) { total, p in
+                        let n = (try? FileManager.default.attributesOfItem(atPath: p)[.size] as? NSNumber)?.int64Value ?? 0
+                        total += n
+                    }
+                } else {
+                    return (try? FileManager.default.attributesOfItem(atPath: inputAudioPath)[.size] as? NSNumber)?.int64Value ?? 0
+                }
+            }()
             let record = RunTimingRecord(
                 endedAt: endedAt,
                 transcribeVersion: Self.version,
                 model: resolvedModel,
                 diarizationEnabled: out.diarizationEnabled,
-                inputBasename: (audioFile as NSString).lastPathComponent,
+                inputBasename: basename,
                 fileBytes: fileBytes,
                 audioDurationS: out.durationSeconds,
                 segmentCount: out.segments.count,

@@ -6,6 +6,17 @@ func outputBasename(audioPath: String) -> String {
     return (name as NSString).deletingPathExtension
 }
 
+/// Basename derived from a directory input. Strips trailing slashes and
+/// returns the final path component verbatim — no extension stripping
+/// (preserves names like "2026.04.notes").
+func outputBasename(directoryPath: String) -> String {
+    var trimmed = directoryPath
+    while trimmed.count > 1 && trimmed.hasSuffix("/") {
+        trimmed.removeLast()
+    }
+    return (trimmed as NSString).lastPathComponent
+}
+
 /// Resolved output directory path (expanded tilde).
 func resolvedOutputDir(_ outputDir: String) -> String {
     (outputDir as NSString).expandingTildeInPath
@@ -95,6 +106,9 @@ func formatVTTTime(seconds: Double) -> String {
 
 struct JSONMetadata: Encodable {
     let audio_file: String
+    /// Source filenames in concat order when input was a directory of clips;
+    /// nil for single-file input. Omitted from JSON when nil.
+    let audio_files: [String]?
     let duration_seconds: Double
     let model: String
     let language: String?
@@ -103,6 +117,29 @@ struct JSONMetadata: Encodable {
     let speakers_detected: Int?
     let transcribe_version: String
     let created_at: String
+
+    private enum CodingKeys: String, CodingKey {
+        case audio_file, audio_files, duration_seconds, model, language
+        case diarization_enabled, speaker_strategy, speakers_detected
+        case transcribe_version, created_at
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(audio_file, forKey: .audio_file)
+        try c.encodeIfPresent(audio_files, forKey: .audio_files)
+        try c.encode(duration_seconds, forKey: .duration_seconds)
+        try c.encode(model, forKey: .model)
+        // Preserve prior behaviour: encode language and speakers_detected as
+        // null when nil (not omitted), since downstream consumers may rely on
+        // the keys being present.
+        try c.encode(language, forKey: .language)
+        try c.encode(diarization_enabled, forKey: .diarization_enabled)
+        try c.encode(speaker_strategy, forKey: .speaker_strategy)
+        try c.encode(speakers_detected, forKey: .speakers_detected)
+        try c.encode(transcribe_version, forKey: .transcribe_version)
+        try c.encode(created_at, forKey: .created_at)
+    }
 }
 
 struct JSONSegmentWord: Encodable {
@@ -125,13 +162,20 @@ struct JSONTranscript: Encodable {
     let segments: [JSONSegment]
 }
 
-func renderJSON(output: TranscriptionOutput, audioFile: String, model: String, version: String) throws -> Data {
+func renderJSON(
+    output: TranscriptionOutput,
+    audioFile: String,
+    audioFiles: [String]? = nil,
+    model: String,
+    version: String
+) throws -> Data {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
     let createdAt = formatter.string(from: Date())
 
     let metadata = JSONMetadata(
         audio_file: (audioFile as NSString).lastPathComponent,
+        audio_files: audioFiles,
         duration_seconds: output.durationSeconds,
         model: model,
         language: output.language,
@@ -210,6 +254,7 @@ func markdownSanitizeHeadingFragment(_ s: String) -> String {
 func renderMarkdown(
     output: TranscriptionOutput,
     audioFile: String,
+    audioFiles: [String]? = nil,
     model: String,
     version: String
 ) -> String {
@@ -228,6 +273,12 @@ func renderMarkdown(
         "- **Duration:** \(String(format: "%.1f", output.durationSeconds))s",
         "- **Model:** `\(model)`",
     ]
+    if let files = audioFiles, !files.isEmpty {
+        metaLines.append("- **Sources:**")
+        for f in files {
+            metaLines.append("  - `\(f)`")
+        }
+    }
     if let lang = output.language {
         metaLines.append("- **Language:** `\(lang)`")
     }
@@ -321,9 +372,11 @@ func renderVTT(output: TranscriptionOutput) -> String {
 // MARK: - Write all outputs
 
 /// Writes requested output formats. Uses atomic writes. For txt with --stdout, writes to stdout and does not create .txt file.
+/// - Parameter audioFiles: When the input was a directory of clips, the source filenames in concat order; nil for single-file input.
 func writeOutputs(
     output: TranscriptionOutput,
     audioPath: String,
+    audioFiles: [String]? = nil,
     outputDir: String,
     basename: String,
     formats: [String],
@@ -356,7 +409,13 @@ func writeOutputs(
     for f in formats {
         switch f {
         case "json":
-            let data = try renderJSON(output: output, audioFile: audioPath, model: model, version: version)
+            let data = try renderJSON(
+                output: output,
+                audioFile: audioPath,
+                audioFiles: audioFiles,
+                model: model,
+                version: version
+            )
             let path = (dir as NSString).appendingPathComponent("\(basename).json")
             try writeAtomically(content: data, to: path)
         case "txt":
@@ -376,7 +435,13 @@ func writeOutputs(
             let path = (dir as NSString).appendingPathComponent("\(basename).vtt")
             try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
         case "md":
-            let text = renderMarkdown(output: output, audioFile: audioPath, model: model, version: version)
+            let text = renderMarkdown(
+                output: output,
+                audioFile: audioPath,
+                audioFiles: audioFiles,
+                model: model,
+                version: version
+            )
             let path = (dir as NSString).appendingPathComponent("\(basename).md")
             try writeAtomically(content: text.data(using: .utf8)!, to: path)
         default:

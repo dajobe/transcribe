@@ -42,8 +42,14 @@ repo (see [spec Test Plan](specs/transcribe.md)).
 ## Usage
 
 ```text
-transcribe <audio-file> [options]
+transcribe <audio-file-or-directory> [options]
 ```
+
+The positional argument may be either a single audio file or a directory of
+sequential clips. When given a directory, top-level audio files are concatenated
+in natural-sort order and transcribed as one logical recording. The output
+filename is derived from the directory name (e.g.
+`~/voicenotes/2026-may-meeting/` → `2026-may-meeting.txt`).
 
 ### Examples
 
@@ -66,6 +72,10 @@ transcribe interview.wav --stdout --format txt,json -o ./transcripts
 # Markdown transcript (and JSON) for notes / publishing
 transcribe meeting.m4a --format md,json -o ./notes
 
+# A directory of sequential voice notes treated as one recording.
+# Output basename comes from the directory: 2026-may-meeting.{txt,json}
+transcribe ~/voicenotes/2026-may-meeting/
+
 # Override compute units explicitly
 transcribe meeting.mp3 \
   --audio-encoder-compute cpuAndGPU \
@@ -74,11 +84,34 @@ transcribe meeting.mp3 \
   --embedder-compute cpuAndGPU
 ```
 
+### Directory input
+
+When the positional argument is a directory, `transcribe` concatenates its
+top-level audio files into a single logical recording before running the
+pipeline.
+
+- **Sort order:** filenames are sorted with natural (numeric-aware) comparison,
+  so `Note 1.m4a, Note 2.m4a, …, Note 10.m4a` are concatenated in the order a
+  human would expect.
+- **Filtering:** files are filtered by extension (case-insensitive) against the
+  supported formats. Hidden files (`.DS_Store`, `._*`) and subdirectories are
+  skipped; subdirectories are not recursed into.
+- **Padding:** ~200 ms of silence is inserted between consecutive clips to
+  smooth Whisper's VAD chunking across abrupt boundaries.
+- **Diarization:** runs once over the joined audio, so a speaker who appears in
+  multiple clips lands on a single `SPEAKER_n` label across the transcript.
+- **Output basename:** the directory's last path component, with no extension
+  stripping (preserves names like `2026.04.notes`). Override with
+  `--output-prefix` as usual.
+- **JSON metadata:** an `audio_files` array lists the source filenames in concat
+  order; the field is omitted for single-file input.
+- **Empty / no-audio directories:** exit code `3` with a clear message on
+  stderr.
+
 ### Options
 
-
 | Option                            | Description                                                                                      |
-| --------------------------------- | ------------------------------------------------------------------------------------------------ |
+|:----------------------------------|:-------------------------------------------------------------------------------------------------|
 | `-m, --model <name>`              | Whisper model (default: auto-select for device)                                                  |
 | `-l, --language <code>`           | Language code (default: auto-detect)                                                             |
 | `-o, --output-dir <path>`         | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                         |
@@ -97,7 +130,6 @@ transcribe meeting.mp3 \
 | `--text-decoder-compute <units>`  | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
 | `--segmenter-compute <units>`     | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
 | `--embedder-compute <units>`      | SpeakerKit embedder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`   |
-
 
 When SpeakerKit can accept an exact speaker count hint, `transcribe` passes it
 only when `--min-speakers` and `--max-speakers` are both set to the same value.
@@ -140,39 +172,52 @@ sets log/output paths and `TRANSCRIBE_BIN` is `**scripts/folder-script.sh`**
 `folder-action-transcribe.sh` from the same directory).
 
 1. Build and install the `transcribe` binary (see [Build and
-  Install](#build-and-install)).
-2. `chmod +x scripts/folder-action-transcribe.sh` (and `folder-script.sh` if you use it)
+Install](#build-and-install)).
+2. `chmod +x scripts/folder-action-transcribe.sh` (and `folder-script.sh` if you
+   use it)
 3. Open **Automator**, create **Folder Action**, choose the watched folder, add
-  **Run Shell Script**, shell `/bin/bash`, and pass input **as arguments** to
-   the script (path to the checked-in script or a copy).
+**Run Shell Script**, shell `/bin/bash`, and pass input **as arguments** to the
+script (path to the checked-in script or a copy).
 4. Optionally set environment variables in the shell script step or a wrapper
-  (see below).
+(see below).
 
 Full behavior, stable-file wait, and exit codes:
 **[specs/folder-action-markdown.md](specs/folder-action-markdown.md)**.
 
-
-| Variable                       | Meaning                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------- |
-| `TRANSCRIBE_BIN`               | Path to `transcribe` (default: `transcribe` on `PATH`)                  |
-| `TRANSCRIBE_OUTPUT_DIR`        | If set, `-o` for all runs; if unset, outputs go next to each input file |
-| `TRANSCRIBE_FORMAT`            | `--format` value (default: `md`)                                        |
-| `TRANSCRIBE_EXTRA_ARGS`        | Extra CLI flags (space-separated)                                       |
-| `TRANSCRIBE_STABLE_SECS`       | Seconds of unchanged file size before running (default: `2`)            |
-| `TRANSCRIBE_MAX_STABLE_WAIT`   | Max seconds to wait for a stable file (default: `3600`)                 |
-| `TRANSCRIBE_LOCK_FILE`         | If set and `flock` exists, serialize concurrent runs                    |
-| `TRANSCRIBE_SKIP_IF_MD_EXISTS` | If `1`, skip when `basename.md` already exists in the output dir        |
-| `TRANSCRIBE_LOG`               | Structured events (`event=start` / `event=end`, etc.); see the spec |
+| Variable                       | Meaning                                                                                         |
+|:-------------------------------|:------------------------------------------------------------------------------------------------|
+| `TRANSCRIBE_BIN`               | Path to `transcribe` (default: `transcribe` on `PATH`)                                          |
+| `TRANSCRIBE_OUTPUT_DIR`        | If set, `-o` for all runs; if unset, outputs go next to each input file                         |
+| `TRANSCRIBE_FORMAT`            | `--format` value (default: `md`)                                                                |
+| `TRANSCRIBE_EXTRA_ARGS`        | Extra CLI flags (space-separated)                                                               |
+| `TRANSCRIBE_STABLE_SECS`       | Seconds of unchanged file size before running (default: `2`)                                    |
+| `TRANSCRIBE_MAX_STABLE_WAIT`   | Max seconds to wait for a stable file (default: `3600`)                                         |
+| `TRANSCRIBE_LOCK_FILE`         | If set and `flock` exists, serialize concurrent runs                                            |
+| `TRANSCRIBE_SKIP_IF_MD_EXISTS` | If `1`, skip when `basename.md` already exists in the output dir                                |
+| `TRANSCRIBE_LOG`               | Structured events (`event=start` / `event=end`, etc.); see the spec                             |
 | `TRANSCRIBE_STDERR_LOG`        | Full `transcribe` stderr on failure (default: `transcribe.stderr.log` next to `TRANSCRIBE_LOG`) |
-| `TRANSCRIBE_SCRIPT_DIR`        | Directory containing `folder-action-transcribe.sh` (if the wrapper cannot resolve it) |
-| `TRANSCRIBE_SMOKE_LOG`         | If set, append debug lines (argc, `script_dir`, helper present) to this path |
+| `TRANSCRIBE_SCRIPT_DIR`        | Directory containing `folder-action-transcribe.sh` (if the wrapper cannot resolve it)           |
+| `TRANSCRIBE_SMOKE_LOG`         | If set, append debug lines (argc, `script_dir`, helper present) to this path                    |
 
 **Troubleshooting**
 
-- **Nothing runs, no log:** Set **Pass input** to **as arguments** (not “to stdin”). If `argc=0` in a smoke log, that was the issue.
-- **Smoke log (`argc=1` but still no transcription):** The wrapper must find **`folder-action-transcribe.sh`** next to itself. If you **paste** the script into Automator, `script_dir` is wrong — set **`TRANSCRIBE_SCRIPT_DIR`** to the directory that contains both scripts (e.g. `export TRANSCRIBE_SCRIPT_DIR=$HOME/bin` in the shell block), or use **File → Open** and run the script file by path instead of pasting. Enable **`TRANSCRIBE_SMOKE_LOG=/tmp/folder-action-smoke.log`** to log `script_dir` and whether the helper exists.
-- **Extensions:** Allowed audio types only; see the log for `skip-non-audio` if needed.
-- **`event=end` with `exit=4` / `reason=transcribe-failed`:** Model download or load failed. Check the same log for **`transcribe-exit=`**, **`meaning=model`**, and **`transcribe-stderr:`** (and **`transcribe.stderr.log`** next to your main log for the full stderr block). Run **`transcribe`** on that file in Terminal for the same message.
+- **Nothing runs, no log:** Set **Pass input** to **as arguments** (not “to
+  stdin”). If `argc=0` in a smoke log, that was the issue.
+- **Smoke log (`argc=1` but still no transcription):** The wrapper must find
+  **`folder-action-transcribe.sh`** next to itself. If you **paste** the script
+  into Automator, `script_dir` is wrong — set **`TRANSCRIBE_SCRIPT_DIR`** to the
+  directory that contains both scripts (e.g. `export
+  TRANSCRIBE_SCRIPT_DIR=$HOME/bin` in the shell block), or use **File → Open**
+  and run the script file by path instead of pasting. Enable
+  **`TRANSCRIBE_SMOKE_LOG=/tmp/folder-action-smoke.log`** to log `script_dir`
+  and whether the helper exists.
+- **Extensions:** Allowed audio types only; see the log for `skip-non-audio` if
+  needed.
+- **`event=end` with `exit=4` / `reason=transcribe-failed`:** Model download or
+  load failed. Check the same log for **`transcribe-exit=`**,
+  **`meaning=model`**, and **`transcribe-stderr:`** (and
+  **`transcribe.stderr.log`** next to your main log for the full stderr block).
+  Run **`transcribe`** on that file in Terminal for the same message.
 
 ## Output
 
@@ -236,16 +281,14 @@ the infrastructure migration timeline.
 
 ## Exit Codes
 
-
 | Code | Meaning                                  |
-| ---- | ---------------------------------------- |
+|:-----|:-----------------------------------------|
 | 0    | Success                                  |
 | 1    | Runtime failure                          |
 | 2    | Invalid CLI usage                        |
 | 3    | Input file problem                       |
 | 4    | Model download or initialization failure |
 | 5    | Output write failure                     |
-
 
 ## Releasing
 
@@ -264,13 +307,11 @@ This project is licensed under the [MIT License](LICENSE).
 
 ### Dependency licenses
 
-
 | Dependency                                                              | License    |
-| ----------------------------------------------------------------------- | ---------- |
+|:------------------------------------------------------------------------|:-----------|
 | [WhisperKit](https://github.com/argmaxinc/WhisperKit)                   | MIT        |
 | [SpeakerKit](https://github.com/argmaxinc/WhisperKit)                   | MIT        |
 | [swift-argument-parser](https://github.com/apple/swift-argument-parser) | Apache 2.0 |
-
 
 Speaker diarization uses [pyannote](https://github.com/pyannote/pyannote-audio)
 community models licensed under
@@ -279,4 +320,3 @@ community models licensed under
 > Plaquet, A., & Bredin, H. (2023). Powering speaker diarization by
 > multi-scale neural embeddings and non-autoregressive clustering.
 > *IEEE ICASSP 2023*.
-

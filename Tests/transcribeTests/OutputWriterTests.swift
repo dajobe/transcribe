@@ -216,6 +216,95 @@ final class OutputWriterTests: XCTestCase {
         XCTAssertEqual(contents, "new")
     }
 
+    func testOutputBasenameForDirectoryStripsTrailingSlash() {
+        XCTAssertEqual(outputBasename(directoryPath: "/foo/bar/"), "bar")
+        XCTAssertEqual(outputBasename(directoryPath: "/foo/bar"), "bar")
+        XCTAssertEqual(outputBasename(directoryPath: "/foo/bar///"), "bar")
+    }
+
+    func testOutputBasenameForDirectoryPreservesDots() {
+        XCTAssertEqual(outputBasename(directoryPath: "/x/2026.04.notes"), "2026.04.notes")
+        XCTAssertEqual(outputBasename(directoryPath: "/x/2026.04.notes/"), "2026.04.notes")
+    }
+
+    func testRenderJSONIncludesAudioFilesWhenPassed() throws {
+        let output = TranscriptionOutput(
+            segments: [],
+            language: "en",
+            durationSeconds: 0,
+            diarizationEnabled: false
+        )
+        let data = try renderJSON(
+            output: output,
+            audioFile: "/tmp/voicenotes",
+            audioFiles: ["Note 1.m4a", "Note 2.m4a"],
+            model: "large-v3",
+            version: "1.2.3"
+        )
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let metadata = try XCTUnwrap(json["metadata"] as? [String: Any])
+        let files = try XCTUnwrap(metadata["audio_files"] as? [String])
+        XCTAssertEqual(files, ["Note 1.m4a", "Note 2.m4a"])
+        XCTAssertEqual(metadata["audio_file"] as? String, "voicenotes")
+    }
+
+    func testRenderJSONOmitsAudioFilesWhenNil() throws {
+        let output = TranscriptionOutput(
+            segments: [],
+            language: "en",
+            durationSeconds: 0,
+            diarizationEnabled: false
+        )
+        let data = try renderJSON(
+            output: output,
+            audioFile: "/tmp/sample.wav",
+            model: "large-v3",
+            version: "1.2.3"
+        )
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let metadata = try XCTUnwrap(json["metadata"] as? [String: Any])
+        XCTAssertNil(metadata["audio_files"])
+    }
+
+    func testRenderMarkdownIncludesSourcesBlockForDirectory() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: nil, start: 0, end: 1, text: "Hello.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 1,
+            diarizationEnabled: false
+        )
+        let md = renderMarkdown(
+            output: output,
+            audioFile: "/tmp/voicenotes",
+            audioFiles: ["Note 1.m4a", "Note 2.m4a"],
+            model: "large-v3",
+            version: "1.2.3"
+        )
+        XCTAssertTrue(md.contains("- **Sources:**"))
+        XCTAssertTrue(md.contains("- `Note 1.m4a`"))
+        XCTAssertTrue(md.contains("- `Note 2.m4a`"))
+    }
+
+    func testRenderMarkdownOmitsSourcesBlockWhenNotDirectory() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: nil, start: 0, end: 1, text: "Hello.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 1,
+            diarizationEnabled: false
+        )
+        let md = renderMarkdown(
+            output: output,
+            audioFile: "/tmp/clip.m4a",
+            model: "large-v3",
+            version: "1.2.3"
+        )
+        XCTAssertFalse(md.contains("- **Sources:**"))
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

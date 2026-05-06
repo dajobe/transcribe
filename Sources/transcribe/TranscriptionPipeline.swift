@@ -33,6 +33,52 @@ func loadPreparedAudio(audioPath: String, logger: VerboseLogger? = nil) throws -
     return PreparedAudio(samples: audioArray, durationSeconds: durationSeconds)
 }
 
+/// Inter-clip silence inserted when concatenating sequential voice notes.
+/// 200 ms at 16 kHz smooths Whisper VAD chunking across abrupt clip boundaries.
+let interClipPaddingSamples: Int = 3200
+
+/// Loads multiple audio files, decodes each to 16 kHz mono `[Float]`, and
+/// concatenates them in the supplied order with `interClipPaddingSamples` of
+/// silence between consecutive files (no padding before the first or after
+/// the last). Whisper segment and word timestamps will be relative to the
+/// start of this combined buffer; no per-file offset fixup is required by
+/// the caller.
+func loadPreparedAudio(fromFiles paths: [String], logger: VerboseLogger? = nil) throws -> PreparedAudio {
+    precondition(!paths.isEmpty, "loadPreparedAudio(fromFiles:) requires at least one path")
+    let total = paths.count
+    var clips: [[Float]] = []
+    clips.reserveCapacity(total)
+    var totalSamples = 0
+    for (idx, path) in paths.enumerated() {
+        let samples = try AudioLoader.loadAudio(fromPath: path)
+        let secs = Double(samples.count) / Double(WhisperKit.sampleRate)
+        logger?.log(
+            "Loading clip \(idx + 1)/\(total): \((path as NSString).lastPathComponent) "
+            + "(\(String(format: "%.1f", secs))s)"
+        )
+        clips.append(samples)
+        totalSamples += samples.count
+    }
+    let gaps = max(0, total - 1)
+    let combinedCapacity = totalSamples + gaps * interClipPaddingSamples
+
+    var combined: [Float] = []
+    combined.reserveCapacity(combinedCapacity)
+    for (idx, samples) in clips.enumerated() {
+        if idx > 0 {
+            combined.append(contentsOf: repeatElement(0, count: interClipPaddingSamples))
+        }
+        combined.append(contentsOf: samples)
+    }
+
+    let durationSeconds = Double(combined.count) / Double(WhisperKit.sampleRate)
+    logger?.log(
+        "Combined: \(total) clip\(total == 1 ? "" : "s"), "
+        + "\(String(format: "%.1f", durationSeconds))s total"
+    )
+    return PreparedAudio(samples: combined, durationSeconds: durationSeconds)
+}
+
 func initializeWhisperKit(
     model: String,
     modelDir: String,
@@ -289,6 +335,42 @@ func runTranscriptionOnly(
     return (output, phases)
 }
 
+/// Multi-file overload: load and concatenate `paths` then run transcript-only.
+func runTranscriptionOnly(
+    audioPaths paths: [String],
+    model: String,
+    modelDir: String,
+    language: String?,
+    computeOptions: RuntimeComputeOptions,
+    verbose: Bool,
+    wordTimestamps: Bool = false,
+    liveProgressMode: LiveProgressRenderMode? = nil,
+    pipelineStartDate: Date,
+    historicalWallSecondsPerAudioSecond: Double?,
+    logger: VerboseLogger? = nil
+) async throws -> (TranscriptionOutput, PhaseTimings) {
+    let (preparedAudio, loadMs) = try WallClock.measureMs {
+        try loadPreparedAudio(fromFiles: paths, logger: logger)
+    }
+    let (output, inner) = try await runTranscriptionOnly(
+        audioArray: preparedAudio.samples,
+        durationSeconds: preparedAudio.durationSeconds,
+        model: model,
+        modelDir: modelDir,
+        language: language,
+        computeOptions: computeOptions,
+        verbose: verbose,
+        wordTimestamps: wordTimestamps,
+        liveProgressMode: liveProgressMode,
+        pipelineStartDate: pipelineStartDate,
+        historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+        logger: logger
+    )
+    var phases = inner
+    phases.audioLoadMs = loadMs
+    return (output, phases)
+}
+
 /// Result of transcription (and optionally diarization).
 struct TranscriptionOutput {
     var segments: [TranscriptSegment]
@@ -347,6 +429,80 @@ func runTranscriptionWithDiarization(
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     let (preparedAudio, loadMs) = try WallClock.measureMs { try loadPreparedAudio(audioPath: audioPath, logger: logger) }
+    return try await runTranscriptionWithDiarization(
+        preparedAudio: preparedAudio,
+        audioLoadMs: loadMs,
+        model: model,
+        modelDir: modelDir,
+        language: language,
+        minSpeakers: minSpeakers,
+        maxSpeakers: maxSpeakers,
+        speakerStrategy: speakerStrategy,
+        computeOptions: computeOptions,
+        verbose: verbose,
+        liveProgressMode: liveProgressMode,
+        pipelineStartDate: pipelineStartDate,
+        historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+        logger: logger
+    )
+}
+
+/// Multi-file overload: load and concatenate `paths` then run the diarization pipeline.
+func runTranscriptionWithDiarization(
+    audioPaths paths: [String],
+    model: String,
+    modelDir: String,
+    language: String?,
+    minSpeakers: Int?,
+    maxSpeakers: Int?,
+    speakerStrategy: SpeakerInfoStrategy,
+    computeOptions: RuntimeComputeOptions,
+    verbose: Bool,
+    liveProgressMode: LiveProgressRenderMode? = nil,
+    pipelineStartDate: Date,
+    historicalWallSecondsPerAudioSecond: Double?,
+    logger: VerboseLogger? = nil
+) async throws -> (TranscriptionOutput, PhaseTimings) {
+    let (preparedAudio, loadMs) = try WallClock.measureMs {
+        try loadPreparedAudio(fromFiles: paths, logger: logger)
+    }
+    return try await runTranscriptionWithDiarization(
+        preparedAudio: preparedAudio,
+        audioLoadMs: loadMs,
+        model: model,
+        modelDir: modelDir,
+        language: language,
+        minSpeakers: minSpeakers,
+        maxSpeakers: maxSpeakers,
+        speakerStrategy: speakerStrategy,
+        computeOptions: computeOptions,
+        verbose: verbose,
+        liveProgressMode: liveProgressMode,
+        pipelineStartDate: pipelineStartDate,
+        historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+        logger: logger
+    )
+}
+
+/// Internal helper: runs transcription + diarization on already-loaded audio.
+/// Both single-file and multi-file public entry points delegate here after loading.
+private func runTranscriptionWithDiarization(
+    preparedAudio: PreparedAudio,
+    audioLoadMs: Int64,
+    model: String,
+    modelDir: String,
+    language: String?,
+    minSpeakers: Int?,
+    maxSpeakers: Int?,
+    speakerStrategy: SpeakerInfoStrategy,
+    computeOptions: RuntimeComputeOptions,
+    verbose: Bool,
+    liveProgressMode: LiveProgressRenderMode? = nil,
+    pipelineStartDate: Date,
+    historicalWallSecondsPerAudioSecond: Double?,
+    logger: VerboseLogger? = nil
+) async throws -> (TranscriptionOutput, PhaseTimings) {
+    let loadMs = audioLoadMs
     let audioArray = preparedAudio.samples
     let durationSeconds = preparedAudio.durationSeconds
 

@@ -7,6 +7,9 @@ enum AudioLoaderError: Error {
 }
 
 enum AudioLoader {
+    /// Supported audio file extensions (lowercase, without leading dot).
+    static let supportedExtensions: Set<String> = ["mp3", "wav", "m4a", "flac", "aiff", "caf"]
+
     /// Supported audio formats for error messages (from WhisperKit/AVFoundation).
     static let supportedFormats = "mp3, wav, m4a, flac, aiff, caf"
 
