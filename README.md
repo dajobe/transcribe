@@ -16,15 +16,20 @@ No cloud APIs, API keys, Python, or HuggingFace authentication required.
 ## Build and Install
 
 ```bash
-swift build -c release
-cp .build/release/transcribe ~/.local/bin/
+make install                       # builds release and installs to $HOME/bin
+make install BINDIR=/usr/local/bin # or pick another directory
 ```
 
-The optimized binary is written to `.build/release/transcribe`. Use the release
-build for normal transcription runs; debug builds are primarily for development
-and can be slower.
+That builds `.build/release/transcribe` and copies it to `$HOME/bin/transcribe`
+(override the destination with `BINDIR=...`). To build only:
 
-Ensure `~/.local/bin` is on your `PATH` if you use that install location.
+```bash
+make build      # or: swift build -c release
+```
+
+Use the release build for normal transcription runs; debug builds are primarily
+for development and can be slower. Ensure the install directory is on your
+`PATH`.
 
 ## Testing
 

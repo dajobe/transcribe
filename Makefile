@@ -1,12 +1,21 @@
 VERSION := $(shell grep 'static let version' Sources/transcribe/main.swift | sed 's/.*"\(.*\)".*/\1/')
+PREFIX  ?= $(HOME)
+BINDIR  ?= $(PREFIX)/bin
 
-.PHONY: build test tag release changelog
+.PHONY: build test install tag release changelog
 
 build:
 	swift build -c release
 
 test:
 	swift test
+
+# Install the release binary to $(BINDIR) (default: $HOME/bin).
+# Override with: make install BINDIR=/usr/local/bin
+install: build
+	@mkdir -p "$(BINDIR)"
+	install -m 0755 .build/release/transcribe "$(BINDIR)/transcribe"
+	@echo "Installed transcribe $(VERSION) to $(BINDIR)/transcribe"
 
 # Create annotated git tag from the version in main.swift
 tag:
