@@ -126,6 +126,22 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(stderr.contains("No audio files"), "stderr should mention no audio files; got: \(stderr)")
     }
 
+    func testInvalidInputSortExitsNonZero() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["/tmp/any.m4a", "--input-sort", "garbage"]
+        let pipe = Pipe()
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertNotEqual(process.terminationStatus, 0, "unknown --input-sort value should not exit 0")
+        XCTAssertTrue(
+            stderr.contains("input-sort") || stderr.contains("garbage"),
+            "stderr should reference the bad argument; got: \(stderr)"
+        )
+    }
+
     func testDirectoryWithOnlyNonAudioExitThree() throws {
         let dir = try makeTempDir()
         try Data("notes".utf8).write(to: dir.appendingPathComponent("notes.txt"))

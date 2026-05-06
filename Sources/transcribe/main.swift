@@ -8,7 +8,7 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
-    static let version = "1.3.0"
+    static let version = "1.4.0"
 
     static var configuration = CommandConfiguration(
         abstract: "On-device meeting transcription with optional speaker diarization.",
@@ -55,6 +55,12 @@ struct Transcribe: AsyncParsableCommand {
 
     @Option(name: .long, help: "Speaker merge strategy: subsegment or segment")
     var speakerStrategy: String = "subsegment"
+
+    @Option(
+        name: .long,
+        help: "Order for directory input: recorded (embedded creation timestamp; default), name (natural-sort filename), mtime (file modification time)"
+    )
+    var inputSort: InputSortOrder = .recorded
 
     @Option(name: .long, help: "Directory used for downloaded model caches")
     var modelDir: String = "~/.cache/transcribe"
@@ -216,7 +222,7 @@ struct Transcribe: AsyncParsableCommand {
             embedder: embedderCompute
         )
 
-        let resolvedInput = try InputResolver.resolve(audioFile)
+        let resolvedInput = try await InputResolver.resolve(audioFile, sort: inputSort)
         let inputAudioPath: String
         let inputAudioPaths: [String]?
         let inputAudioFileNames: [String]?
@@ -229,7 +235,10 @@ struct Transcribe: AsyncParsableCommand {
             inputAudioPath = path
             inputAudioPaths = files
             inputAudioFileNames = files.map { ($0 as NSString).lastPathComponent }
-            logger.log("Input is a directory: \(files.count) audio file\(files.count == 1 ? "" : "s")")
+            logger.log(
+                "Input is a directory: \(files.count) audio file\(files.count == 1 ? "" : "s") "
+                + "(sort=\(inputSort.rawValue))"
+            )
         }
 
         let resolvedModel = try await resolveModel(explicit: model, logger: logger)

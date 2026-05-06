@@ -47,8 +47,9 @@ transcribe <audio-file-or-directory> [options]
 
 The positional argument may be either a single audio file or a directory of
 sequential clips. When given a directory, top-level audio files are concatenated
-in natural-sort order and transcribed as one logical recording. The output
-filename is derived from the directory name (e.g.
+and transcribed as one logical recording. By default they are ordered by their
+embedded recording timestamp (override with `--input-sort name` or `--input-sort
+mtime`). The output filename is derived from the directory name (e.g.
 `~/voicenotes/2026-may-meeting/` → `2026-may-meeting.txt`).
 
 ### Examples
@@ -90,9 +91,13 @@ When the positional argument is a directory, `transcribe` concatenates its
 top-level audio files into a single logical recording before running the
 pipeline.
 
-- **Sort order:** filenames are sorted with natural (numeric-aware) comparison,
-  so `Note 1.m4a, Note 2.m4a, …, Note 10.m4a` are concatenated in the order a
-  human would expect.
+- **Sort order:** by default clips are ordered by their embedded recording
+  timestamp (e.g. the M4A `creation_time` atom that Voice Memos and most
+  recorders set to the actual recording moment). Files without that metadata
+  fall back to file modification time, then to natural-sort filename, so order
+  stays deterministic for mixed directories. Use `--input-sort name` to force
+  natural-sort filename ordering (handles `Note 1.m4a, …, Note 10.m4a`) or
+  `--input-sort mtime` to use file modification time only.
 - **Filtering:** files are filtered by extension (case-insensitive) against the
   supported formats. Hidden files (`.DS_Store`, `._*`) and subdirectories are
   skipped; subdirectories are not recursed into.
@@ -121,6 +126,7 @@ pipeline.
 | `--max-speakers <n>`              | Maximum speakers for diarization                                                                 |
 | `--no-diarize`                    | Disable speaker diarization                                                                      |
 | `--speaker-strategy <s>`          | Speaker merge strategy: `subsegment` or `segment` (default: `subsegment`)                        |
+| `--input-sort <mode>`             | Order for directory input: `recorded` (default), `name`, `mtime`                                 |
 | `--model-dir <path>`              | Model cache directory (default: `~/.cache/transcribe`)                                           |
 | `--overwrite`                     | Replace existing output files                                                                    |
 | `--verbose`                       | Print progress and timing to stderr                                                              |
