@@ -200,7 +200,35 @@ enum InputResolver {
                 }
                 out.append(base.isEmpty ? "Recording \(i)" : "\(base) - Recording \(i)")
             }
-            return out
+            return uniquedSessionBasenames(out)
+        }
+    }
+
+    /// Ensures auto-derived session basenames cannot collide within one run.
+    /// This keeps a later session from overwriting, or failing after
+    /// transcription because of, an earlier session with the same output name.
+    private static func uniquedSessionBasenames(_ basenames: [String]) -> [String] {
+        var originalCounts: [String: Int] = [:]
+        for basename in basenames {
+            originalCounts[basename.lowercased(), default: 0] += 1
+        }
+        var seen: [String: Int] = [:]
+        var used: Set<String> = []
+        return basenames.map { basename in
+            let key = basename.lowercased()
+            seen[key, default: 0] += 1
+            var candidate = basename
+            var suffix = seen[key]!
+            var needsSuffix = suffix > 1
+            var candidateKey = candidate.lowercased()
+            while needsSuffix || used.contains(candidateKey) || (candidateKey != key && (originalCounts[candidateKey] ?? 0) > 0) {
+                candidate = "\(basename) - Recording \(suffix)"
+                candidateKey = candidate.lowercased()
+                suffix += 1
+                needsSuffix = false
+            }
+            used.insert(candidateKey)
+            return candidate
         }
     }
 

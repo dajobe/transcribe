@@ -209,6 +209,59 @@ final class InputResolverTests: XCTestCase {
         )
     }
 
+    func testSessionBasenamesDisambiguatesDuplicateCommonPrefixes() {
+        let resolved = ResolvedInput.directory(
+            path: "/Users/x/talks",
+            sessions: [
+                AudioSession(
+                    files: [
+                        "/Users/x/talks/morning keynote part 1.m4a",
+                        "/Users/x/talks/morning keynote part 2.m4a",
+                    ],
+                    recordedAt: nil
+                ),
+                AudioSession(
+                    files: [
+                        "/Users/x/talks/morning keynote part 3.m4a",
+                        "/Users/x/talks/morning keynote part 4.m4a",
+                    ],
+                    recordedAt: nil
+                ),
+            ]
+        )
+        XCTAssertEqual(
+            InputResolver.sessionBasenames(for: resolved, prefixOverride: nil),
+            ["morning keynote", "morning keynote - Recording 2"]
+        )
+    }
+
+    func testSessionBasenamesDisambiguationAvoidsExistingSuffixes() {
+        let resolved = ResolvedInput.directory(
+            path: "/Users/x/talks",
+            sessions: [
+                AudioSession(
+                    files: [
+                        "/Users/x/talks/morning keynote part 1.m4a",
+                        "/Users/x/talks/morning keynote part 2.m4a",
+                    ],
+                    recordedAt: nil
+                ),
+                AudioSession(files: ["/Users/x/talks/morning keynote - Recording 2.m4a"], recordedAt: nil),
+                AudioSession(
+                    files: [
+                        "/Users/x/talks/morning keynote part 3.m4a",
+                        "/Users/x/talks/morning keynote part 4.m4a",
+                    ],
+                    recordedAt: nil
+                ),
+            ]
+        )
+        XCTAssertEqual(
+            InputResolver.sessionBasenames(for: resolved, prefixOverride: nil),
+            ["morning keynote", "morning keynote - Recording 2", "morning keynote - Recording 3"]
+        )
+    }
+
     func testSessionBasenamesRejectsShortCommonPrefix() {
         // Common prefix "ABC" is too short (3 chars < 8) → fallback to dir name.
         let resolved = ResolvedInput.directory(
