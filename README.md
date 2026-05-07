@@ -178,7 +178,7 @@ session basename rules, and verbose-log examples — see
 
 | Option                            | Description                                                                                      |
 |:----------------------------------|:-------------------------------------------------------------------------------------------------|
-| `-m, --model <name>`              | Whisper model (default: auto-select for device)                                                  |
+| `-m, --model <name>`              | Whisper model (default: `openai_whisper-large-v3_turbo`; ~1.5 GB on first run)                   |
 | `-l, --language <code>`           | Language code (default: auto-detect)                                                             |
 | `-o, --output-dir <path>`         | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                         |
 | `-f, --format <fmt>`              | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `md`, `all` (default: `txt,json`)  |

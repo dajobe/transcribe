@@ -8,7 +8,15 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
-    static let version = "1.6.0"
+    static let version = "1.7.0"
+
+    /// Default Whisper model when `--model` is not supplied.
+    /// `openai_whisper-large-v3_turbo` is the strongest model that runs at
+    /// usable speed on Apple Silicon with the Neural Engine; the previously
+    /// auto-selected `openai_whisper-base` produced poor results on real-world
+    /// noisy or far-field audio (meetings, conferences, voice notes).
+    /// Override with `--model <name>`.
+    static let defaultModel = "openai_whisper-large-v3_turbo"
 
     static var configuration = CommandConfiguration(
         abstract: "On-device meeting transcription with optional speaker diarization.",
@@ -23,7 +31,12 @@ struct Transcribe: AsyncParsableCommand {
     @Argument(help: "Path to an audio file, or a directory of audio clips to be concatenated and transcribed as one recording (top-level only, natural-sorted by filename)")
     var audioFile: String
 
-    @Option(name: [.short, .long], help: "Whisper model to use (default: auto-select for device)")
+    @Option(
+        name: [.short, .long],
+        help: ArgumentHelp(
+            "Whisper model to use (default: \(Self.defaultModel); first run downloads ~1.5 GB to the model cache directory)"
+        )
+    )
     var model: String?
 
     @Option(name: [.short, .long], help: "Language code such as \"en\"; default is auto-detect")
@@ -156,16 +169,14 @@ struct Transcribe: AsyncParsableCommand {
     }
 
     /// Resolves the whisper model name: uses explicit value if provided,
-    /// otherwise asks WhisperKit for the recommended model for this device.
+    /// otherwise picks `Self.defaultModel`. Always announces the chosen model
+    /// on stderr (even outside verbose mode) so users see what the run is
+    /// actually using — first-run downloads can be ~1.5 GB.
     private func resolveModel(explicit: String?, logger: VerboseLogger) async throws -> String {
-        if let explicit {
-            logger.log("Using model: \(explicit)")
-            return explicit
-        }
-        let recommended = WhisperKit.recommendedModels()
-        let modelName = recommended.default
-        logger.log("Auto-selected model: \(modelName)")
-        return modelName
+        let chosen = explicit ?? Self.defaultModel
+        let label = (explicit == nil) ? "Auto-selected model" : "Using model"
+        FileHandle.standardError.write("\(label): \(chosen)\n".data(using: .utf8)!)
+        return chosen
     }
 
     /// Validates options and combinations; invalid usage throws with exit code 2.
