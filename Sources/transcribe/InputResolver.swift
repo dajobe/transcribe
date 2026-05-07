@@ -30,6 +30,7 @@ enum InputResolver {
         _ rawArg: String,
         sort: InputSortOrder = .recorded,
         sessionGapSeconds: Double = 0,
+        filenameTimeRecovery: Bool = true,
         logger: VerboseLogger? = nil
     ) async throws -> ResolvedInput {
         let expanded = (rawArg as NSString).expandingTildeInPath
@@ -84,14 +85,50 @@ enum InputResolver {
 
         // Probe per-clip metadata once, then sort and group from that data.
         let probed = await probeClips(candidates)
-        let effectiveSort = recordedTrustCheck(probed, requested: sort, logger: logger)
+        let initialSort = recordedTrustCheck(probed, requested: sort, logger: logger)
+
+        // When the trust check downgraded recorded-sort, OR when no clip has
+        // any embedded recorded-at (Voice Memos export pattern), try
+        // recovering recording times from filename prefixes.
+        var clipsForOrdering = probed
+        var effectiveSort = initialSort
+        let trustDowngraded = (sort == .recorded && initialSort != .recorded)
+        let allRecordedAtMissing = (sort == .recorded && probed.allSatisfy { $0.recordedAt == nil })
+        let shouldTryRecovery = trustDowngraded || allRecordedAtMissing
+        if shouldTryRecovery && filenameTimeRecovery {
+            if let recovered = tryFilenameTimeRecovery(probed, logger: logger) {
+                let recoveredSort = recordedTrustCheck(
+                    recovered, requested: .recorded, logger: logger
+                )
+                if recoveredSort == .recorded {
+                    clipsForOrdering = recovered
+                    effectiveSort = .recorded
+                    logger?.log(
+                        "filename time recovery: applied; using sort=recorded with filename-derived dates"
+                    )
+                } else {
+                    logger?.log(
+                        "filename time recovery: parsed clips still fail trust check; using sort=name fallback"
+                    )
+                    effectiveSort = .name
+                }
+            } else if allRecordedAtMissing && !trustDowngraded {
+                // No recorded times at all and recovery declined — fall back to
+                // filename sort to give the user a deterministic order based on
+                // whatever data is available.
+                effectiveSort = .name
+            }
+        } else if shouldTryRecovery && !filenameTimeRecovery {
+            logger?.log("filename time recovery: disabled by --no-filename-time-recovery")
+        }
+
         // If we couldn't trust the recorded dates for ordering, the same dates
         // can't be trusted for gap-based session splitting either — disable.
         let effectiveGap = (sort == .recorded && effectiveSort != .recorded) ? 0.0 : sessionGapSeconds
         if effectiveGap == 0 && sessionGapSeconds > 0 && sort == .recorded && effectiveSort != .recorded {
             logger?.log("Session splitting disabled: same untrusted recorded-date metadata.")
         }
-        let sortedClips = sortClips(probed, by: effectiveSort, logger: logger)
+        let sortedClips = sortClips(clipsForOrdering, by: effectiveSort, logger: logger)
         let sessions = SessionGrouper.groupIntoSessions(
             sortedClips,
             maxGapSeconds: effectiveGap,
@@ -100,12 +137,22 @@ enum InputResolver {
         return .directory(path: absDirPath, sessions: sessions)
     }
 
-    /// Returns one output basename per session. Honours `--output-prefix`:
-    /// if set, replaces the directory-derived base; if unset, the directory's
-    /// last path component is used (with a `Recording` fallback when the
-    /// directory has no usable name). For multiple sessions a `" - Recording N"`
-    /// suffix is appended (1-indexed).
-    static func sessionBasenames(for resolved: ResolvedInput, prefixOverride: String?) -> [String] {
+    /// Returns one output basename per session. Precedence:
+    /// 1. `--output-prefix` (always wins; appends `" - Recording N"` for
+    ///    multi-session runs).
+    /// 2. When `autoSessionBasename` is true and a session contains ≥ 2 clips
+    ///    with a meaningful shared filename prefix, the prefix is used as the
+    ///    session basename.
+    /// 3. When `autoSessionBasename` is true and a multi-session run has a
+    ///    single-clip session, that clip's filename basename is used.
+    /// 4. Otherwise the directory's last path component is used, suffixed
+    ///    with `" - Recording N"` for multi-session runs. `Recording N` is
+    ///    used as a fallback when the directory has no usable name.
+    static func sessionBasenames(
+        for resolved: ResolvedInput,
+        prefixOverride: String?,
+        autoSessionBasename: Bool = true
+    ) -> [String] {
         switch resolved {
         case .file(let path):
             return [prefixOverride ?? outputBasename(audioPath: path)]
@@ -113,13 +160,99 @@ enum InputResolver {
             let raw = prefixOverride ?? outputBasename(directoryPath: path)
             let base = raw.isEmpty ? "" : raw
             let count = max(sessions.count, 1)
+
+            // --output-prefix always wins; auto derivation is bypassed.
+            if prefixOverride != nil {
+                if count <= 1 { return [base] }
+                return (1...count).map { idx in "\(base) - Recording \(idx)" }
+            }
+
+            // Single-session directory: keep the directory basename (current
+            // behaviour) unless that one session has multiple clips with a
+            // shared prefix worth using.
             if count <= 1 {
+                if autoSessionBasename,
+                   let one = sessions.first,
+                   one.files.count >= 2,
+                   let derived = commonPrefixBasename(forSessionFiles: one.files) {
+                    return [derived]
+                }
                 return [base.isEmpty ? "Recording 1" : base]
             }
-            return (1...count).map { idx in
-                base.isEmpty ? "Recording \(idx)" : "\(base) - Recording \(idx)"
+
+            // Multi-session: derive per session when possible.
+            var out: [String] = []
+            for (idx, session) in sessions.enumerated() {
+                let i = idx + 1
+                if autoSessionBasename {
+                    if session.files.count >= 2,
+                       let derived = commonPrefixBasename(forSessionFiles: session.files) {
+                        out.append(derived)
+                        continue
+                    }
+                    if session.files.count == 1 {
+                        let single = outputBasename(audioPath: session.files[0])
+                        if !single.isEmpty {
+                            out.append(single)
+                            continue
+                        }
+                    }
+                }
+                out.append(base.isEmpty ? "Recording \(i)" : "\(base) - Recording \(i)")
+            }
+            return out
+        }
+    }
+
+    /// Computes the longest common prefix (filename minus extension) across
+    /// the supplied paths. Strips trailing whitespace and common
+    /// sequence-marker suffixes (` part `, `-`, `_`, `(`, trailing zero) and
+    /// rejects results below the configured thresholds.
+    /// - Returns: the derived prefix, or nil if no usable shared prefix
+    ///   exists.
+    static func commonPrefixBasename(forSessionFiles files: [String]) -> String? {
+        guard files.count >= 2 else { return nil }
+        let basenames = files.map { (($0 as NSString).lastPathComponent as NSString).deletingPathExtension }
+
+        var lcp = basenames[0]
+        for name in basenames.dropFirst() {
+            lcp = lcp.commonPrefix(with: name)
+            if lcp.isEmpty { return nil }
+        }
+
+        let trimmed = stripTrailingSequenceMarkers(lcp)
+        guard !trimmed.isEmpty else { return nil }
+
+        // Reject results that are too short or proportionally too small to
+        // represent a meaningful shared name.
+        let shortestLen = basenames.map(\.count).min() ?? 0
+        guard trimmed.count >= 8 else { return nil }
+        guard Double(trimmed.count) >= 0.3 * Double(shortestLen) else { return nil }
+
+        return trimmed
+    }
+
+    /// Repeatedly strips trailing whitespace, common single-char markers
+    /// (`-`, `_`, `(`, `0`), and the literal word `part` from the right side
+    /// until none remain. Used to clean up a longest-common-prefix before
+    /// returning it as a session basename.
+    private static func stripTrailingSequenceMarkers(_ s: String) -> String {
+        var result = s
+        let trailingChars: Set<Character> = [" ", "\t", "-", "_", "(", "0"]
+        var changed = true
+        while changed {
+            changed = false
+            while let last = result.last, trailingChars.contains(last) || last.isWhitespace {
+                result.removeLast()
+                changed = true
+            }
+            // Strip a trailing literal "part" (case-insensitive, word-form).
+            if result.lowercased().hasSuffix("part") {
+                result.removeLast(4)
+                changed = true
             }
         }
+        return result
     }
 
     /// Convenience: list of sessions for a resolved input. Single-file inputs
@@ -177,6 +310,177 @@ enum InputResolver {
             + ">= longest-duration=\(formatDuration(maxDuration)); using sort=recorded."
         )
         return requested
+    }
+
+    // MARK: - Filename time-prefix recovery
+
+    /// Parses a leading recording-time prefix from `filename` (just the basename;
+    /// the extension is allowed but ignored). Recognises:
+    ///
+    /// - `YYYY-MM-DDTHH:MM[:SS]`
+    /// - `YYYY-MM-DD HH:MM[:SS]`
+    /// - `HH:MM[:SS]`
+    /// - `HH-MM[-SS]` (filesystem-safe)
+    /// - `HHMM` or `HHMMSS` followed by `_`
+    ///
+    /// Time-only forms (no explicit date) are combined with `fileMtime`'s date
+    /// in the local timezone. Returns nil when the prefix is absent, the values
+    /// are out of range, or the character following the prefix is alphanumeric
+    /// (so e.g. `09:00abc` does not parse). The prefix must be followed by a
+    /// non-alphanumeric character, end-of-string, or `_` (depending on form).
+    static func parseFilenameRecordedAt(filename: String, fileMtime: Date) -> Date? {
+        let s = filename.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return nil }
+
+        // Order matters: longest / most-specific patterns first.
+        // 1. ISO-like with 'T' separator: 2026-01-15T09:48[:00]
+        if let m = matchPattern(
+            s,
+            pattern: #"^(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2})(?::(\d{2}))?(?=[^0-9A-Za-z]|$)"#
+        ) {
+            return composeAbsolute(year: m[1], month: m[2], day: m[3], h: m[4], min: m[5], sec: m[6])
+        }
+        // 2. Date + space + time: 2026-01-15 09:48[:00]
+        if let m = matchPattern(
+            s,
+            pattern: #"^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?=[^0-9A-Za-z]|$)"#
+        ) {
+            return composeAbsolute(year: m[1], month: m[2], day: m[3], h: m[4], min: m[5], sec: m[6])
+        }
+        // 3. HH:MM[:SS] colon form
+        if let m = matchPattern(
+            s,
+            pattern: #"^(\d{1,2}):(\d{2})(?::(\d{2}))?(?=[^0-9A-Za-z]|$)"#
+        ) {
+            return composeWithMtimeDate(h: m[1], min: m[2], sec: m[3], mtime: fileMtime)
+        }
+        // 4. HH-MM[-SS] dash form (HH must be ≤ 2 digits so YYYY-MM-DD doesn't match)
+        if let m = matchPattern(
+            s,
+            pattern: #"^(\d{1,2})-(\d{2})(?:-(\d{2}))?(?=[^0-9A-Za-z]|$)"#
+        ) {
+            return composeWithMtimeDate(h: m[1], min: m[2], sec: m[3], mtime: fileMtime)
+        }
+        // 5. HHMM[SS]_ underscore form
+        if let m = matchPattern(s, pattern: #"^(\d{2})(\d{2})(\d{2})?_"#) {
+            return composeWithMtimeDate(h: m[1], min: m[2], sec: m[3], mtime: fileMtime)
+        }
+        return nil
+    }
+
+    /// Returns the captured groups (1-indexed in the original regex; index 0 is
+    /// the full match). Each entry is the captured string or nil if the group
+    /// did not participate in the match.
+    private static func matchPattern(_ s: String, pattern: String) -> [String?]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(s.startIndex..<s.endIndex, in: s)
+        guard let result = regex.firstMatch(in: s, range: range) else { return nil }
+        var groups: [String?] = [nil]  // index 0 placeholder
+        for i in 1..<result.numberOfRanges {
+            let r = result.range(at: i)
+            if r.location == NSNotFound {
+                groups.append(nil)
+            } else if let swiftRange = Range(r, in: s) {
+                groups.append(String(s[swiftRange]))
+            } else {
+                groups.append(nil)
+            }
+        }
+        return groups
+    }
+
+    private static func composeAbsolute(
+        year: String?, month: String?, day: String?,
+        h: String?, min: String?, sec: String?
+    ) -> Date? {
+        guard let year, let month, let day, let h, let min,
+              let yearI = Int(year), let monthI = Int(month), let dayI = Int(day),
+              let hI = Int(h), let minI = Int(min) else { return nil }
+        let secI = sec.flatMap(Int.init) ?? 0
+        guard yearI >= 1900, yearI <= 2099,
+              monthI >= 1, monthI <= 12,
+              dayI >= 1, dayI <= 31,
+              hI >= 0, hI <= 23,
+              minI >= 0, minI <= 59,
+              secI >= 0, secI <= 59 else { return nil }
+        var comps = DateComponents()
+        comps.year = yearI
+        comps.month = monthI
+        comps.day = dayI
+        comps.hour = hI
+        comps.minute = minI
+        comps.second = secI
+        comps.timeZone = TimeZone.current
+        return Calendar(identifier: .gregorian).date(from: comps)
+    }
+
+    private static func composeWithMtimeDate(
+        h: String?, min: String?, sec: String?, mtime: Date
+    ) -> Date? {
+        guard let h, let min,
+              let hI = Int(h), let minI = Int(min) else { return nil }
+        let secI = sec.flatMap(Int.init) ?? 0
+        guard hI >= 0, hI <= 23,
+              minI >= 0, minI <= 59,
+              secI >= 0, secI <= 59 else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone.current
+        let dayComps = calendar.dateComponents([.year, .month, .day], from: mtime)
+        var comps = DateComponents()
+        comps.year = dayComps.year
+        comps.month = dayComps.month
+        comps.day = dayComps.day
+        comps.hour = hI
+        comps.minute = minI
+        comps.second = secI
+        comps.timeZone = TimeZone.current
+        return calendar.date(from: comps)
+    }
+
+    /// Attempts to synthesize `recordedAt` from the filename time prefix of
+    /// every clip. Returns the recovered clip set iff every clip parsed; nil
+    /// otherwise (mixed inputs are rejected to avoid misordering).
+    private static func tryFilenameTimeRecovery(
+        _ clips: [AudioClip],
+        logger: VerboseLogger?
+    ) -> [AudioClip]? {
+        var recovered: [AudioClip] = []
+        var unparsed: [String] = []
+        var parsedSamples: [(String, Date)] = []
+        for clip in clips {
+            let name = (clip.path as NSString).lastPathComponent
+            let mtime = mtimeForPath(clip.path) ?? Date()
+            if let date = parseFilenameRecordedAt(filename: name, fileMtime: mtime) {
+                recovered.append(AudioClip(
+                    path: clip.path,
+                    recordedAt: date,
+                    durationSeconds: clip.durationSeconds
+                ))
+                parsedSamples.append((name, date))
+            } else {
+                unparsed.append(name)
+            }
+        }
+        if let logger {
+            if unparsed.isEmpty {
+                logger.log(
+                    "filename time recovery: parsed \(recovered.count)/\(clips.count) clips"
+                )
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                for (name, date) in parsedSamples {
+                    logger.log("  parsed: \(name) -> \(formatter.string(from: date))")
+                }
+            } else {
+                logger.log(
+                    "filename time recovery: \(recovered.count)/\(clips.count) clips parsed; recovery declines (mixed)"
+                )
+                for name in unparsed {
+                    logger.log("  unparsed: \(name)")
+                }
+            }
+        }
+        return unparsed.isEmpty ? recovered : nil
     }
 
     // MARK: - Sorting

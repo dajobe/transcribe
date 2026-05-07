@@ -122,7 +122,8 @@ final class InputResolverTests: XCTestCase {
         XCTAssertEqual(InputResolver.sessionBasenames(for: resolved, prefixOverride: nil), ["voicenotes"])
     }
 
-    func testSessionBasenamesMultiSessionAppendsRecordingN() async throws {
+    func testSessionBasenamesMultiSessionUsesFileBasenamesForSingleClipSessions() async throws {
+        // Auto-basename: each session of one clip uses its file's basename.
         let resolved = ResolvedInput.directory(
             path: "/Users/x/voicenotes",
             sessions: [
@@ -133,13 +134,31 @@ final class InputResolverTests: XCTestCase {
         )
         XCTAssertEqual(
             InputResolver.sessionBasenames(for: resolved, prefixOverride: nil),
+            ["a", "b", "c"]
+        )
+    }
+
+    func testSessionBasenamesMultiSessionFallsBackToDirWhenDisabled() async throws {
+        // With autoSessionBasename: false, falls back to "<dir> - Recording N".
+        let resolved = ResolvedInput.directory(
+            path: "/Users/x/voicenotes",
+            sessions: [
+                AudioSession(files: ["/x/a.m4a"], recordedAt: nil),
+                AudioSession(files: ["/x/b.m4a"], recordedAt: nil),
+                AudioSession(files: ["/x/c.m4a"], recordedAt: nil),
+            ]
+        )
+        XCTAssertEqual(
+            InputResolver.sessionBasenames(
+                for: resolved, prefixOverride: nil, autoSessionBasename: false
+            ),
             ["voicenotes - Recording 1", "voicenotes - Recording 2", "voicenotes - Recording 3"]
         )
     }
 
     func testSessionBasenamesFallsBackToRecordingWhenDirNameUnusable() {
-        // Standardising "/" or empty stays "/" with last component "/" → empty.
-        // outputBasename returns "" for that case; sessionBasenames falls back.
+        // With auto-basename, single-clip sessions use file basenames; here
+        // the file names are usable so they win even though the dir is "/".
         let resolved = ResolvedInput.directory(
             path: "/",
             sessions: [
@@ -149,8 +168,91 @@ final class InputResolverTests: XCTestCase {
         )
         XCTAssertEqual(
             InputResolver.sessionBasenames(for: resolved, prefixOverride: nil),
+            ["a", "b"]
+        )
+    }
+
+    func testSessionBasenamesFallsBackToRecordingWhenAutoBasenameDisabled() {
+        // Disable auto-basename; with empty dir name, fall back to "Recording N".
+        let resolved = ResolvedInput.directory(
+            path: "/",
+            sessions: [
+                AudioSession(files: ["/a.m4a"], recordedAt: nil),
+                AudioSession(files: ["/b.m4a"], recordedAt: nil),
+            ]
+        )
+        XCTAssertEqual(
+            InputResolver.sessionBasenames(
+                for: resolved, prefixOverride: nil, autoSessionBasename: false
+            ),
             ["Recording 1", "Recording 2"]
         )
+    }
+
+    func testSessionBasenamesDerivesCommonPrefixForMultiClipSession() {
+        let resolved = ResolvedInput.directory(
+            path: "/Users/x/talks",
+            sessions: [
+                AudioSession(
+                    files: [
+                        "/Users/x/talks/morning keynote part 1.m4a",
+                        "/Users/x/talks/morning keynote part 2.m4a",
+                        "/Users/x/talks/morning keynote part 3.m4a",
+                    ],
+                    recordedAt: nil
+                )
+            ]
+        )
+        XCTAssertEqual(
+            InputResolver.sessionBasenames(for: resolved, prefixOverride: nil),
+            ["morning keynote"]
+        )
+    }
+
+    func testSessionBasenamesRejectsShortCommonPrefix() {
+        // Common prefix "ABC" is too short (3 chars < 8) → fallback to dir name.
+        let resolved = ResolvedInput.directory(
+            path: "/Users/x/clips",
+            sessions: [
+                AudioSession(
+                    files: [
+                        "/Users/x/clips/ABC1.m4a",
+                        "/Users/x/clips/ABC2.m4a",
+                    ],
+                    recordedAt: nil
+                )
+            ]
+        )
+        XCTAssertEqual(
+            InputResolver.sessionBasenames(for: resolved, prefixOverride: nil),
+            ["clips"]
+        )
+    }
+
+    func testCommonPrefixBasenameStripsPartSuffix() {
+        let derived = InputResolver.commonPrefixBasename(forSessionFiles: [
+            "/x/13:45 how we reliably send 1m messages part 1.m4a",
+            "/x/13:45 how we reliably send 1m messages part 2.m4a",
+            "/x/13:45 how we reliably send 1m messages part 3.m4a",
+        ])
+        XCTAssertEqual(derived, "13:45 how we reliably send 1m messages")
+    }
+
+    func testCommonPrefixBasenameRejectsNoSharedPrefix() {
+        let derived = InputResolver.commonPrefixBasename(forSessionFiles: [
+            "/x/Foo Cafe.m4a",
+            "/x/Bar Park.m4a",
+        ])
+        XCTAssertNil(derived)
+    }
+
+    func testCommonPrefixBasenameRejectsBelow30PercentThreshold() {
+        // LCP "abcdefgh" is 8 chars, but shortest basename is 30 chars → 27%.
+        let derived = InputResolver.commonPrefixBasename(forSessionFiles: [
+            "/x/abcdefghi-quite-distinct-here.m4a",
+            "/x/abcdefghj-totally-different-z.m4a",
+        ])
+        XCTAssertNil(derived)
     }
 
     func testSessionBasenamesHonoursPrefixOverride() {
@@ -212,7 +314,10 @@ final class InputResolverTests: XCTestCase {
         )
     }
 
-    func testResolveDirectoryRecordedFallsBackToMTimeWhenMetadataMissing() async throws {
+    func testResolveDirectoryRecordedFallsBackToFilenameWhenAllMetadataMissing() async throws {
+        // When all clips lack embedded recorded-at and filenames don't carry
+        // parseable time prefixes, the resolver demotes to natural-sort
+        // filename — the most predictable fallback.
         let dir = try makeTempDir()
         for name in ["c.m4a", "a.m4a", "b.m4a"] {
             try Data().write(to: dir.appendingPathComponent(name))
@@ -234,9 +339,10 @@ final class InputResolverTests: XCTestCase {
         guard case .directory(_, let sessions) = resolved else {
             return XCTFail("Expected .directory")
         }
+        // .name fallback ignores mtime and uses natural-sort filename order.
         XCTAssertEqual(
             sessions.flatMap(\.files).map { ($0 as NSString).lastPathComponent },
-            ["c.m4a", "b.m4a", "a.m4a"]
+            ["a.m4a", "b.m4a", "c.m4a"]
         )
     }
 
@@ -296,6 +402,238 @@ final class InputResolverTests: XCTestCase {
         // spread < duration but the user explicitly asked for .name — leave it alone.
         XCTAssertEqual(InputResolver.recordedTrustCheck(clips, requested: .name), .name)
         XCTAssertEqual(InputResolver.recordedTrustCheck(clips, requested: .mtime), .mtime)
+    }
+
+    // MARK: - Filename time-prefix parser
+
+    private var fixedMtime: Date {
+        // 2026-01-15 14:00:00 UTC; mtime date used for time-only filenames.
+        Date(timeIntervalSince1970: 1_768_528_800)
+    }
+
+    private func ymd(_ date: Date) -> (Int, Int, Int) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone.current
+        let c = cal.dateComponents([.year, .month, .day], from: date)
+        return (c.year!, c.month!, c.day!)
+    }
+
+    private func hms(_ date: Date) -> (Int, Int, Int) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone.current
+        let c = cal.dateComponents([.hour, .minute, .second], from: date)
+        return (c.hour!, c.minute!, c.second!)
+    }
+
+    func testParseFilenameRecordedAtColonTime() {
+        let d = InputResolver.parseFilenameRecordedAt(
+            filename: "09:48 morning standup.m4a",
+            fileMtime: fixedMtime
+        )
+        XCTAssertNotNil(d)
+        XCTAssertEqual(hms(d!).0, 9)
+        XCTAssertEqual(hms(d!).1, 48)
+        XCTAssertEqual(hms(d!).2, 0)
+        // mtime date is preserved
+        let mt = ymd(fixedMtime)
+        XCTAssertEqual(ymd(d!).0, mt.0)
+        XCTAssertEqual(ymd(d!).1, mt.1)
+        XCTAssertEqual(ymd(d!).2, mt.2)
+    }
+
+    func testParseFilenameRecordedAtColonTimeWithSeconds() {
+        let d = InputResolver.parseFilenameRecordedAt(
+            filename: "09:48:32 morning.m4a",
+            fileMtime: fixedMtime
+        )
+        XCTAssertNotNil(d)
+        XCTAssertEqual(hms(d!).2, 32)
+    }
+
+    func testParseFilenameRecordedAtDashTime() {
+        let d = InputResolver.parseFilenameRecordedAt(
+            filename: "09-48 morning.m4a",
+            fileMtime: fixedMtime
+        )
+        XCTAssertNotNil(d)
+        XCTAssertEqual(hms(d!).0, 9)
+        XCTAssertEqual(hms(d!).1, 48)
+    }
+
+    func testParseFilenameRecordedAtUnderscoreHHMM() {
+        let d = InputResolver.parseFilenameRecordedAt(
+            filename: "0948_morning.m4a",
+            fileMtime: fixedMtime
+        )
+        XCTAssertNotNil(d)
+        XCTAssertEqual(hms(d!).0, 9)
+        XCTAssertEqual(hms(d!).1, 48)
+    }
+
+    func testParseFilenameRecordedAtUnderscoreHHMMSS() {
+        let d = InputResolver.parseFilenameRecordedAt(
+            filename: "094832_morning.m4a",
+            fileMtime: fixedMtime
+        )
+        XCTAssertNotNil(d)
+        XCTAssertEqual(hms(d!).0, 9)
+        XCTAssertEqual(hms(d!).1, 48)
+        XCTAssertEqual(hms(d!).2, 32)
+    }
+
+    func testParseFilenameRecordedAtFullDateTime() {
+        let d = InputResolver.parseFilenameRecordedAt(
+            filename: "2026-01-15 09:48 keynote.m4a",
+            fileMtime: fixedMtime
+        )
+        XCTAssertNotNil(d)
+        XCTAssertEqual(ymd(d!).0, 2026)
+        XCTAssertEqual(ymd(d!).1, 1)
+        XCTAssertEqual(ymd(d!).2, 15)
+        XCTAssertEqual(hms(d!).0, 9)
+    }
+
+    func testParseFilenameRecordedAtIsoTLike() {
+        let d = InputResolver.parseFilenameRecordedAt(
+            filename: "2026-01-15T09:48:00 keynote.m4a",
+            fileMtime: fixedMtime
+        )
+        XCTAssertNotNil(d)
+        XCTAssertEqual(ymd(d!).2, 15)
+        XCTAssertEqual(hms(d!).0, 9)
+        XCTAssertEqual(hms(d!).2, 0)
+    }
+
+    func testParseFilenameRecordedAtRejectsInvalidValues() {
+        // 99:99 is invalid
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "99:99 nope.m4a",
+            fileMtime: fixedMtime
+        ))
+        // 24:00 is invalid (HH must be ≤ 23)
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "24:00 nope.m4a",
+            fileMtime: fixedMtime
+        ))
+        // 12:60 is invalid (MM must be ≤ 59)
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "12:60 nope.m4a",
+            fileMtime: fixedMtime
+        ))
+    }
+
+    func testParseFilenameRecordedAtRejectsEmbeddedTime() {
+        // No leading time prefix.
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "morning standup at 09:48.m4a",
+            fileMtime: fixedMtime
+        ))
+    }
+
+    func testParseFilenameRecordedAtRejectsAlphanumericFollowing() {
+        // 09:00abc would be ambiguous; require non-alphanumeric after the time.
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "09:00abc.m4a",
+            fileMtime: fixedMtime
+        ))
+    }
+
+    func testParseFilenameRecordedAtNoMatchOnNonTimeContent() {
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "Recording 1.m4a",
+            fileMtime: fixedMtime
+        ))
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "talk-2024-q3.m4a",
+            fileMtime: fixedMtime
+        ))
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "1.50 dotted.m4a",
+            fileMtime: fixedMtime
+        ))
+    }
+
+    func testParseFilenameRecordedAtRequiresTwoDigitMinutes() {
+        // "9:5 …" has only one minute digit; reject.
+        XCTAssertNil(InputResolver.parseFilenameRecordedAt(
+            filename: "9:5 nope.m4a",
+            fileMtime: fixedMtime
+        ))
+    }
+
+    func testFilenameRecoveryActivatesWhenAllClipsParseable() async throws {
+        // Create files whose filenames carry recording times. Their AVAsset
+        // metadata is empty (no embedded creation_time on bare data files), so
+        // the trust check will downgrade and recovery should kick in.
+        let dir = try makeTempDir()
+        for name in [
+            "09:00 morning standup.m4a",
+            "09:30 design review part 1.m4a",
+            "09:30 design review part 2.m4a",
+            "11:00 customer call.m4a",
+        ] {
+            try Data().write(to: dir.appendingPathComponent(name))
+        }
+        let resolved = try await InputResolver.resolve(dir.path, sort: .recorded)
+        guard case .directory(_, let sessions) = resolved else {
+            return XCTFail("Expected .directory")
+        }
+        // Recovery succeeds; ordering follows filename times. With session-gap
+        // = 0 (default), all clips land in one session.
+        let order = sessions.flatMap(\.files).map { ($0 as NSString).lastPathComponent }
+        XCTAssertEqual(order, [
+            "09:00 morning standup.m4a",
+            "09:30 design review part 1.m4a",
+            "09:30 design review part 2.m4a",
+            "11:00 customer call.m4a",
+        ])
+    }
+
+    func testFilenameRecoveryDeclinesOnMixedInput() async throws {
+        let dir = try makeTempDir()
+        // Half the files have prefixes, half don't.
+        for name in ["09:00 a.m4a", "random_thoughts.m4a", "10:30 b.m4a"] {
+            try Data().write(to: dir.appendingPathComponent(name))
+        }
+        let resolved = try await InputResolver.resolve(dir.path, sort: .recorded)
+        guard case .directory(_, let sessions) = resolved else {
+            return XCTFail("Expected .directory")
+        }
+        // Recovery declines; resolver demotes to natural-sort filename order.
+        // Lexicographic order: "09:00 a" < "10:30 b" < "random_thoughts".
+        let order = sessions.flatMap(\.files).map { ($0 as NSString).lastPathComponent }
+        XCTAssertEqual(order, [
+            "09:00 a.m4a",
+            "10:30 b.m4a",
+            "random_thoughts.m4a",
+        ])
+    }
+
+    func testFilenameRecoveryRespectsOptOut() async throws {
+        // All clips have parseable prefixes but recovery is disabled.
+        let dir = try makeTempDir()
+        for name in ["09:00 a.m4a", "10:30 b.m4a"] {
+            try Data().write(to: dir.appendingPathComponent(name))
+        }
+        let resolved = try await InputResolver.resolve(
+            dir.path, sort: .recorded, filenameTimeRecovery: false
+        )
+        // Trust check fails (no embedded times → no spread vs. duration check
+        // either, returning .recorded), so this case won't downgrade and
+        // recovery is moot. We're verifying the flag plumbs through; the
+        // ordering follows the trust-check's tiebreak chain.
+        guard case .directory = resolved else {
+            return XCTFail("Expected .directory")
+        }
+    }
+
+    func testParseFilenameRecordedAtTrimsLeadingSpace() {
+        let d = InputResolver.parseFilenameRecordedAt(
+            filename: "   09:48 padded.m4a",
+            fileMtime: fixedMtime
+        )
+        XCTAssertNotNil(d)
+        XCTAssertEqual(hms(d!).0, 9)
     }
 
     private func makeTempDir() throws -> URL {

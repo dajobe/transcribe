@@ -8,7 +8,7 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
-    static let version = "1.5.0"
+    static let version = "1.6.0"
 
     static var configuration = CommandConfiguration(
         abstract: "On-device meeting transcription with optional speaker diarization.",
@@ -67,6 +67,18 @@ struct Transcribe: AsyncParsableCommand {
         help: "Split a directory input into separate transcripts at gaps larger than N minutes between consecutive recordings (0 disables; default: 10)"
     )
     var sessionGap: Int = 10
+
+    @Flag(
+        name: .long,
+        help: "Disable filename time-prefix recovery; when the embedded recorded-date trust check fails, fall back to filename sort with session splitting disabled (1.5.0 behaviour)"
+    )
+    var noFilenameTimeRecovery: Bool = false
+
+    @Flag(
+        name: .long,
+        help: "Disable common-prefix session basename derivation; always use \"<directory> - Recording N\" for multi-session output filenames (1.5.0 behaviour)"
+    )
+    var noAutoSessionBasename: Bool = false
 
     @Option(name: .long, help: "Directory used for downloaded model caches")
     var modelDir: String = "~/.cache/transcribe"
@@ -240,6 +252,7 @@ struct Transcribe: AsyncParsableCommand {
             audioFile,
             sort: inputSort,
             sessionGapSeconds: sessionGapSeconds,
+            filenameTimeRecovery: !noFilenameTimeRecovery,
             logger: logger
         )
         if case .directory(_, let sessions) = resolvedInput {
@@ -262,7 +275,11 @@ struct Transcribe: AsyncParsableCommand {
         }()
 
         let sessions = InputResolver.sessions(for: resolvedInput)
-        let basenames = InputResolver.sessionBasenames(for: resolvedInput, prefixOverride: outputPrefix)
+        let basenames = InputResolver.sessionBasenames(
+            for: resolvedInput,
+            prefixOverride: outputPrefix,
+            autoSessionBasename: !noAutoSessionBasename
+        )
         for basename in basenames {
             try checkOverwrite(
                 outputDir: outputDir,

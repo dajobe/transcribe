@@ -145,6 +145,35 @@ than the shortest clip's duration, the timestamps cannot represent real
 sequential recording starts, and the run falls back to filename ordering with a
 warning on stderr. Pass `--input-sort name` to silence the warning.
 
+### Recommended naming convention for directory input
+
+When the embedded `creation_time` is unreliable (most Voice Memos exports), the
+filename is your most reliable signal. Naming clips so `transcribe` can recover
+ordering, session splitting, and meaningful output basenames:
+
+1. **Start each filename with a recording time prefix.** Use `HH:MM` (24-hour,
+   colon, space) for same-day batches, e.g. `09:00 morning standup.m4a`. For
+   recordings spanning multiple days use `YYYY-MM-DD HH:MM`. Two-digit hours
+   sort correctly under all sort modes.
+2. **Share a stable label across clips of one session.** When a single recording
+   arrives in parts, keep the prefix and label identical and add `part 1`, `part
+   2`, … as a suffix:
+
+   ```text
+   meetings/
+     09:00 morning standup.m4a
+     09:30 design review part 1.m4a
+     09:30 design review part 2.m4a
+     11:00 customer call.m4a
+   ```
+
+3. **Apply the convention to every file in the directory.** A single un-prefixed
+   file blocks automatic recovery for the whole directory.
+
+For the full naming spec — recognised time-prefix patterns, common-prefix
+session basename rules, and verbose-log examples — see
+[`specs/filename-derived-metadata.md`](specs/filename-derived-metadata.md).
+
 ### Options
 
 | Option                            | Description                                                                                      |

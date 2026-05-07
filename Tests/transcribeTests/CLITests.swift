@@ -126,6 +126,27 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(stderr.contains("No audio files"), "stderr should mention no audio files; got: \(stderr)")
     }
 
+    func testNoFilenameTimeRecoveryFlagAccepted() throws {
+        // Verify the flag parses without erroring at the argument-parser level.
+        // We pass a non-existent input so the run still exits via .inputFile (3),
+        // but we should reach validation rather than hit a parser error (64).
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["/nonexistent/path", "--no-filename-time-recovery", "--no-diarize"]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 3, "flag should be accepted; exit 3 is from missing input, not arg parsing")
+    }
+
+    func testNoAutoSessionBasenameFlagAccepted() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["/nonexistent/path", "--no-auto-session-basename", "--no-diarize"]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 3)
+    }
+
     func testNegativeSessionGapExitTwo() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
