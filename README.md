@@ -360,14 +360,26 @@ the infrastructure migration timeline.
 
 ## Releasing
 
-The version is defined in `Sources/transcribe/main.swift` and extracted by the
-Makefile. To release a new version:
+The version is defined as `Transcribe.version` in
+`Sources/transcribe/main.swift` and extracted by the `Makefile`. **Every change
+to that constant must land alongside a matching annotated git tag**; the targets
+below enforce that.
 
-1. Update `static let version` in `Sources/transcribe/main.swift`
-2. Commit the version bump
-3. Run `make release` to build and create an annotated git tag
-4. Push: `git push && git push origin vX.Y.Z`
-5. Run `make changelog` to generate release notes from the commit log
+To release a new version:
+
+1. Update `static let version` in `Sources/transcribe/main.swift`.
+2. Commit the version bump (or land it as the last hunk of a feature commit, as
+   `git log` shows).
+3. Run `make tag` (or `make release` to build the release binary and tag in one
+   step). This creates an annotated `vX.Y.Z` tag on the current commit.
+4. Run `make verify-tag` to confirm the tag is in place.
+5. Push: `git push && git push origin vX.Y.Z` (or `git push --follow-tags` to
+   push everything in one command).
+6. Run `make changelog` to generate release notes from the commit log.
+
+`make verify-tag` is a guardrail you can run at any point — it fails loudly when
+`Transcribe.version` has been bumped but the matching tag is missing. Run it
+before pushing if you want to be sure nothing slipped past.
 
 ## License
 

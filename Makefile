@@ -2,7 +2,7 @@ VERSION := $(shell grep 'static let version' Sources/transcribe/main.swift | sed
 PREFIX  ?= $(HOME)
 BINDIR  ?= $(PREFIX)/bin
 
-.PHONY: build test install tag release changelog
+.PHONY: build test install tag verify-tag release changelog
 
 build:
 	swift build -c release
@@ -31,6 +31,18 @@ tag:
 # Build release binary and create tag
 release: build tag
 	@echo "Release $(VERSION) complete"
+
+# Fail loudly when the version in main.swift has no matching annotated tag.
+# Run before pushing to catch a bumped version that was committed without
+# a corresponding `make tag`.
+verify-tag:
+	@if git rev-parse --verify --quiet "v$(VERSION)" >/dev/null; then \
+		echo "OK: v$(VERSION) tag exists"; \
+	else \
+		echo "Error: version is $(VERSION) but tag v$(VERSION) is missing." >&2; \
+		echo "       Run 'make tag' (or 'make release') to create it." >&2; \
+		exit 1; \
+	fi
 
 # Generate changelog since the previous tag
 changelog:

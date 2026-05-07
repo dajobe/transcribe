@@ -8,6 +8,9 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
+    // When bumping this, run `make tag` (or `make release`) immediately
+    // afterwards so the matching `vX.Y.Z` annotated tag lands with the
+    // version-bump commit. See README "Releasing" and AGENTS.md.
     static let version = "1.7.0"
 
     /// Default Whisper model when `--model` is not supplied.
