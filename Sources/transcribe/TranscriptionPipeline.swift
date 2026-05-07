@@ -682,3 +682,292 @@ private func runTranscriptionWithDiarization(
     )
     return (output, phases)
 }
+
+// MARK: - Multi-session API (init once, run N sessions)
+
+/// WhisperKit + optional SpeakerKit, loaded once for reuse across sessions.
+/// `speakerKit` is nil when diarization is disabled.
+struct LoadedModels {
+    let whisperKit: WhisperKit
+    let speakerKit: SpeakerKit?
+}
+
+/// Initializes WhisperKit (and SpeakerKit when `diarize` is true), reporting
+/// the per-component init costs so callers can fold them into per-session
+/// `PhaseTimings`. Reuses the existing `initializeWhisperKit` /
+/// `initializeSpeakerKit` helpers.
+func loadModels(
+    model: String,
+    modelDir: String,
+    diarize: Bool,
+    computeOptions: RuntimeComputeOptions,
+    verbose: Bool,
+    logger: VerboseLogger? = nil
+) async throws -> (LoadedModels, whisperInitMs: Int64, speakerInitMs: Int64) {
+    let (whisperKit, wMs) = try await WallClock.measureMs {
+        try await initializeWhisperKit(
+            model: model,
+            modelDir: modelDir,
+            computeOptions: computeOptions,
+            verbose: verbose,
+            logger: logger
+        )
+    }
+    var sMs: Int64 = 0
+    var speakerKit: SpeakerKit? = nil
+    if diarize {
+        let (sk, ms) = try await WallClock.measureMs {
+            try await initializeSpeakerKit(
+                modelDir: modelDir,
+                computeOptions: computeOptions,
+                verbose: verbose,
+                logger: logger
+            )
+        }
+        speakerKit = sk
+        sMs = ms
+    }
+    return (LoadedModels(whisperKit: whisperKit, speakerKit: speakerKit), wMs, sMs)
+}
+
+/// Runs one session against pre-loaded models. Falls back to transcript-only
+/// when audio is shorter than `minDiarizationDurationSeconds` or when
+/// `models.speakerKit` is nil. The returned `PhaseTimings` covers only this
+/// session — callers should fold init costs in once per pipeline run.
+func runSession(
+    preparedAudio: PreparedAudio,
+    audioLoadMs: Int64,
+    models: LoadedModels,
+    language: String?,
+    minSpeakers: Int?,
+    maxSpeakers: Int?,
+    speakerStrategy: SpeakerInfoStrategy,
+    wordTimestamps: Bool,
+    liveProgressMode: LiveProgressRenderMode? = nil,
+    pipelineStartDate: Date,
+    historicalWallSecondsPerAudioSecond: Double?,
+    logger: VerboseLogger? = nil
+) async throws -> (TranscriptionOutput, PhaseTimings) {
+    let audioArray = preparedAudio.samples
+    let durationSeconds = preparedAudio.durationSeconds
+    var phases = PhaseTimings()
+    phases.audioLoadMs = audioLoadMs
+
+    let shouldDiarize = (models.speakerKit != nil) && durationSeconds >= minDiarizationDurationSeconds
+
+    if !shouldDiarize {
+        var output = try await runTranscriptOnlyOnLoadedWhisper(
+            whisperKit: models.whisperKit,
+            audioArray: audioArray,
+            durationSeconds: durationSeconds,
+            language: language,
+            wordTimestamps: wordTimestamps,
+            liveProgressMode: liveProgressMode,
+            pipelineStartDate: pipelineStartDate,
+            historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+            phases: &phases,
+            logger: logger
+        )
+        if models.speakerKit != nil && durationSeconds < minDiarizationDurationSeconds {
+            output.warnings.append("Audio shorter than \(Int(minDiarizationDurationSeconds))s; diarization skipped.")
+        }
+        return (output, phases)
+    }
+
+    guard let speakerKit = models.speakerKit else {
+        // Unreachable because shouldDiarize implies speakerKit != nil, but
+        // satisfies the compiler.
+        let output = try await runTranscriptOnlyOnLoadedWhisper(
+            whisperKit: models.whisperKit,
+            audioArray: audioArray,
+            durationSeconds: durationSeconds,
+            language: language,
+            wordTimestamps: wordTimestamps,
+            liveProgressMode: liveProgressMode,
+            pipelineStartDate: pipelineStartDate,
+            historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+            phases: &phases,
+            logger: logger
+        )
+        return (output, phases)
+    }
+
+    let decodeOptions: DecodingOptions = {
+        var opts = DecodingOptions(wordTimestamps: true, chunkingStrategy: .vad)
+        if let lang = language, !lang.isEmpty { opts.language = lang }
+        return opts
+    }()
+
+    let numberOfSpeakers: Int? = {
+        guard let mn = minSpeakers, let mx = maxSpeakers, mn == mx else { return nil }
+        return mn
+    }()
+    let diarizationOptions = PyannoteDiarizationOptions(numberOfSpeakers: numberOfSpeakers)
+
+    let liveDisplay: LiveProgressDisplay? = {
+        guard let mode = liveProgressMode else { return nil }
+        return LiveProgressDisplay(
+            startDate: pipelineStartDate,
+            stderr: .standardError,
+            showDiarizationLine: true,
+            audioDurationSeconds: durationSeconds,
+            historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+            renderMode: mode
+        )
+    }()
+
+    if liveDisplay == nil {
+        logger?.log("Starting transcription...")
+        logger?.log("Starting diarization...")
+    }
+
+    let results: [TranscriptionResult]
+    let diarizationResult: DiarizationResult
+    if let display = liveDisplay {
+        let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
+            async let transTask: [TranscriptionResult] = models.whisperKit.transcribe(
+                audioArray: audioArray,
+                decodeOptions: decodeOptions
+            ) { progress in
+                display.updateTranscription(progress: progress)
+                return nil
+            }
+            async let diarTask: DiarizationResult = speakerKit.diarize(
+                audioArray: audioArray,
+                options: diarizationOptions
+            ) { progress in
+                display.updateDiarization(
+                    fractionCompleted: progress.fractionCompleted,
+                    completedUnitCount: progress.completedUnitCount
+                )
+            }
+            return (try await transTask, try await diarTask)
+        }
+        phases.parallelMs = pMs
+        phases.decodingWindows = display.finish()
+        results = pair.0
+        diarizationResult = pair.1
+    } else {
+        let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
+            async let transTask: [TranscriptionResult] = models.whisperKit.transcribe(
+                audioArray: audioArray,
+                decodeOptions: decodeOptions
+            )
+            async let diarTask: DiarizationResult = speakerKit.diarize(
+                audioArray: audioArray,
+                options: diarizationOptions
+            )
+            return (try await transTask, try await diarTask)
+        }
+        phases.parallelMs = pMs
+        results = pair.0
+        diarizationResult = pair.1
+    }
+
+    let whisperSegmentCount = results.flatMap(\.segments).count
+    logger?.log("Transcription complete (\(whisperSegmentCount) WhisperKit segments)")
+    logger?.log("Diarization complete (\(diarizationResult.speakerCount) speakers detected)")
+    logger?.log("Merging speaker labels with strategy=\(speakerStrategy == .segment ? "segment" : "subsegment")")
+    let (mergeResult, mergeMs) = WallClock.measureMs {
+        let merged = diarizationResult.addSpeakerInfo(to: results, strategy: speakerStrategy)
+        let transcriptOnlySegments = segmentsFromTranscriptionResults(results)
+        var segments = segmentsFromSpeakerSegments(merged)
+        var usedTranscriptOnlyFallback = false
+        if segments.isEmpty || diarizationResult.speakerCount == 0 {
+            usedTranscriptOnlyFallback = true
+            segments = transcriptOnlySegments
+        }
+        return (segments, transcriptOnlySegments, usedTranscriptOnlyFallback)
+    }
+    phases.mergeMs = mergeMs
+    let (segments, transcriptOnlySegments, usedTranscriptOnlyFallback) = mergeResult
+    if usedTranscriptOnlyFallback {
+        logger?.log("No speakers detected, using transcript-only")
+    }
+    logger?.log("Merged to \(segments.count) output segments")
+
+    var warnings: [String] = []
+    let speakersDetected = diarizationResult.speakerCount
+    if transcriptOnlySegments.isEmpty {
+        warnings.append("No speech detected; output contains no segments.")
+    } else if speakersDetected == 0 || segments.isEmpty {
+        warnings.append("Diarization returned no speakers; segment labels omitted.")
+    } else {
+        if let mn = minSpeakers, speakersDetected < mn {
+            warnings.append("Diarization detected \(speakersDetected) speaker(s), fewer than --min-speakers (\(mn)).")
+        }
+        if let mx = maxSpeakers, speakersDetected > mx {
+            warnings.append("Diarization detected \(speakersDetected) speaker(s), more than --max-speakers (\(mx)).")
+        }
+    }
+
+    let output = TranscriptionOutput(
+        segments: segments,
+        language: results.first?.language,
+        durationSeconds: durationSeconds,
+        diarizationEnabled: true,
+        speakersDetected: speakersDetected > 0 ? speakersDetected : nil,
+        speakerStrategy: speakerStrategy == .segment ? "segment" : "subsegment",
+        warnings: warnings
+    )
+    return (output, phases)
+}
+
+/// Internal helper: transcript-only on a pre-loaded WhisperKit, mirroring the
+/// existing `runTranscriptionOnly(audioArray:)` body but without re-initing.
+private func runTranscriptOnlyOnLoadedWhisper(
+    whisperKit: WhisperKit,
+    audioArray: [Float],
+    durationSeconds: Double,
+    language: String?,
+    wordTimestamps: Bool,
+    liveProgressMode: LiveProgressRenderMode?,
+    pipelineStartDate: Date,
+    historicalWallSecondsPerAudioSecond: Double?,
+    phases: inout PhaseTimings,
+    logger: VerboseLogger?
+) async throws -> TranscriptionOutput {
+    var decodeOptions = DecodingOptions(wordTimestamps: wordTimestamps, chunkingStrategy: .vad)
+    if let lang = language, !lang.isEmpty { decodeOptions.language = lang }
+
+    let liveDisplay: LiveProgressDisplay? = {
+        guard let mode = liveProgressMode else { return nil }
+        return LiveProgressDisplay(
+            startDate: pipelineStartDate,
+            stderr: .standardError,
+            showDiarizationLine: false,
+            audioDurationSeconds: durationSeconds,
+            historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+            renderMode: mode
+        )
+    }()
+
+    if liveDisplay == nil { logger?.log("Starting transcription...") }
+
+    let results: [TranscriptionResult]
+    if let display = liveDisplay {
+        let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
+            try await whisperKit.transcribe(audioArray: audioArray, decodeOptions: decodeOptions) { progress in
+                display.updateTranscription(progress: progress)
+                return nil
+            }
+        }
+        phases.transcribeOnlyMs = tMs
+        phases.decodingWindows = display.finish()
+        results = res
+    } else {
+        let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
+            try await whisperKit.transcribe(audioArray: audioArray, decodeOptions: decodeOptions)
+        }
+        phases.transcribeOnlyMs = tMs
+        results = res
+    }
+
+    let output = buildTranscriptionOutput(
+        from: results,
+        durationSeconds: durationSeconds,
+        diarizationEnabled: false
+    )
+    logger?.log("Transcription complete (\(output.segments.count) output segments)")
+    return output
+}

@@ -6,15 +6,27 @@ func outputBasename(audioPath: String) -> String {
     return (name as NSString).deletingPathExtension
 }
 
-/// Basename derived from a directory input. Strips trailing slashes and
-/// returns the final path component verbatim — no extension stripping
-/// (preserves names like "2026.04.notes").
+/// Basename derived from a directory input. Standardises the path first so
+/// relative inputs like `.` or `..` resolve to absolute paths whose final
+/// component is the cwd's name (not literal `.`). Returns an empty string
+/// when no usable name can be derived (root, empty path, or final component
+/// is `.`/`..`/`/`); callers should substitute their own fallback in that
+/// case (e.g. "Recording 1"). No extension stripping — preserves names
+/// like `2026.04.notes`.
 func outputBasename(directoryPath: String) -> String {
     var trimmed = directoryPath
     while trimmed.count > 1 && trimmed.hasSuffix("/") {
         trimmed.removeLast()
     }
-    return (trimmed as NSString).lastPathComponent
+    let abs: String = {
+        if trimmed.hasPrefix("/") { return trimmed }
+        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+    }()
+    let last = (abs as NSString).lastPathComponent
+    if last.isEmpty || last == "." || last == ".." || last == "/" {
+        return ""
+    }
+    return last
 }
 
 /// Resolved output directory path (expanded tilde).

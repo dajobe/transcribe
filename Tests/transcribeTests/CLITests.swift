@@ -126,6 +126,19 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(stderr.contains("No audio files"), "stderr should mention no audio files; got: \(stderr)")
     }
 
+    func testNegativeSessionGapExitTwo() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["/tmp/any.m4a", "--session-gap=-1"]
+        let pipe = Pipe()
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 2, "negative --session-gap should exit 2, stderr: \(stderr)")
+        XCTAssertTrue(stderr.contains("--session-gap"), "stderr should mention the bad option")
+    }
+
     func testInvalidInputSortExitsNonZero() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)

@@ -51,11 +51,13 @@ transcribe <audio-file-or-directory> [options]
 ```
 
 The positional argument may be either a single audio file or a directory of
-sequential clips. When given a directory, top-level audio files are concatenated
-and transcribed as one logical recording. By default they are ordered by their
-embedded recording timestamp (override with `--input-sort name` or `--input-sort
-mtime`). The output filename is derived from the directory name (e.g.
-`~/voicenotes/2026-may-meeting/` → `2026-may-meeting.txt`).
+sequential clips. When given a directory, the top-level audio files are ordered
+by recording time and split into one or more sessions whenever there is a
+multi-minute gap between consecutive clips (`--session-gap`, default 10 min).
+Each session is transcribed independently and produces its own transcript named
+after the directory (e.g. `~/voicenotes/2026-may-meeting/` →
+`2026-may-meeting.txt`, or `2026-may-meeting - Recording 1.txt` and `… -
+Recording 2.txt` when split).
 
 ### Examples
 
@@ -92,31 +94,56 @@ transcribe meeting.mp3 \
 
 ### Directory input
 
-When the positional argument is a directory, `transcribe` concatenates its
-top-level audio files into a single logical recording before running the
-pipeline.
+When the positional argument is a directory, `transcribe` orders its top-level
+audio files, splits them into one or more sessions at gaps over the threshold,
+and runs the pipeline once per session.
 
 - **Sort order:** by default clips are ordered by their embedded recording
-  timestamp (e.g. the M4A `creation_time` atom that Voice Memos and most
-  recorders set to the actual recording moment). Files without that metadata
-  fall back to file modification time, then to natural-sort filename, so order
-  stays deterministic for mixed directories. Use `--input-sort name` to force
+  timestamp (the M4A `creation_time` atom). Files without that metadata fall
+  back to file modification time, then to natural-sort filename, so order stays
+  deterministic for mixed directories. Use `--input-sort name` to force
   natural-sort filename ordering (handles `Note 1.m4a, …, Note 10.m4a`) or
   `--input-sort mtime` to use file modification time only.
+- **Session splitting:** if adjacent clips have a recorded-at gap larger than
+  `--session-gap` minutes (default `10`), the directory is split into separate
+  transcripts — one per detected session. Set `--session-gap 0` to disable
+  splitting and concatenate everything into one transcript. Splitting is skipped
+  when adjacent clips lack the metadata needed to compute a gap.
 - **Filtering:** files are filtered by extension (case-insensitive) against the
   supported formats. Hidden files (`.DS_Store`, `._*`) and subdirectories are
   skipped; subdirectories are not recursed into.
-- **Padding:** ~200 ms of silence is inserted between consecutive clips to
-  smooth Whisper's VAD chunking across abrupt boundaries.
-- **Diarization:** runs once over the joined audio, so a speaker who appears in
-  multiple clips lands on a single `SPEAKER_n` label across the transcript.
+- **Padding:** ~200 ms of silence is inserted between consecutive clips within a
+  session to smooth Whisper's VAD chunking.
+- **Diarization:** runs once per session, so a speaker who appears in multiple
+  clips of one session lands on a single `SPEAKER_n` label.
 - **Output basename:** the directory's last path component, with no extension
-  stripping (preserves names like `2026.04.notes`). Override with
-  `--output-prefix` as usual.
-- **JSON metadata:** an `audio_files` array lists the source filenames in concat
-  order; the field is omitted for single-file input.
+  stripping (preserves names like `2026.04.notes`). When the directory yields
+  multiple sessions, outputs are named `<basename> - Recording 1`, `<basename> -
+  Recording 2`, … When the directory has no usable name (e.g. the input was `.`
+  or `/`), outputs fall back to `Recording 1`, `Recording 2`, …. Override the
+  base with `--output-prefix`.
+- **JSON metadata:** an `audio_files` array lists the source filenames for that
+  session in concat order; the field is omitted for single-file input.
 - **Empty / no-audio directories:** exit code `3` with a clear message on
   stderr.
+- **Verbose mode** prints the per-clip sort keys (recorded date and mtime) and
+  per-pair gap analysis, e.g.:
+
+  ```text
+  sort=recorded: per-clip keys (in final order)
+    sort key: New Recording.m4a recorded=2026-05-06T09:14:22Z mtime=2026-05-06T09:18:03Z
+    sort key: New Recording 2.m4a recorded=2026-05-06T09:32:11Z mtime=2026-05-06T09:33:48Z
+  gap: New Recording.m4a -> New Recording 2.m4a = 13m 49s (>10m 0s threshold) -> new session
+  sessions: 2 (1, 1 clips each)
+  ```
+
+**Voice Memos caveat.** Apple's Voice Memos app rewrites the M4A `creation_time`
+atom to "now" when files are exported via Files / iCloud Drive, so the embedded
+date no longer reflects when you actually recorded. `transcribe` detects this
+automatically: when the spread of recorded timestamps across clips is smaller
+than the shortest clip's duration, the timestamps cannot represent real
+sequential recording starts, and the run falls back to filename ordering with a
+warning on stderr. Pass `--input-sort name` to silence the warning.
 
 ### Options
 
@@ -132,6 +159,7 @@ pipeline.
 | `--no-diarize`                    | Disable speaker diarization                                                                      |
 | `--speaker-strategy <s>`          | Speaker merge strategy: `subsegment` or `segment` (default: `subsegment`)                        |
 | `--input-sort <mode>`             | Order for directory input: `recorded` (default), `name`, `mtime`                                 |
+| `--session-gap <min>`             | Split directory input at gaps > N minutes between clips (0 disables; default: 10)                |
 | `--model-dir <path>`              | Model cache directory (default: `~/.cache/transcribe`)                                           |
 | `--overwrite`                     | Replace existing output files                                                                    |
 | `--verbose`                       | Print progress and timing to stderr                                                              |

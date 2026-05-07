@@ -8,7 +8,7 @@ import Darwin
 
 @main
 struct Transcribe: AsyncParsableCommand {
-    static let version = "1.4.0"
+    static let version = "1.5.0"
 
     static var configuration = CommandConfiguration(
         abstract: "On-device meeting transcription with optional speaker diarization.",
@@ -61,6 +61,12 @@ struct Transcribe: AsyncParsableCommand {
         help: "Order for directory input: recorded (embedded creation timestamp; default), name (natural-sort filename), mtime (file modification time)"
     )
     var inputSort: InputSortOrder = .recorded
+
+    @Option(
+        name: .long,
+        help: "Split a directory input into separate transcripts at gaps larger than N minutes between consecutive recordings (0 disables; default: 10)"
+    )
+    var sessionGap: Int = 10
 
     @Option(name: .long, help: "Directory used for downloaded model caches")
     var modelDir: String = "~/.cache/transcribe"
@@ -210,6 +216,13 @@ struct Transcribe: AsyncParsableCommand {
                 exitCode: .invalidUsage
             )
         }
+
+        if sessionGap < 0 {
+            throw TranscribeError(
+                message: "--session-gap must be >= 0 (use 0 to disable session splitting).",
+                exitCode: .invalidUsage
+            )
+        }
     }
 
     private func runPipeline() async throws {
@@ -222,22 +235,19 @@ struct Transcribe: AsyncParsableCommand {
             embedder: embedderCompute
         )
 
-        let resolvedInput = try await InputResolver.resolve(audioFile, sort: inputSort)
-        let inputAudioPath: String
-        let inputAudioPaths: [String]?
-        let inputAudioFileNames: [String]?
-        switch resolvedInput {
-        case .file(let path):
-            inputAudioPath = path
-            inputAudioPaths = nil
-            inputAudioFileNames = nil
-        case .directory(let path, let files):
-            inputAudioPath = path
-            inputAudioPaths = files
-            inputAudioFileNames = files.map { ($0 as NSString).lastPathComponent }
+        let sessionGapSeconds = Double(sessionGap) * 60.0
+        let resolvedInput = try await InputResolver.resolve(
+            audioFile,
+            sort: inputSort,
+            sessionGapSeconds: sessionGapSeconds,
+            logger: logger
+        )
+        if case .directory(_, let sessions) = resolvedInput {
+            let totalClips = sessions.reduce(0) { $0 + $1.files.count }
             logger.log(
-                "Input is a directory: \(files.count) audio file\(files.count == 1 ? "" : "s") "
-                + "(sort=\(inputSort.rawValue))"
+                "Input is a directory: \(totalClips) audio file\(totalClips == 1 ? "" : "s"), "
+                + "\(sessions.count) session\(sessions.count == 1 ? "" : "s") "
+                + "(sort=\(inputSort.rawValue), session-gap=\(sessionGap)m)"
             )
         }
 
@@ -251,151 +261,138 @@ struct Transcribe: AsyncParsableCommand {
             return TimingStore.medianWallSecondsPerAudioSecond(records: recs)
         }()
 
-        let basename = outputPrefix ?? InputResolver.basename(for: resolvedInput)
-        try checkOverwrite(
-            outputDir: outputDir,
-            basename: basename,
-            formats: resolvedFormats,
-            writeTxtFile: wantsTxt && !stdout,
-            overwrite: overwrite
-        )
+        let sessions = InputResolver.sessions(for: resolvedInput)
+        let basenames = InputResolver.sessionBasenames(for: resolvedInput, prefixOverride: outputPrefix)
+        for basename in basenames {
+            try checkOverwrite(
+                outputDir: outputDir,
+                basename: basename,
+                formats: resolvedFormats,
+                writeTxtFile: wantsTxt && !stdout,
+                overwrite: overwrite
+            )
+        }
 
         let liveProgressMode: LiveProgressRenderMode? = {
             if debugProgressLog { return .lineLog(minInterval: 1.0) }
             if isStderrTTY() { return .tty }
             return nil
         }()
-        let output: TranscriptionOutput
-        var phases: PhaseTimings
-        if noDiarize {
-            let (out, ph): (TranscriptionOutput, PhaseTimings)
-            if let paths = inputAudioPaths {
-                (out, ph) = try await runTranscriptionOnly(
-                    audioPaths: paths,
-                    model: resolvedModel,
-                    modelDir: modelDir,
-                    language: language,
-                    computeOptions: computeOptions,
-                    verbose: verbose,
-                    wordTimestamps: false,
-                    liveProgressMode: liveProgressMode,
-                    pipelineStartDate: startDate,
-                    historicalWallSecondsPerAudioSecond: historicalRatio,
-                    logger: logger
-                )
-            } else {
-                (out, ph) = try await runTranscriptionOnly(
-                    audioPath: inputAudioPath,
-                    model: resolvedModel,
-                    modelDir: modelDir,
-                    language: language,
-                    computeOptions: computeOptions,
-                    verbose: verbose,
-                    wordTimestamps: false,
-                    liveProgressMode: liveProgressMode,
-                    pipelineStartDate: startDate,
-                    historicalWallSecondsPerAudioSecond: historicalRatio,
-                    logger: logger
-                )
-            }
-            output = out
-            phases = ph
-        } else {
-            let strategy = SpeakerInfoStrategy(from: speakerStrategy) ?? .subsegment
-            let (out, ph): (TranscriptionOutput, PhaseTimings)
-            if let paths = inputAudioPaths {
-                (out, ph) = try await runTranscriptionWithDiarization(
-                    audioPaths: paths,
-                    model: resolvedModel,
-                    modelDir: modelDir,
-                    language: language,
-                    minSpeakers: minSpeakers,
-                    maxSpeakers: maxSpeakers,
-                    speakerStrategy: strategy,
-                    computeOptions: computeOptions,
-                    verbose: verbose,
-                    liveProgressMode: liveProgressMode,
-                    pipelineStartDate: startDate,
-                    historicalWallSecondsPerAudioSecond: historicalRatio,
-                    logger: logger
-                )
-            } else {
-                (out, ph) = try await runTranscriptionWithDiarization(
-                    audioPath: inputAudioPath,
-                    model: resolvedModel,
-                    modelDir: modelDir,
-                    language: language,
-                    minSpeakers: minSpeakers,
-                    maxSpeakers: maxSpeakers,
-                    speakerStrategy: strategy,
-                    computeOptions: computeOptions,
-                    verbose: verbose,
-                    liveProgressMode: liveProgressMode,
-                    pipelineStartDate: startDate,
-                    historicalWallSecondsPerAudioSecond: historicalRatio,
-                    logger: logger
-                )
-            }
-            output = out
-            phases = ph
-        }
 
-        var out = output
-        out.speakerStrategy = speakerStrategy
-        for warning in out.warnings {
-            emitWarning(warning)
-        }
+        let strategy = SpeakerInfoStrategy(from: speakerStrategy) ?? .subsegment
 
-        let outputFiles = resolvedFormats.filter { fmt in fmt != "txt" || !stdout }.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
+        let (models, whisperInitMs, speakerInitMs) = try await loadModels(
+            model: resolvedModel,
+            modelDir: modelDir,
+            diarize: !noDiarize,
+            computeOptions: computeOptions,
+            verbose: verbose,
+            logger: logger
+        )
+
         let resolvedDir = resolvedOutputDir(outputDir)
-        logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
 
-        let (_, writeMs) = try WallClock.measureMs {
-            try writeOutputs(
-                output: out,
-                audioPath: inputAudioPath,
-                audioFiles: inputAudioFileNames,
-                outputDir: outputDir,
-                basename: basename,
-                formats: resolvedFormats,
-                writeTxtToStdout: wantsTxt && stdout,
-                overwrite: overwrite,
-                model: resolvedModel,
-                version: Self.version
+        for (idx, session) in sessions.enumerated() {
+            let basename = basenames[idx]
+            if sessions.count > 1 {
+                logger.log("--- Session \(idx + 1)/\(sessions.count): \(basename) (\(session.files.count) clip\(session.files.count == 1 ? "" : "s")) ---")
+            }
+
+            let (preparedAudio, loadMs): (PreparedAudio, Int64)
+            switch resolvedInput {
+            case .file:
+                (preparedAudio, loadMs) = try WallClock.measureMs {
+                    try loadPreparedAudio(audioPath: session.files[0], logger: logger)
+                }
+            case .directory:
+                (preparedAudio, loadMs) = try WallClock.measureMs {
+                    try loadPreparedAudio(fromFiles: session.files, logger: logger)
+                }
+            }
+
+            let (sessionOutput, sessionPhases) = try await runSession(
+                preparedAudio: preparedAudio,
+                audioLoadMs: loadMs,
+                models: models,
+                language: language,
+                minSpeakers: minSpeakers,
+                maxSpeakers: maxSpeakers,
+                speakerStrategy: strategy,
+                wordTimestamps: false,
+                liveProgressMode: liveProgressMode,
+                pipelineStartDate: startDate,
+                historicalWallSecondsPerAudioSecond: historicalRatio,
+                logger: logger
             )
+
+            var out = sessionOutput
+            out.speakerStrategy = speakerStrategy
+            for warning in out.warnings {
+                emitWarning(warning)
+            }
+
+            let audioFilesForOutput: [String]? = {
+                if case .directory = resolvedInput {
+                    return session.files.map { ($0 as NSString).lastPathComponent }
+                }
+                return nil
+            }()
+            let audioPathForOutput: String = {
+                if case .directory(let dirPath, _) = resolvedInput { return dirPath }
+                return session.files[0]
+            }()
+
+            let outputFiles = resolvedFormats.filter { fmt in fmt != "txt" || !stdout }.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
+            logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
+
+            let (_, writeMs) = try WallClock.measureMs {
+                try writeOutputs(
+                    output: out,
+                    audioPath: audioPathForOutput,
+                    audioFiles: audioFilesForOutput,
+                    outputDir: outputDir,
+                    basename: basename,
+                    formats: resolvedFormats,
+                    writeTxtToStdout: wantsTxt && stdout,
+                    overwrite: overwrite,
+                    model: resolvedModel,
+                    version: Self.version
+                )
+            }
+
+            if timingStatsEnabled {
+                let fileBytes: Int64 = session.files.reduce(into: Int64(0)) { total, p in
+                    let n = (try? FileManager.default.attributesOfItem(atPath: p)[.size] as? NSNumber)?.int64Value ?? 0
+                    total += n
+                }
+                // Init costs are charged to the first session only — subsequent
+                // sessions reuse the same Whisper/SpeakerKit instances.
+                var phasesForRecord = sessionPhases
+                if idx == 0 {
+                    phasesForRecord.whisperInitMs = whisperInitMs
+                    phasesForRecord.speakerInitMs = speakerInitMs
+                }
+                let endedAt = Date()
+                let totalMs = Int64(endedAt.timeIntervalSince(startDate) * 1000.0)
+                let record = RunTimingRecord(
+                    endedAt: endedAt,
+                    transcribeVersion: Self.version,
+                    model: resolvedModel,
+                    diarizationEnabled: out.diarizationEnabled,
+                    inputBasename: basename,
+                    fileBytes: fileBytes,
+                    audioDurationS: out.durationSeconds,
+                    segmentCount: out.segments.count,
+                    speakersDetected: out.speakersDetected,
+                    phases: phasesForRecord,
+                    writeOutputsMs: writeMs,
+                    totalMs: totalMs
+                )
+                try? TimingStore.append(record)
+            }
         }
 
         let endedAt = Date()
-        let totalMs = Int64(endedAt.timeIntervalSince(startDate) * 1000.0)
-
-        if timingStatsEnabled {
-            let fileBytes: Int64 = {
-                if let paths = inputAudioPaths {
-                    return paths.reduce(into: Int64(0)) { total, p in
-                        let n = (try? FileManager.default.attributesOfItem(atPath: p)[.size] as? NSNumber)?.int64Value ?? 0
-                        total += n
-                    }
-                } else {
-                    return (try? FileManager.default.attributesOfItem(atPath: inputAudioPath)[.size] as? NSNumber)?.int64Value ?? 0
-                }
-            }()
-            let record = RunTimingRecord(
-                endedAt: endedAt,
-                transcribeVersion: Self.version,
-                model: resolvedModel,
-                diarizationEnabled: out.diarizationEnabled,
-                inputBasename: basename,
-                fileBytes: fileBytes,
-                audioDurationS: out.durationSeconds,
-                segmentCount: out.segments.count,
-                speakersDetected: out.speakersDetected,
-                phases: phases,
-                writeOutputsMs: writeMs,
-                totalMs: totalMs
-            )
-            try? TimingStore.append(record)
-        }
-
         let totalSec = Int(endedAt.timeIntervalSince(startDate))
         logger.log("Done. Total: \(totalSec / 60)m \(totalSec % 60)s")
     }
