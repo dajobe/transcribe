@@ -324,6 +324,7 @@ struct Transcribe: AsyncParsableCommand {
         let resolvedDir = resolvedOutputDir(outputDir)
 
         for (idx, session) in sessions.enumerated() {
+            let sessionStartDate = Date()
             let basename = basenames[idx]
             if sessions.count > 1 {
                 logger.log("--- Session \(idx + 1)/\(sessions.count): \(basename) (\(session.files.count) clip\(session.files.count == 1 ? "" : "s")) ---")
@@ -404,7 +405,8 @@ struct Transcribe: AsyncParsableCommand {
                     phasesForRecord.speakerInitMs = speakerInitMs
                 }
                 let endedAt = Date()
-                let totalMs = Int64(endedAt.timeIntervalSince(startDate) * 1000.0)
+                let timingStartDate = (idx == 0) ? startDate : sessionStartDate
+                let totalMs = Int64(endedAt.timeIntervalSince(timingStartDate) * 1000.0)
                 let record = RunTimingRecord(
                     endedAt: endedAt,
                     transcribeVersion: Self.version,
