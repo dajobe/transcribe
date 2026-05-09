@@ -16,7 +16,7 @@ struct Transcribe: AsyncParsableCommand {
     static let defaultModel = "openai_whisper-large-v3_turbo"
 
     static var configuration = CommandConfiguration(
-        abstract: "On-device meeting transcription with optional speaker diarization.",
+        abstract: "transcribe \(version) — on-device meeting transcription with optional speaker diarization.",
         usage: "transcribe [<global-options>] <source> [<source-options>]",
         discussion: """
             Transcribes an audio file using WhisperKit and optionally adds speaker \

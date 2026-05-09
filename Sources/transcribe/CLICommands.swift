@@ -60,10 +60,8 @@ struct SourceCommandDispatcher {
         }
 
         guard let source = sourceArgs.first else {
-            throw TranscribeError(
-                message: "Missing source. Use `transcribe [global options] file <audio-file>`, `transcribe [global options] dir <directory>`, or `transcribe [global options] voice-memos`.",
-                exitCode: .invalidUsage
-            )
+            printHelp(Self.defaultBanner())
+            return
         }
 
         let args = Array(sourceArgs.dropFirst())
@@ -173,6 +171,30 @@ struct SourceCommandDispatcher {
 
     private func printHelp(_ text: String) {
         FileHandle.standardOutput.write((text + "\n").data(using: .utf8)!)
+    }
+
+    /// Friendly summary printed when the user runs `transcribe` with no
+    /// arguments. Shorter than `--help`, points at the next steps.
+    static func defaultBanner() -> String {
+        """
+        transcribe \(Transcribe.version) — on-device meeting transcription with optional speaker diarization.
+        Runs WhisperKit (and optionally SpeakerKit diarization) on Apple Silicon.
+
+        Usage: transcribe [<global-options>] <source> [<source-options>]
+
+        Sources:
+          file <audio-file>             Transcribe one audio file.
+          dir [<dir-options>] <dir>     Transcribe a directory of sequential audio clips.
+          voice-memos [<options>]       Import synced Apple Voice Memos.
+
+        Examples:
+          transcribe file meeting.m4a
+          transcribe dir ~/Recordings
+          transcribe voice-memos --session-gap 10
+
+        For all global options, run:        transcribe --help
+        For source-specific options, run:   transcribe <source> --help
+        """
     }
 }
 

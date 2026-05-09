@@ -177,17 +177,27 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(process.terminationStatus, 3)
     }
 
-    func testMissingInputWithoutVoiceMemosExitTwo() throws {
+    func testMissingSourcePrintsDefaultBanner() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--no-diarize"]
-        let pipe = Pipe()
-        process.standardError = pipe
+        process.arguments = []
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
         try process.run()
         process.waitUntilExit()
-        let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertNotEqual(process.terminationStatus, 0)
-        XCTAssertTrue(stderr.contains("Missing source"), "stderr: \(stderr)")
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        let firstLine = stdout.components(separatedBy: "\n").first ?? ""
+        XCTAssertTrue(
+            firstLine.range(of: #"^transcribe \d+\.\d+\.\d+ "#, options: .regularExpression) != nil,
+            "first line should announce `transcribe <version>`, got: \(firstLine)"
+        )
+        XCTAssertTrue(stdout.contains("Usage: transcribe"), "stdout: \(stdout)")
+        XCTAssertTrue(stdout.contains("Sources:"), "stdout: \(stdout)")
+        XCTAssertTrue(stdout.contains("transcribe --help"), "stdout: \(stdout)")
     }
 
     func testVoiceMemosRejectsPositionalInputExitTwo() throws {
