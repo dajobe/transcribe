@@ -266,7 +266,10 @@ struct SharedTranscriptionOptions: ParsableArguments {
     )
     var markImported: Bool = false
 
-    @Flag(name: .long, help: "Show what would be processed or skipped without loading models, writing outputs, or updating processing history")
+    @Flag(
+        name: [.long, .customLong("dryrun")],
+        help: "Show what would be processed or skipped without loading models, writing outputs, or updating processing history"
+    )
     var dryRun: Bool = false
 
     @Flag(name: .long, help: "Print progress, timing, and cache details to stderr")

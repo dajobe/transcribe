@@ -206,7 +206,7 @@ final class CLITests: XCTestCase {
         // is a typo'd global option, not a path alias.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--verbose", "--dryrun", "voice-memos"]
+        process.arguments = ["--verbose", "--no-such-flag", "voice-memos"]
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
         try process.run()
@@ -215,8 +215,29 @@ final class CLITests: XCTestCase {
 
         XCTAssertEqual(process.terminationStatus, 2)
         XCTAssertTrue(stderr.contains("Unknown global option"), "stderr: \(stderr)")
-        XCTAssertTrue(stderr.contains("--dryrun"), "stderr: \(stderr)")
+        XCTAssertTrue(stderr.contains("--no-such-flag"), "stderr: \(stderr)")
         XCTAssertFalse(stderr.contains("root path alias"), "stderr: \(stderr)")
+    }
+
+    func testDryRunAliasAcceptsBothSpellings() throws {
+        // Both --dry-run and --dryrun should be accepted as the dry-run flag.
+        // Use voice-memos with a nonexistent recordings dir so we exit early
+        // on the input-file check (exit code 3) rather than loading models.
+        for spelling in ["--dry-run", "--dryrun"] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+            process.arguments = [spelling, "voice-memos", "--recordings-dir", "/nonexistent-path"]
+            let stderrPipe = Pipe()
+            process.standardError = stderrPipe
+            try process.run()
+            process.waitUntilExit()
+            let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+            XCTAssertNotEqual(process.terminationStatus, 2,
+                              "\(spelling) should not exit invalid-usage; stderr: \(stderr)")
+            XCTAssertFalse(stderr.contains("Unknown global option"),
+                           "\(spelling) should be recognised; stderr: \(stderr)")
+        }
     }
 
     func testVoiceMemosRejectsPositionalInputExitTwo() throws {
