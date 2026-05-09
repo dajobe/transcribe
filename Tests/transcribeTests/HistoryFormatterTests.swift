@@ -45,31 +45,70 @@ final class HistoryFormatterTests: XCTestCase {
         XCTAssertEqual(HistoryFormatter.displayKind(.voiceMemosBaseline), "imported voice")
     }
 
-    func testLabelPrefersTitleThenBasenameThenSourceID() {
-        let recordWithTitle = makeRecord(recording_title: "Daily Standup", basename: "2026-05-09-standup")
-        XCTAssertEqual(HistoryFormatter.displayLabel(recordWithTitle), "Daily Standup")
+    func testLabelPrefersFilenameFromFingerprint() {
+        let single = makeRecord(files: [fingerprintFile("/tmp/recordings/Memo5.m4a")])
+        XCTAssertEqual(HistoryFormatter.displayLabel(single), "Memo5.m4a")
 
-        let recordWithBasename = makeRecord(recording_title: nil, basename: "meeting-q2")
-        XCTAssertEqual(HistoryFormatter.displayLabel(recordWithBasename), "meeting-q2")
+        let multiWithBasename = makeRecord(
+            basename: "2026-05-07 standup-week",
+            files: [
+                fingerprintFile("/tmp/clips/a.m4a"),
+                fingerprintFile("/tmp/clips/b.m4a"),
+                fingerprintFile("/tmp/clips/c.m4a"),
+            ]
+        )
+        XCTAssertEqual(HistoryFormatter.displayLabel(multiWithBasename), "2026-05-07 standup-week (3 clips)")
 
-        let recordWithEmptyTitle = makeRecord(recording_title: "", basename: "fallback-basename")
-        XCTAssertEqual(HistoryFormatter.displayLabel(recordWithEmptyTitle), "fallback-basename")
+        let multiNoBasename = makeRecord(
+            basename: nil,
+            files: [
+                fingerprintFile("/tmp/x/first.m4a"),
+                fingerprintFile("/tmp/x/second.m4a"),
+            ]
+        )
+        XCTAssertEqual(HistoryFormatter.displayLabel(multiNoBasename), "first.m4a (+1 more)")
 
-        let recordOnlySourceID = makeRecord(recording_title: nil, basename: nil)
-        XCTAssertEqual(HistoryFormatter.displayLabel(recordOnlySourceID), "file:/tmp/x.m4a")
+        let noFingerprintFallsBack = makeRecord(
+            recording_title: "Title Wins",
+            basename: "should-not-show",
+            files: []
+        )
+        XCTAssertEqual(HistoryFormatter.displayLabel(noFingerprintFallsBack), "Title Wins")
+
+        let noFingerprintNoTitle = makeRecord(
+            recording_title: nil,
+            basename: "basename-fallback",
+            files: []
+        )
+        XCTAssertEqual(HistoryFormatter.displayLabel(noFingerprintNoTitle), "basename-fallback")
+
+        let onlySourceID = makeRecord(recording_title: nil, basename: nil, files: [])
+        XCTAssertEqual(HistoryFormatter.displayLabel(onlySourceID), "file:/tmp/x.m4a")
     }
 
-    func testLineFormatPadsColumns() {
+    func testRecordedAtShowsDateOrEmDash() {
+        let withDate = makeRecord(recorded_at: "2014-05-13T00:30:35Z")
+        XCTAssertEqual(HistoryFormatter.displayRecordedAt(withDate), "2014-05-13")
+
+        let withoutDate = makeRecord(recorded_at: nil)
+        XCTAssertEqual(HistoryFormatter.displayRecordedAt(withoutDate), "—")
+
+        let malformed = makeRecord(recorded_at: "garbage")
+        XCTAssertEqual(HistoryFormatter.displayRecordedAt(malformed), "—")
+    }
+
+    func testLineFormatPadsAllColumns() {
         let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
         let record = makeRecord(
             completed_at: isoString(now.addingTimeInterval(-300)),
-            recording_title: "Daily Standup"
+            recorded_at: "2014-05-13T00:30:35Z",
+            files: [fingerprintFile("/tmp/Memo5.m4a")]
         )
         let line = HistoryFormatter.line(for: record, now: now)
-        // "5 mins ago" padded to 18, then "transcribed voice" padded to 18.
         XCTAssertTrue(line.hasPrefix("5 mins ago        "), "line: \(line)")
         XCTAssertTrue(line.contains("transcribed voice "), "line: \(line)")
-        XCTAssertTrue(line.hasSuffix("Daily Standup"), "line: \(line)")
+        XCTAssertTrue(line.contains("2014-05-13  "), "line: \(line)")
+        XCTAssertTrue(line.hasSuffix("Memo5.m4a"), "line: \(line)")
     }
 
     // MARK: - helpers
@@ -89,13 +128,15 @@ final class HistoryFormatterTests: XCTestCase {
         completed_at: String = "2026-05-09T18:00:00Z",
         kind: ProcessingSourceKind = .voiceMemos,
         recording_title: String? = nil,
-        basename: String? = nil
+        basename: String? = nil,
+        recorded_at: String? = nil,
+        files: [FileFingerprint] = []
     ) -> ProcessingRecord {
         ProcessingRecord(
             completed_at: completed_at,
             source_kind: kind,
             source_id: "file:/tmp/x.m4a",
-            source_fingerprint: SourceFingerprint(files: []),
+            source_fingerprint: SourceFingerprint(files: files),
             settings_signature: nil,
             output_dir: nil,
             basename: basename,
@@ -103,9 +144,13 @@ final class HistoryFormatterTests: XCTestCase {
             audio_duration_s: nil,
             warning_count: 0,
             recording_title: recording_title,
-            recorded_at: nil,
+            recorded_at: recorded_at,
             voice_memos_unique_id: nil,
             voice_memos_path: nil
         )
+    }
+
+    private func fingerprintFile(_ path: String) -> FileFingerprint {
+        FileFingerprint(path: path, sha256: "0", bytes: 0, mtime: nil)
     }
 }

@@ -223,11 +223,11 @@ final class CLITests: XCTestCase {
         try FileManager.default.createDirectory(at: ledgerDir, withIntermediateDirectories: true)
         let ledger = ledgerDir.appendingPathComponent("processing_history.jsonl")
 
-        // Write three records with descending completed_at; --count 2 should cut the oldest.
+        // Three records with descending completed_at; --count 2 should drop the oldest.
         let lines = [
-            historyLine(completedAtMinutesAgo: 60, kind: "voice_memos", basename: "old", title: "Old Meeting"),
-            historyLine(completedAtMinutesAgo: 30, kind: "file", basename: "mid", title: nil),
-            historyLine(completedAtMinutesAgo: 5, kind: "voice_memos", basename: "fresh", title: "Daily Standup"),
+            historyLine(completedAtMinutesAgo: 60, kind: "voice_memos", filename: "old.m4a", recordedAt: "2014-05-13T00:30:35Z"),
+            historyLine(completedAtMinutesAgo: 30, kind: "file", filename: "mid.m4a", recordedAt: nil),
+            historyLine(completedAtMinutesAgo: 5, kind: "voice_memos", filename: "fresh.m4a", recordedAt: "2026-05-09T14:30:00Z"),
         ].joined(separator: "\n") + "\n"
         try Data(lines.utf8).write(to: ledger)
 
@@ -244,9 +244,11 @@ final class CLITests: XCTestCase {
 
         XCTAssertEqual(process.terminationStatus, 0)
         XCTAssertEqual(outputLines.count, 2, "stdout: \(stdout)")
-        XCTAssertTrue(outputLines[0].contains("Daily Standup"), "newest first: \(outputLines[0])")
-        XCTAssertTrue(outputLines[1].contains("mid"), "second: \(outputLines[1])")
-        XCTAssertFalse(stdout.contains("Old Meeting"), "--count 2 should drop the third entry")
+        XCTAssertTrue(outputLines[0].contains("fresh.m4a"), "newest first: \(outputLines[0])")
+        XCTAssertTrue(outputLines[0].contains("2026-05-09"), "newest entry should show recorded date: \(outputLines[0])")
+        XCTAssertTrue(outputLines[1].contains("mid.m4a"), "second: \(outputLines[1])")
+        XCTAssertTrue(outputLines[1].contains("—"), "missing recorded_at should render as em dash: \(outputLines[1])")
+        XCTAssertFalse(stdout.contains("old.m4a"), "--count 2 should drop the third entry")
     }
 
     func testHistoryRejectsZeroCount() throws {
@@ -265,16 +267,15 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(stderr.contains("--count must be a positive integer"), "stderr: \(stderr)")
     }
 
-    private func historyLine(completedAtMinutesAgo: Int, kind: String, basename: String, title: String?) -> String {
+    private func historyLine(completedAtMinutesAgo: Int, kind: String, filename: String, recordedAt: String?) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         let completedAt = formatter.string(from: Date().addingTimeInterval(-Double(completedAtMinutesAgo * 60)))
-        let titleField: String = {
-            if let title { return "\"\(title)\"" }
-            return "null"
-        }()
+        let recordedField = recordedAt.map { "\"\($0)\"" } ?? "null"
+        let path = "/tmp/history-fixture/\(filename)"
+        let fingerprint = "{\"files\":[{\"path\":\"\(path)\",\"sha256\":\"0\",\"bytes\":0,\"mtime\":null}]}"
         return """
-            {"basename":"\(basename)","completed_at":"\(completedAt)","output_paths":[],"recorded_at":null,"recording_title":\(titleField),"schema_version":1,"source_fingerprint":{"files":[]},"source_id":"\(kind):\(basename)","source_kind":"\(kind)","voice_memos_path":null,"voice_memos_unique_id":null,"warning_count":0,"audio_duration_s":null,"output_dir":null,"settings_signature":null}
+            {"basename":"\(filename)","completed_at":"\(completedAt)","output_paths":[],"recorded_at":\(recordedField),"recording_title":null,"schema_version":1,"source_fingerprint":\(fingerprint),"source_id":"\(kind):\(filename)","source_kind":"\(kind)","voice_memos_path":null,"voice_memos_unique_id":null,"warning_count":0,"audio_duration_s":null,"output_dir":null,"settings_signature":null}
             """.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

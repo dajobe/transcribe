@@ -33,6 +33,7 @@ enum HistoryCommand {
 enum HistoryFormatter {
     static let timeColumnWidth = 18
     static let kindColumnWidth = 18
+    static let recordedColumnWidth = 12
 
     static func format(records: [ProcessingRecord], now: Date) -> String {
         records.map { line(for: $0, now: now) }.joined(separator: "\n")
@@ -41,8 +42,12 @@ enum HistoryFormatter {
     static func line(for record: ProcessingRecord, now: Date) -> String {
         let time = formatTimestamp(record.completed_at, now: now)
         let kind = displayKind(record.source_kind)
+        let recorded = displayRecordedAt(record)
         let label = displayLabel(record)
-        return pad(time, timeColumnWidth) + "  " + pad(kind, kindColumnWidth) + "  " + label
+        return pad(time, timeColumnWidth) + "  "
+            + pad(kind, kindColumnWidth) + "  "
+            + pad(recorded, recordedColumnWidth) + "  "
+            + label
     }
 
     /// Relative phrase for the most recent week ("just now", "5 mins ago",
@@ -84,13 +89,31 @@ enum HistoryFormatter {
         }
     }
 
+    /// Date-only ("YYYY-MM-DD") slice of `recorded_at`, or "—" when absent.
+    /// `recorded_at` is canonical ISO 8601, so the first 10 characters are
+    /// the calendar date in UTC.
+    static func displayRecordedAt(_ record: ProcessingRecord) -> String {
+        guard let raw = record.recorded_at, raw.count >= 10 else { return "—" }
+        return String(raw.prefix(10))
+    }
+
+    /// Prefer the actual audio file name. For multi-file sources fall back
+    /// to the session basename plus a clip count; if even the fingerprint is
+    /// empty (rare; pre-fingerprint records) drop back to title/basename.
     static func displayLabel(_ record: ProcessingRecord) -> String {
-        if let title = record.recording_title, !title.isEmpty {
-            return title
+        let files = record.source_fingerprint.files
+        if files.count == 1 {
+            return URL(fileURLWithPath: files[0].path).lastPathComponent
         }
-        if let basename = record.basename, !basename.isEmpty {
-            return basename
+        if files.count > 1 {
+            if let basename = record.basename, !basename.isEmpty {
+                return "\(basename) (\(files.count) clips)"
+            }
+            let firstName = URL(fileURLWithPath: files[0].path).lastPathComponent
+            return "\(firstName) (+\(files.count - 1) more)"
         }
+        if let title = record.recording_title, !title.isEmpty { return title }
+        if let basename = record.basename, !basename.isEmpty { return basename }
         return record.source_id
     }
 
