@@ -27,6 +27,23 @@ struct DirSourceArguments: ParsableCommand {
     var directory: String
 }
 
+struct HistoryArguments: ParsableCommand {
+    static var configuration = CommandConfiguration(
+        commandName: "history",
+        abstract: "Show recent transcription and import history.",
+        usage: "transcribe history [--count <n>]",
+        discussion: """
+            Reads the append-only processing-history ledger written by previous \
+            runs (and by --mark-imported). Entries appear newest first with a \
+            relative timestamp; entries older than seven days are shown as ISO \
+            8601 UTC.
+            """
+    )
+
+    @Option(name: .long, help: "Number of entries to show (default: 10).")
+    var count: Int = 10
+}
+
 struct VoiceMemosSourceArguments: ParsableCommand {
     static var configuration = CommandConfiguration(
         commandName: "voice-memos",
@@ -74,6 +91,8 @@ struct SourceCommandDispatcher {
             try await runDirectory(args)
         case "voice-memos":
             try await runVoiceMemos(args)
+        case "history":
+            try runHistory(args)
         default:
             // Anything starting with `-` at the source position is an
             // unrecognised global flag/option that ArgumentParser couldn't
@@ -128,6 +147,15 @@ struct SourceCommandDispatcher {
         ).run()
     }
 
+    private func runHistory(_ args: [String]) throws {
+        if isHelpRequest(args) {
+            printHelp(HistoryArguments.helpMessage())
+            return
+        }
+        let parsed = try parse(HistoryArguments.self, args)
+        try HistoryCommand.run(count: parsed.count)
+    }
+
     private func runRootAlias(path: String, remaining: [String]) async throws {
         guard remaining.isEmpty else {
             throw TranscribeError(
@@ -152,7 +180,7 @@ struct SourceCommandDispatcher {
     private func printSourceHelp(_ args: [String]) throws {
         guard args.count == 1 else {
             throw TranscribeError(
-                message: "Use `transcribe file --help`, `transcribe dir --help`, or `transcribe voice-memos --help`.",
+                message: "Use `transcribe file --help`, `transcribe dir --help`, `transcribe voice-memos --help`, or `transcribe history --help`.",
                 exitCode: .invalidUsage
             )
         }
@@ -163,6 +191,8 @@ struct SourceCommandDispatcher {
             printHelp(DirSourceArguments.helpMessage())
         case "voice-memos":
             printHelp(VoiceMemosSourceArguments.helpMessage())
+        case "history":
+            printHelp(HistoryArguments.helpMessage())
         default:
             throw TranscribeError(message: "Unknown source command '\(args[0])'.", exitCode: .invalidUsage)
         }
@@ -198,10 +228,14 @@ struct SourceCommandDispatcher {
           dir [<dir-options>] <dir>     Transcribe a directory of sequential audio clips.
           voice-memos [<options>]       Import synced Apple Voice Memos.
 
+        Other commands:
+          history [--count <n>]         Show recent transcription/import history.
+
         Examples:
           transcribe file meeting.m4a
           transcribe dir ~/Recordings
           transcribe voice-memos --session-gap 10
+          transcribe history --count 20
 
         For all global options, run:        transcribe --help
         For source-specific options, run:   transcribe <source> --help

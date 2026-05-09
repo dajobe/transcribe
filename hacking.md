@@ -19,8 +19,8 @@ The Swift package currently has one executable target:
 - `Sources/transcribe/VoiceMemosImport.swift`: Voice Memos SQLite import,
   metadata extraction, path resolution, and Voice Memos basenames.
 - `Sources/transcribe/SQLiteReader.swift`: small read-only SQLite wrapper
-  (`ReadOnlyDatabase`, `Statement`) used by `VoiceMemosImport`. Built on
-  `import SQLite3` from the macOS SDK; opens with `SQLITE_OPEN_READONLY`.
+  (`ReadOnlyDatabase`, `Statement`) used by `VoiceMemosImport`. Built on `import
+  SQLite3` from the macOS SDK; opens with `SQLITE_OPEN_READONLY`.
 - `Sources/transcribe/SessionGrouper.swift`: pure gap-based grouping of ordered
   clips into sessions.
 - `Sources/transcribe/TranscriptionPipeline.swift`: audio loading/preflight,
@@ -29,6 +29,8 @@ The Swift package currently has one executable target:
 - `Sources/transcribe/OutputWriter.swift`: output basenames, overwrite checks,
   renderers, and atomic writes.
 - `Sources/transcribe/ProcessingStore.swift`: append-only idempotency ledger.
+- `Sources/transcribe/HistoryCommand.swift`: `transcribe history` command and
+  `HistoryFormatter` (relative-time and column rendering).
 - `Sources/transcribe/TimingStore.swift`: append-only timing history used for
   ETA hints.
 - `Sources/transcribe/ComputeOptions.swift`: compute-unit option parsing and
@@ -48,10 +50,10 @@ belong to the source argument types:
 - `DirSourceArguments`: `<directory>`, sort/filename recovery/basename options
 - `VoiceMemosSourceArguments`: recordings directory and Voice Memos session gap
 
-`Transcribe` captures the remaining command line with
-`.captureForPassthrough` and hands it to `SourceCommandDispatcher`. This is
-intentional: Swift ArgumentParser subcommands do not naturally pass root option
-values into subcommand `run()` without duplicating option groups.
+`Transcribe` captures the remaining command line with `.captureForPassthrough`
+and hands it to `SourceCommandDispatcher`. This is intentional: Swift
+ArgumentParser subcommands do not naturally pass root option values into
+subcommand `run()` without duplicating option groups.
 
 Dispatch rules:
 
@@ -60,8 +62,13 @@ Dispatch rules:
   request with `DirectoryInputOptions`.
 - `voice-memos`: create a `.voiceMemos` request with `recordingsDir` and
   `sessionGap`.
-- Any other first token is treated as the root file/directory alias. Alias runs
-  accept global options only; trailing source-specific arguments are rejected.
+- `history`: utility command (does not run the transcription pipeline). Reads
+  the processing-history ledger and prints the most recent entries via
+  `HistoryCommand.run(count:)`. Accepts `--count <n>` (default 10).
+- Any other first token starting with `-` is reported as an unknown global
+  option (ArgumentParser's `.captureForPassthrough` swallowed it). Otherwise it
+  is treated as the root file/directory alias. Alias runs accept global options
+  only; trailing source-specific arguments are rejected.
 
 Source help is generated from the source `ParsableCommand` declarations. Avoid
 large hand-written help strings; add help text to the declared arguments and
@@ -130,8 +137,10 @@ The Voice Memos importer reads the local iCloud-synced store directly:
 ~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings/
 ```
 
-It opens `CloudRecordings.db` read-only via `/usr/bin/sqlite3` and queries
-`ZCLOUDRECORDING`. Important mapping:
+It opens `CloudRecordings.db` read-only via the in-process `ReadOnlyDatabase`
+wrapper in `SQLiteReader.swift` (built on the macOS SDK's `import SQLite3`,
+`SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX`) and queries `ZCLOUDRECORDING`.
+Important mapping:
 
 - identity: `ZUNIQUEID`, falling back to resolved audio path
 - audio path: `ZPATH`, relative to the recordings directory when needed
@@ -144,32 +153,42 @@ audio files are warnings and skipped rows, not fatal by themselves.
 
 ## Idempotency
 
-Processing history is append-only JSONL at:
-
-```text
-StatePaths.processingHistoryURL()
-```
+Processing history is an append-only JSON Lines file named
+`processing_history.jsonl`, located via `StatePaths.processingHistoryURL()` (see
+"State Files" below for the resolved directory). Each record is one line of
+canonical JSON; `ProcessingStore.append` writes under `flock(LOCK_EX)` on a
+shared `O_APPEND` fd so concurrent `transcribe` processes serialize cleanly.
 
 The ledger records completed source sessions and imported baselines. It stores:
 
 - source kind and stable source id
-- SHA-256 fingerprint of all source files in order
-- important settings signature for completed transcription runs
-- output paths and metadata
-- Voice Memos audit metadata when present
+- per-file SHA-256 fingerprint, byte size, and mtime for the source files
+- settings signature (model, language, diarization on/off, speaker strategy,
+  min/max speakers, formats, write-txt-to-stdout, transcribe version) for
+  completed transcription runs; `null` for `--mark-imported` baselines
+- output paths and `output_dir` / `basename`
+- Voice Memos audit metadata when present (title, recorded-at, unique id, path)
 
-Default skip behavior:
+Default skip behavior (in `PipelineRunner` via `ProcessingStore`):
 
-- completed transcription records skip only when fingerprint, settings, output
-  paths, and existing output files all match
-- imported baseline records skip when source id and fingerprint match, even
-  though transcript outputs do not exist
+- completed transcription records skip only when the source kind, source id,
+  fingerprint, settings, and `output_paths` all match exactly **and** every
+  listed output file currently exists on disk
+- imported baseline records skip purely when source id and fingerprint match;
+  settings are intentionally ignored so a `--mark-imported` mark stays sticky
+  across model/format changes
 - `--redo` bypasses skip checks
 - `--no-processing-state` bypasses both reads and writes
 
 `--mark-imported` is global. It builds the normal source plan for `file`, `dir`,
 or `voice-memos`, fingerprints each planned session, and appends
-`imported_baseline` records without transcribing or writing transcript outputs.
+`imported_baseline` (or `voice_memos_baseline`) records without transcribing or
+writing transcript outputs.
+
+Use `transcribe history` to inspect the most recent records (newest first,
+relative timestamps within seven days, ISO 8601 beyond). The command does not
+mutate the ledger; treat it as a read-only viewer over
+`processing_history.jsonl`.
 
 ## Outputs
 
@@ -231,6 +250,8 @@ Main test groups:
   fallback, missing audio, basename collisions
 - `ProcessingStoreTests`: fingerprints, completed-run skips, imported baseline
   skips
+- `HistoryFormatterTests`: relative-time formatting, kind labels, label fallback
+  order, column padding
 - `OutputWriterTests`: renderers, metadata, overwrite checks, atomic writes
 - `TimingStoreTests`: timing append/load and median calculations
 - `TranscriptionPipelineTests`: cheap audio preflight failure path
@@ -259,8 +280,8 @@ Specs are still useful as design records:
 - `specs/directory-input.md`: directory sorting and session splitting
 - `specs/filename-derived-metadata.md`: filename time recovery and session
   basename rules
-- `specs/voice-memos-cli-cleanup.md`: 2.0 release-plan spec covering CLI,
-  Voice Memos, idempotency, and automation changes
+- `specs/voice-memos-cli-cleanup.md`: 2.0 release-plan spec covering CLI, Voice
+  Memos, idempotency, and automation changes
 - `specs/folder-action-markdown.md`: Markdown output and Automator helper
 - `specs/timing-history.md`: timing history schema and ETA behavior
 - `specs/library-embedding.md`: future library split

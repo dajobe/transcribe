@@ -28,9 +28,12 @@ struct Transcribe: AsyncParsableCommand {
               dir [dir-options] <directory>
               voice-memos [voice-memos-options]
 
+            Other commands:
+              history [--count <n>]   Show recent transcription/import history.
+
             Global options must appear before the source command. For source-specific \
-            options, run `transcribe file --help`, `transcribe dir --help`, or \
-            `transcribe voice-memos --help`.
+            options, run `transcribe file --help`, `transcribe dir --help`, \
+            `transcribe voice-memos --help`, or `transcribe history --help`.
             """,
         version: version
     )

@@ -200,6 +200,84 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(stdout.contains("transcribe --help"), "stdout: \(stdout)")
     }
 
+    func testHistoryWithEmptyLedgerHintsAtPath() throws {
+        let state = try makeTempDir()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["history"]
+        process.environment = ProcessInfo.processInfo.environment.merging(["XDG_STATE_HOME": state.path]) { _, new in new }
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        try process.run()
+        process.waitUntilExit()
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertTrue(stdout.contains("No processing history yet"), "stdout: \(stdout)")
+        XCTAssertTrue(stdout.contains("processing_history.jsonl"), "stdout: \(stdout)")
+    }
+
+    func testHistoryShowsRecentEntriesNewestFirstWithCount() throws {
+        let state = try makeTempDir()
+        let ledgerDir = state.appendingPathComponent("transcribe", isDirectory: true)
+        try FileManager.default.createDirectory(at: ledgerDir, withIntermediateDirectories: true)
+        let ledger = ledgerDir.appendingPathComponent("processing_history.jsonl")
+
+        // Write three records with descending completed_at; --count 2 should cut the oldest.
+        let lines = [
+            historyLine(completedAtMinutesAgo: 60, kind: "voice_memos", basename: "old", title: "Old Meeting"),
+            historyLine(completedAtMinutesAgo: 30, kind: "file", basename: "mid", title: nil),
+            historyLine(completedAtMinutesAgo: 5, kind: "voice_memos", basename: "fresh", title: "Daily Standup"),
+        ].joined(separator: "\n") + "\n"
+        try Data(lines.utf8).write(to: ledger)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["history", "--count", "2"]
+        process.environment = ProcessInfo.processInfo.environment.merging(["XDG_STATE_HOME": state.path]) { _, new in new }
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        try process.run()
+        process.waitUntilExit()
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let outputLines = stdout.split(separator: "\n").map(String.init)
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertEqual(outputLines.count, 2, "stdout: \(stdout)")
+        XCTAssertTrue(outputLines[0].contains("Daily Standup"), "newest first: \(outputLines[0])")
+        XCTAssertTrue(outputLines[1].contains("mid"), "second: \(outputLines[1])")
+        XCTAssertFalse(stdout.contains("Old Meeting"), "--count 2 should drop the third entry")
+    }
+
+    func testHistoryRejectsZeroCount() throws {
+        let state = try makeTempDir()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["history", "--count", "0"]
+        process.environment = ProcessInfo.processInfo.environment.merging(["XDG_STATE_HOME": state.path]) { _, new in new }
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+        try process.run()
+        process.waitUntilExit()
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(process.terminationStatus, 2)
+        XCTAssertTrue(stderr.contains("--count must be a positive integer"), "stderr: \(stderr)")
+    }
+
+    private func historyLine(completedAtMinutesAgo: Int, kind: String, basename: String, title: String?) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let completedAt = formatter.string(from: Date().addingTimeInterval(-Double(completedAtMinutesAgo * 60)))
+        let titleField: String = {
+            if let title { return "\"\(title)\"" }
+            return "null"
+        }()
+        return """
+            {"basename":"\(basename)","completed_at":"\(completedAt)","output_paths":[],"recorded_at":null,"recording_title":\(titleField),"schema_version":1,"source_fingerprint":{"files":[]},"source_id":"\(kind):\(basename)","source_kind":"\(kind)","voice_memos_path":null,"voice_memos_unique_id":null,"warning_count":0,"audio_duration_s":null,"output_dir":null,"settings_signature":null}
+            """.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func testUnknownGlobalOptionBeforeSourceReportsCleanly() throws {
         // ArgumentParser's .captureForPassthrough swallows unknown flags into
         // sourceArgs. The dispatcher must recognise that a leading `-` token
