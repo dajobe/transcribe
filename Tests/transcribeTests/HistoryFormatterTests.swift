@@ -109,6 +109,34 @@ final class HistoryFormatterTests: XCTestCase {
         XCTAssertEqual(HistoryFormatter.displayRecordedAt(malformed), "—")
     }
 
+    func testHeaderRowAlignsWithDataColumns() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let record = makeRecord(
+            completed_at: isoString(now.addingTimeInterval(-300)),
+            recorded_at: "2014-05-13T00:30:35Z",
+            files: [fingerprintFile("/tmp/Memo5.m4a")]
+        )
+        let rendered = HistoryFormatter.format(records: [record], now: now)
+        let lines = rendered.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertEqual(lines[0], HistoryFormatter.header())
+        XCTAssertTrue(lines[0].hasPrefix("WHEN              "))
+        XCTAssertTrue(lines[0].contains("KIND              "))
+        XCTAssertTrue(lines[0].contains("RECORDED    "))
+        XCTAssertTrue(lines[0].hasSuffix("FILE"))
+        // Header positions should match the data row's column starts.
+        guard let headerKind = lines[0].range(of: "KIND"),
+              let dataKind = lines[1].range(of: "transcribed voice") else {
+            XCTFail("could not locate kind columns")
+            return
+        }
+        XCTAssertEqual(
+            lines[0].distance(from: lines[0].startIndex, to: headerKind.lowerBound),
+            lines[1].distance(from: lines[1].startIndex, to: dataKind.lowerBound)
+        )
+    }
+
     func testLineFormatPadsAllColumns() {
         let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
         let record = makeRecord(

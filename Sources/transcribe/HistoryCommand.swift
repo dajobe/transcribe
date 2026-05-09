@@ -36,7 +36,14 @@ enum HistoryFormatter {
     static let recordedColumnWidth = 12
 
     static func format(records: [ProcessingRecord], now: Date) -> String {
-        records.map { line(for: $0, now: now) }.joined(separator: "\n")
+        ([header()] + records.map { line(for: $0, now: now) }).joined(separator: "\n")
+    }
+
+    static func header() -> String {
+        pad("WHEN", timeColumnWidth) + "  "
+            + pad("KIND", kindColumnWidth) + "  "
+            + pad("RECORDED", recordedColumnWidth) + "  "
+            + "FILE"
     }
 
     static func line(for record: ProcessingRecord, now: Date) -> String {

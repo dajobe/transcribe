@@ -243,11 +243,15 @@ final class CLITests: XCTestCase {
         let outputLines = stdout.split(separator: "\n").map(String.init)
 
         XCTAssertEqual(process.terminationStatus, 0)
-        XCTAssertEqual(outputLines.count, 2, "stdout: \(stdout)")
-        XCTAssertTrue(outputLines[0].contains("fresh.m4a"), "newest first: \(outputLines[0])")
-        XCTAssertTrue(outputLines[0].contains("2026-05-09"), "newest entry should show recorded date: \(outputLines[0])")
-        XCTAssertTrue(outputLines[1].contains("mid.m4a"), "second: \(outputLines[1])")
-        XCTAssertTrue(outputLines[1].contains("—"), "missing recorded_at should render as em dash: \(outputLines[1])")
+        XCTAssertEqual(outputLines.count, 3, "expected header + 2 rows; stdout: \(stdout)")
+        XCTAssertTrue(outputLines[0].contains("WHEN"), "header missing: \(outputLines[0])")
+        XCTAssertTrue(outputLines[0].contains("KIND"), "header missing: \(outputLines[0])")
+        XCTAssertTrue(outputLines[0].contains("RECORDED"), "header missing: \(outputLines[0])")
+        XCTAssertTrue(outputLines[0].contains("FILE"), "header missing: \(outputLines[0])")
+        XCTAssertTrue(outputLines[1].contains("fresh.m4a"), "newest first: \(outputLines[1])")
+        XCTAssertTrue(outputLines[1].contains("2026-05-09"), "newest entry should show recorded date: \(outputLines[1])")
+        XCTAssertTrue(outputLines[2].contains("mid.m4a"), "second: \(outputLines[2])")
+        XCTAssertTrue(outputLines[2].contains("—"), "missing recorded_at should render as em dash: \(outputLines[2])")
         XCTAssertFalse(stdout.contains("old.m4a"), "--count 2 should drop the third entry")
     }
 
