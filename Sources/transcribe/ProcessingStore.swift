@@ -132,13 +132,28 @@ enum ProcessingStore {
     private static func fingerprint(file path: String) throws -> FileFingerprint {
         let expanded = (path as NSString).expandingTildeInPath
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: expanded))
-            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            let url = URL(fileURLWithPath: expanded)
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+
+            // Stream the file through SHA256 in 1 MiB chunks so multi-hour
+            // recordings don't pin the whole file in memory.
+            var hasher = SHA256()
+            var byteCount: Int64 = 0
+            let chunkSize = 1 << 20
+            while true {
+                let chunk = try handle.read(upToCount: chunkSize) ?? Data()
+                if chunk.isEmpty { break }
+                hasher.update(data: chunk)
+                byteCount += Int64(chunk.count)
+            }
+            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+
             let attrs = try FileManager.default.attributesOfItem(atPath: expanded)
-            let bytes = (attrs[.size] as? NSNumber)?.int64Value ?? Int64(data.count)
+            let bytes = (attrs[.size] as? NSNumber)?.int64Value ?? byteCount
             let mtime = (attrs[.modificationDate] as? Date).map(iso8601String)
             return FileFingerprint(
-                path: URL(fileURLWithPath: expanded).standardizedFileURL.path,
+                path: url.standardizedFileURL.path,
                 sha256: digest,
                 bytes: bytes,
                 mtime: mtime
@@ -164,7 +179,9 @@ func sourceIDForFiles(kind: ProcessingSourceKind, files: [String]) -> String {
 }
 
 private func appendProcessingLine(_ data: Data, to url: URL) throws {
-#if canImport(Darwin)
+    // macOS-only (Package.swift pins platforms: [.macOS(.v14)]). Uses an
+    // O_APPEND fd plus an advisory flock(LOCK_EX) so concurrent transcribe
+    // invocations serialize their ledger appends.
     let fd = open(url.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o644))
     guard fd >= 0 else {
         throw POSIXError(.init(rawValue: errno) ?? .EIO)
@@ -189,14 +206,4 @@ private func appendProcessingLine(_ data: Data, to url: URL) throws {
             offset += bytesWritten
         }
     }
-#else
-    if FileManager.default.fileExists(atPath: url.path) {
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: data)
-    } else {
-        try data.write(to: url)
-    }
-#endif
 }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import transcribe
@@ -13,6 +14,27 @@ final class ProcessingStoreTests: XCTestCase {
         let second = try ProcessingStore.fingerprint(files: [file.path])
 
         XCTAssertNotEqual(first, second)
+    }
+
+    func testFingerprintStreamingMatchesWholeFileHashAcrossChunks() throws {
+        // The streaming reader uses 1 MiB chunks; build a > 2 MiB payload so
+        // the hash is composed from at least three chunks and pin that the
+        // result equals the one-shot SHA256.
+        let dir = try makeTempDir()
+        let file = dir.appendingPathComponent("big.bin")
+        var bytes = Data(count: 0)
+        bytes.reserveCapacity(2 * 1024 * 1024 + 17)
+        for index in 0..<(2 * 1024 * 1024 + 17) {
+            bytes.append(UInt8(index & 0xff))
+        }
+        try bytes.write(to: file)
+
+        let result = try ProcessingStore.fingerprint(files: [file.path])
+        let expected = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+
+        XCTAssertEqual(result.files.count, 1)
+        XCTAssertEqual(result.files[0].sha256, expected)
+        XCTAssertEqual(result.files[0].bytes, Int64(bytes.count))
     }
 
     func testCompletedRecordSkipsOnlyWhenOutputsExist() throws {
