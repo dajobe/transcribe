@@ -200,6 +200,25 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(stdout.contains("transcribe --help"), "stdout: \(stdout)")
     }
 
+    func testUnknownGlobalOptionBeforeSourceReportsCleanly() throws {
+        // ArgumentParser's .captureForPassthrough swallows unknown flags into
+        // sourceArgs. The dispatcher must recognise that a leading `-` token
+        // is a typo'd global option, not a path alias.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["--verbose", "--dryrun", "voice-memos"]
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+        try process.run()
+        process.waitUntilExit()
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(process.terminationStatus, 2)
+        XCTAssertTrue(stderr.contains("Unknown global option"), "stderr: \(stderr)")
+        XCTAssertTrue(stderr.contains("--dryrun"), "stderr: \(stderr)")
+        XCTAssertFalse(stderr.contains("root path alias"), "stderr: \(stderr)")
+    }
+
     func testVoiceMemosRejectsPositionalInputExitTwo() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)

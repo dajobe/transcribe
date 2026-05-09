@@ -75,6 +75,17 @@ struct SourceCommandDispatcher {
         case "voice-memos":
             try await runVoiceMemos(args)
         default:
+            // Anything starting with `-` at the source position is an
+            // unrecognised global flag/option that ArgumentParser couldn't
+            // match (so .captureForPassthrough swallowed it and everything
+            // after into sourceArgs). Reporting it as a "root path alias"
+            // would be misleading.
+            if source.hasPrefix("-") {
+                throw TranscribeError(
+                    message: "Unknown global option `\(source)`. Run `transcribe --help` to see the supported global options; source-specific options go after the source command (e.g. `transcribe voice-memos --session-gap 10`).",
+                    exitCode: .invalidUsage
+                )
+            }
             try await runRootAlias(path: source, remaining: args)
         }
     }
