@@ -4,9 +4,9 @@
 
 This document extends the core product contract in
 [transcribe.md](transcribe.md). It specifies how `transcribe` handles a
-directory of audio clips as a single positional argument, the available ordering
-policies, and the gap-based splitting that turns a multi-clip directory into one
-or more session transcripts.
+directory of audio clips via the canonical `dir` source command, the available
+ordering policies, and the gap-based splitting that turns a multi-clip directory
+into one or more session transcripts.
 
 It does not replace [transcribe.md](transcribe.md); single-file pipeline
 behavior, output formats, and exit codes remain defined there.
@@ -17,8 +17,8 @@ Voice-memo workflows produce many short clips (e.g. macOS Voice Memos: `New
 Recording.m4a`, `New Recording 2.m4a`, …) that the user thinks of as one long
 recording or as several distinct sessions captured across a day. Per-file
 invocations of `transcribe` lose cross-clip speaker continuity and force the
-user to stitch transcripts manually. Pointing `transcribe` at the containing
-directory is the natural UX.
+user to stitch transcripts manually. Pointing `transcribe dir` at the
+containing directory is the natural UX.
 
 Sequential clips a user records in one sitting should land in a single
 transcript. Clips recorded hours apart almost always represent different
@@ -26,21 +26,32 @@ sessions and should produce separate transcripts. The CLI infers this from each
 clip's embedded recording timestamp instead of asking the user to label
 sessions.
 
-## Positional argument
+## Command shape
 
-The single positional argument accepts either:
+Canonical directory input uses:
 
-- a path to a supported audio file (existing behaviour, unchanged), or
-- a path to a directory containing supported audio files at its top level.
+```bash
+transcribe [global options] dir [dir options] <directory>
+```
+
+The root command also keeps a simple directory alias:
+
+```bash
+transcribe [global options] <directory>
+```
+
+The alias is for straightforward runs only. Directory-specific and batch options
+such as `--sort`, `--session-gap`, and filename recovery flags require the
+canonical `dir` command.
 
 A relative input (including `.`) is resolved against the current working
 directory and standardised, so the directory's last path component is always a
-usable name (e.g. running `transcribe .` from `~/voicenotes/2026-may-meeting/`
-derives the basename `2026-may-meeting`).
+usable name (e.g. running `transcribe dir .` from
+`~/voicenotes/2026-may-meeting/` derives the basename `2026-may-meeting`).
 
 ### Filtering
 
-When the positional argument is a directory, `transcribe`:
+When the source argument is a directory, `transcribe`:
 
 - Reads only the **top level** (no recursion into subdirectories).
 - Includes files whose extension matches the [supported
@@ -52,10 +63,10 @@ When the positional argument is a directory, `transcribe`:
 If no supported audio files remain after filtering, the run fails with exit code
 `3` and a clear stderr message.
 
-## Sort order (`--input-sort`)
+## Sort order (`--sort` / `--input-sort`)
 
-Directory contents are concatenated in the order produced by `--input-sort`,
-default `recorded`:
+Directory contents are concatenated in the order produced by `--sort`, default
+`recorded`. The older `--input-sort` spelling remains accepted as an alias.
 
 | Mode       | Primary key                                           | Tiebreak                          |
 |:-----------|:------------------------------------------------------|:----------------------------------|
@@ -79,7 +90,7 @@ Apple's Voice Memos app rewrites the M4A `creation_time` atom to "now" when
 files are exported via Files / iCloud Drive. The result is a directory of clips
 with timestamps clustered within a few seconds — useless for ordering.
 
-When `--input-sort=recorded` is in effect, `transcribe` runs a trust check
+When `--sort=recorded` is in effect, `transcribe` runs a trust check
 before sorting:
 
 ```
@@ -104,12 +115,12 @@ identifying the mismatch:
 Warning: Recorded timestamps span only 4s across 8 clips
 (longest clip is 1m 27s). The container creation_time was likely
 reset during export and does not reflect the original recording time.
-Falling back to filename sort. Pass --input-sort name explicitly to
+Falling back to filename sort. Pass --sort name explicitly to
 silence this warning.
 ```
 
 The trust check only runs when the user requested `.recorded` (default).
-Explicit `--input-sort name` or `--input-sort mtime` are honoured as-is.
+Explicit `--sort name` or `--sort mtime` are honoured as-is.
 
 ### Stability
 
@@ -142,7 +153,7 @@ The pair starts a new session iff:
 
 If any of these is missing, the clip joins the previous session (conservative:
 avoids spurious splits when metadata is unreliable). The `--session-gap` value
-applies regardless of `--input-sort` mode — the split decision uses recorded-at
+applies regardless of `--sort` mode — the split decision uses recorded-at
 metadata rather than the chosen sort key.
 
 ### Output naming per session
@@ -230,8 +241,9 @@ No new exit codes. The directory path uses existing codes:
 
 ## Compatibility notes
 
-- Single-file invocations are unchanged: same arguments, same output filenames,
-  same JSON shape (no `audio_files` key emitted), same timing record shape.
+- Single-file invocations use the `file` source command or the root file alias:
+  same output filenames, same JSON shape (no `audio_files` key emitted), same
+  timing record shape.
 - The folder-action helper script (`scripts/folder-action-transcribe.sh`)
   remains a per-file trigger and is not a directory-aware wrapper.
 - `--output-prefix` continues to override the basename. With multiple sessions,
@@ -245,10 +257,11 @@ No new exit codes. The directory path uses existing codes:
 | `Sources/transcribe/SessionGrouper.swift`         | pure session-grouping logic: `groupIntoSessions(clips:maxGapSeconds:logger:)`.                                                |
 | `Sources/transcribe/TranscriptionPipeline.swift`  | `loadModels(...)` + `runSession(preparedAudio:audioLoadMs:models:...)` to share Whisper/SpeakerKit across sessions.           |
 | `Sources/transcribe/OutputWriter.swift`           | `outputBasename(directoryPath:)` standardises relative paths; `audio_files` JSON metadata; markdown `Sources` block.          |
-| `Sources/transcribe/main.swift`                   | `--input-sort`, `--session-gap` options; per-session loop in `runPipeline`.                                                   |
+| `Sources/transcribe/CLICommands.swift`            | Root/global option parsing, source-specific `dir` options (`--sort`, `--input-sort`, filename recovery), and batch `--session-gap`. |
+| `Sources/transcribe/PipelineRunner.swift`         | Source planning, idempotency checks, dry-run handling, and per-session execution.                                             |
 | `Tests/transcribeTests/InputResolverTests.swift`  | resolver, sort, basenames.                                                                                                    |
 | `Tests/transcribeTests/SessionGrouperTests.swift` | gap-grouping algorithm.                                                                                                       |
-| `Tests/transcribeTests/CLITests.swift`            | `--input-sort` parsing, `--session-gap` validation, empty/non-audio dir exit codes.                                           |
+| `Tests/transcribeTests/CLITests.swift`            | `--sort` / `--input-sort` parsing, `--session-gap` validation, empty/non-audio dir exit codes.                                |
 
 ## Versioning
 

@@ -78,13 +78,11 @@ no real audio or model work yet.
 - Add Swift package: [Package.swift](Package.swift) (or `Sources/transcribe/`
   layout per SPM convention) with dependencies from spike (WhisperKit,
   SpeakerKit, swift-argument-parser).
-- Implement CLI with ArgumentParser: all options from the [CLI
-  Contract](specs/transcribe.md) (audio file argument; `--model`, `--language`,
-  `--output-dir`, `--format`, `--stdout`, `--min-speakers`, `--max-speakers`,
-  `--no-diarize`, `--speaker-strategy`, `--model-dir`, `--overwrite`,
-  `--verbose`, `--version`, `--help`). Enforce semantics: `--stdout` only with
-  txt; `--min-speakers` / `--max-speakers` invalid with `--no-diarize`; `min <=
-  max` when both speaker options set; invalid combinations exit with code `2`.
+- Implement CLI parsing for the [CLI Contract](specs/transcribe.md): root/global
+  options, `file`, `dir`, and `voice-memos` source commands, plus the simple
+  root file/directory alias. Enforce semantics: `--stdout` only with txt;
+  `--min-speakers` / `--max-speakers` invalid with `--no-diarize`; `min <= max`
+  when both speaker options set; invalid combinations exit with code `2`.
 - Use a single, consistent exit-code scheme: `0` success, `1` runtime failure,
   `2` invalid usage, `3` input file, `4` model, `5` output write. Ensure all
   user-facing errors and logs go to stderr.

@@ -120,16 +120,17 @@ each new item as an argument).
    your install (e.g. `~/.local/bin/transcribe`).
 
 6. **Output directory** — If **`TRANSCRIBE_OUTPUT_DIR`** is unset or empty, pass
-   **`-o "$(dirname "$file")"`** (outputs next to the source file). If set, pass
-   **`-o "$TRANSCRIBE_OUTPUT_DIR"`** (all transcripts go to that folder).
+   **`-o "$(dirname "$file")" file "$file"`** (outputs next to the source
+   file). If set, pass **`-o "$TRANSCRIBE_OUTPUT_DIR" file "$file"`** (all
+   transcripts go to that folder).
 
 7. **Format** — **`TRANSCRIBE_FORMAT`** (default **`md`**). Passed to
    **`--format`**.
 
 8. **Extra CLI arguments** — **`TRANSCRIBE_EXTRA_ARGS`**: optional
-   space-separated extra flags appended after `--format` (e.g. `--no-diarize
-   --language en`). Users must not pass a second `--format` unless they override
-   intentionally.
+   space-separated global flags inserted before the `file` source command (e.g.
+   `--no-diarize --language en`). Users must not pass a second `--format`
+   unless they override intentionally.
 
 9. **Serialization** — If **`flock`** is available **and**
    **`TRANSCRIBE_LOCK_FILE`** is non-empty, the script runs `transcribe` under

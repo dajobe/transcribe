@@ -100,7 +100,7 @@ meetings/
   10:30 customer call.m4a
 ```
 
-With `transcribe meetings/ --verbose --input-sort=recorded`:
+With `transcribe --verbose dir --sort=recorded meetings/`:
 
 1. Embedded times fail the trust check.
 2. All four filenames have a parseable `HH:MM` prefix.

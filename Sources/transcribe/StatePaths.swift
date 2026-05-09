@@ -23,4 +23,9 @@ enum StatePaths {
     static func timingHistoryURL() throws -> URL {
         try stateDirectoryURL().appendingPathComponent("timing_history.jsonl", isDirectory: false)
     }
+
+    /// JSON Lines file of completed processing records for idempotent runs.
+    static func processingHistoryURL() throws -> URL {
+        try stateDirectoryURL().appendingPathComponent("processing_history.jsonl", isDirectory: false)
+    }
 }

@@ -31,79 +31,95 @@ Use the release build for normal transcription runs; debug builds are primarily
 for development and can be slower. Ensure the install directory is on your
 `PATH`.
 
-## Testing
-
-Run the test suite from the package root:
-
-```bash
-swift test
-```
-
-Tests cover CLI parsing, invalid option combinations, missing-file handling,
-output rendering, atomic writes, and overwrite protection. For manual
-benchmarking with a longer audio file, run without committing the file to the
-repo (see [spec Test Plan](specs/transcribe.md)).
-
 ## Usage
 
 ```text
-transcribe <audio-file-or-directory> [options]
+transcribe [global-options] file <audio-file>
+transcribe [global-options] dir [dir-options] <directory>
+transcribe [global-options] voice-memos [voice-memos-options]
+
+# Convenience aliases:
+transcribe [global-options] <audio-file>
+transcribe [global-options] <directory>
 ```
 
-The positional argument may be either a single audio file or a directory of
-sequential clips. When given a directory, the top-level audio files are ordered
+Use `file`, `dir`, or `voice-memos` as the canonical source commands. The root
+positional form remains as a convenience alias: if the path is a file it
+dispatches to `file`, and if the path is a directory it dispatches to `dir`.
+Global options must appear before the source command or path. Source-specific
+options appear after their source command.
+
+Directory input is for sequential clips. The top-level audio files are ordered
 by recording time and split into one or more sessions whenever there is a
 multi-minute gap between consecutive clips (`--session-gap`, default 10 min).
 Each session is transcribed independently and produces its own transcript named
 after the directory (e.g. `~/voicenotes/2026-may-meeting/` →
-`2026-may-meeting.txt`, or `2026-may-meeting - Recording 1.txt` and `… -
+`2026-may-meeting.txt`, or `2026-may-meeting - Recording 1.txt` and `... -
 Recording 2.txt` when split).
 
 ### Examples
 
 ```bash
 # Run the optimized release build directly
-.build/release/transcribe meeting.mp3
+.build/release/transcribe file meeting.mp3
 
 # Transcribe with speaker diarization, output txt + json
-transcribe meeting.mp3
+transcribe file meeting.mp3
 
 # Constrain to two speakers, all output formats
-transcribe meeting.mp3 --language en --min-speakers 2 --max-speakers 2 --format all
+transcribe --language en --min-speakers 2 --max-speakers 2 --format all file meeting.mp3
 
 # Transcript only, no diarization, smaller model
-transcribe lecture.m4a --no-diarize --model medium
+transcribe --no-diarize --model medium file lecture.m4a
 
 # Transcript to stdout and JSON to disk
-transcribe interview.wav --stdout --format txt,json -o ./transcripts
+transcribe --stdout --format txt,json -o ./transcripts file interview.wav
 
 # Markdown transcript (and JSON) for notes / publishing
-transcribe meeting.m4a --format md,json -o ./notes
+transcribe --format md,json -o ./notes file meeting.m4a
 
 # A directory of sequential voice notes treated as one recording.
 # Output basename comes from the directory: 2026-may-meeting.{txt,json}
+transcribe dir ~/voicenotes/2026-may-meeting/
+
+# The old root positional shape is still accepted as an alias.
+transcribe meeting.mp3
 transcribe ~/voicenotes/2026-may-meeting/
 
+# Import synced Apple Voice Memos directly from the local iCloud-backed store.
+transcribe -o ./voice-memo-transcripts --format md,json voice-memos
+
+# Preview which synced Voice Memos would process or skip.
+transcribe --dry-run voice-memos
+
+# Mark all currently synced Voice Memos as already imported without transcribing.
+transcribe --mark-imported voice-memos
+
 # Override compute units explicitly
-transcribe meeting.mp3 \
+transcribe \
   --audio-encoder-compute cpuAndGPU \
   --text-decoder-compute cpuAndGPU \
   --segmenter-compute cpuAndGPU \
-  --embedder-compute cpuAndGPU
+  --embedder-compute cpuAndGPU \
+  file meeting.mp3
 ```
 
 ### Directory input
 
-When the positional argument is a directory, `transcribe` orders its top-level
-audio files, splits them into one or more sessions at gaps over the threshold,
-and runs the pipeline once per session.
+Use `transcribe dir <directory>` for directories of sequential audio clips. The
+root alias `transcribe <directory>` accepts global options only; use
+`transcribe dir` for directory-specific options.
+`transcribe` orders the directory's top-level audio files, splits them into one
+or more sessions at gaps over the threshold, and runs the pipeline once per
+session.
 
 - **Sort order:** by default clips are ordered by their embedded recording
   timestamp (the M4A `creation_time` atom). Files without that metadata fall
   back to file modification time, then to natural-sort filename, so order stays
-  deterministic for mixed directories. Use `--input-sort name` to force
+  deterministic for mixed directories. Use `--sort name` to force
   natural-sort filename ordering (handles `Note 1.m4a, …, Note 10.m4a`) or
-  `--input-sort mtime` to use file modification time only.
+  `--sort mtime` to use file modification time only. The previous
+  `--input-sort` spelling is still accepted as an alias.
 - **Session splitting:** if adjacent clips have a recorded-at gap larger than
   `--session-gap` minutes (default `10`), the directory is split into separate
   transcripts — one per detected session. Set `--session-gap 0` to disable
@@ -143,7 +159,7 @@ date no longer reflects when you actually recorded. `transcribe` detects this
 automatically: when the spread of recorded timestamps across clips is smaller
 than the longest clip's duration, the timestamps cannot represent real
 sequential recording starts, and the run falls back to filename ordering with a
-warning on stderr. Pass `--input-sort name` to silence the warning.
+warning on stderr. Pass `--sort name` to silence the warning.
 
 ### Recommended naming convention for directory input
 
@@ -176,6 +192,9 @@ session basename rules, and verbose-log examples — see
 
 ### Options
 
+Global options are accepted before `file`, `dir`, `voice-memos`, and the root
+file/directory alias. Run `transcribe --help` to see these options.
+
 | Option                            | Description                                                                                      |
 |:----------------------------------|:-------------------------------------------------------------------------------------------------|
 | `-m, --model <name>`              | Whisper model (default: `openai_whisper-large-v3_turbo`; ~1.5 GB on first run)                   |
@@ -187,10 +206,12 @@ session basename rules, and verbose-log examples — see
 | `--max-speakers <n>`              | Maximum speakers for diarization                                                                 |
 | `--no-diarize`                    | Disable speaker diarization                                                                      |
 | `--speaker-strategy <s>`          | Speaker merge strategy: `subsegment` or `segment` (default: `subsegment`)                        |
-| `--input-sort <mode>`             | Order for directory input: `recorded` (default), `name`, `mtime`                                 |
-| `--session-gap <min>`             | Split directory input at gaps > N minutes between clips (0 disables; default: 10)                |
 | `--model-dir <path>`              | Model cache directory (default: `~/.cache/transcribe`)                                           |
 | `--overwrite`                     | Replace existing output files                                                                    |
+| `--redo`                          | Reprocess inputs even when processing history says they already completed                         |
+| `--no-processing-state`           | Do not consult or write idempotent processing history                                             |
+| `--mark-imported`                 | Mark planned inputs as already imported without transcribing                                      |
+| `--dry-run`                       | Show what would process or skip without loading models, writing outputs, or updating history      |
 | `--verbose`                       | Print progress and timing to stderr                                                              |
 | `--debug-progress-log`            | Log progress/ETA as plain stderr lines (~1/s) without a TTY (e.g. capture to a file or pipe)     |
 | `--no-timing-stats`               | Do not save timing history or use prior runs for ETA hints on the transcription line             |
@@ -198,6 +219,26 @@ session basename rules, and verbose-log examples — see
 | `--text-decoder-compute <units>`  | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
 | `--segmenter-compute <units>`     | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
 | `--embedder-compute <units>`      | SpeakerKit embedder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`   |
+
+Directory-only options for `transcribe dir`:
+
+| Option                                              | Description                                                                       |
+|:----------------------------------------------------|:----------------------------------------------------------------------------------|
+| `--sort <mode>` / `--input-sort <mode>`             | Order directory input: `recorded` (default), `name`, `mtime`                      |
+| `--filename-time-recovery` / `--no-filename-time-recovery` | Recover leading filename times when embedded dates are missing or untrusted |
+| `--auto-session-basename` / `--no-auto-session-basename` | Derive session output basenames from common filename prefixes                |
+
+Batch session option for `transcribe dir` and `transcribe voice-memos`:
+
+| Option                    | Description                                                                       |
+|:--------------------------|:----------------------------------------------------------------------------------|
+| `--session-gap <min>`     | Split batch input at gaps > N minutes between clips (0 disables; default: 10)     |
+
+Voice Memos-only options for `transcribe voice-memos`:
+
+| Option                     | Description                                                                           |
+|:---------------------------|:--------------------------------------------------------------------------------------|
+| `--recordings-dir <path>`  | Voice Memos recordings directory (default: Apple’s synced recordings group container) |
 
 When SpeakerKit can accept an exact speaker count hint, `transcribe` passes it
 only when `--min-speakers` and `--max-speakers` are both set to the same value.
@@ -216,6 +257,70 @@ progress line. Disable with `--no-timing-stats` or `TRANSCRIBE_TIMING_STATS=0`.
 
 Full schema, paths, and ETA behavior:
 **[specs/timing-history.md](specs/timing-history.md)**.
+
+### Processing history and idempotency
+
+Successful transcription sessions are recorded in a processing history file so
+rerunning the same command can skip work that is already complete. The history
+tracks the input source, SHA-256 audio fingerprint, important transcription
+settings, requested output files, and completion metadata.
+
+- **Default behavior:** if the source audio, important settings, and requested
+  output files match a previous completed run, and all requested outputs still
+  exist, the session is skipped before audio preflight or model loading.
+- **Changed input/settings:** changed audio bytes, model, language,
+  diarization settings, speaker options, formats, or transcribe version cause a
+  new run.
+- **Missing outputs:** if history says a session completed but the requested
+  output files are missing, the session is processed again.
+- **Redo:** pass `--redo` to ignore processing history and process matching
+  inputs again. Existing output files still require `--overwrite`.
+- **Opt out:** pass `--no-processing-state` to neither consult nor write
+  processing history.
+- **Dry run:** pass `--dry-run` to scan inputs, compute fingerprints, and show
+  what would process or skip without preflighting audio, loading models,
+  writing outputs, or updating processing history.
+
+The processing history lives next to the timing history under the transcribe
+state directory as `processing_history.jsonl`.
+
+### Voice Memos import
+
+`transcribe voice-memos` reads Apple Voice Memos that are already synced to
+disk. It uses the Core Data SQLite index and sibling audio files under:
+
+```text
+~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings/
+```
+
+The importer reads `CloudRecordings.db` read-only and transcribes the `.m4a`
+files in place. There is no download, copy, or conversion step.
+
+- **Metadata:** recording date comes from `ZDATE`; title comes from
+  `ZCUSTOMLABEL`, then `ZENCRYPTEDTITLE`, then `New Recording`. The stable
+  identity prefers `ZUNIQUEID` and falls back to the audio path.
+- **Output names:** Voice Memos use `YYYY-MM-DD HHMM <title>`, with unsafe
+  filename characters stripped and numeric suffixes added for collisions.
+- **Output metadata:** JSON and Markdown include `source: voice_memos`,
+  recorded time, recording title, Voice Memos unique ID when present, and the
+  source path.
+- **Session grouping:** Voice Memos use the same `--session-gap` default as
+  directory input. Adjacent memos recorded within the gap are processed as one
+  transcript session; gaps larger than the threshold start a new transcript.
+  Use `--session-gap 0` to process all synced memos as one session.
+- **Baseline import:** `transcribe --mark-imported voice-memos` records the
+  planned Voice Memo sessions as imported without writing transcript outputs.
+  The same global `--mark-imported` option works for `file` and `dir` inputs.
+  Future runs skip matching inputs unless their audio fingerprint changes or
+  `--redo` is used.
+- **Dry run:** `transcribe --dry-run voice-memos` lists recordings that would
+  process or skip. `transcribe --dry-run --mark-imported voice-memos` lists
+  recordings that would be marked imported without writing the baseline.
+- **Permissions:** if macOS denies the Voice Memos container, grant Full Disk
+  Access to the app or shell running `transcribe`.
+
+Use `--recordings-dir <path>` to point at a fixture or alternate recordings
+directory containing `CloudRecordings.db`.
 
 ### Performance
 
@@ -257,7 +362,7 @@ Full behavior, stable-file wait, and exit codes:
 | `TRANSCRIBE_BIN`               | Path to `transcribe` (default: `transcribe` on `PATH`)                                          |
 | `TRANSCRIBE_OUTPUT_DIR`        | If set, `-o` for all runs; if unset, outputs go next to each input file                         |
 | `TRANSCRIBE_FORMAT`            | `--format` value (default: `md`)                                                                |
-| `TRANSCRIBE_EXTRA_ARGS`        | Extra CLI flags (space-separated)                                                               |
+| `TRANSCRIBE_EXTRA_ARGS`        | Extra global CLI flags inserted before `file` (space-separated)                                  |
 | `TRANSCRIBE_STABLE_SECS`       | Seconds of unchanged file size before running (default: `2`)                                    |
 | `TRANSCRIBE_MAX_STABLE_WAIT`   | Max seconds to wait for a stable file (default: `3600`)                                         |
 | `TRANSCRIBE_LOCK_FILE`         | If set and `flock` exists, serialize concurrent runs                                            |
@@ -358,28 +463,10 @@ the infrastructure migration timeline.
 | 4    | Model download or initialization failure |
 | 5    | Output write failure                     |
 
-## Releasing
+## Development
 
-The version is defined as `Transcribe.version` in
-`Sources/transcribe/main.swift` and extracted by the `Makefile`. **Every change
-to that constant must land alongside a matching annotated git tag**; the targets
-below enforce that.
-
-To release a new version:
-
-1. Update `static let version` in `Sources/transcribe/main.swift`.
-2. Commit the version bump (or land it as the last hunk of a feature commit, as
-   `git log` shows).
-3. Run `make tag` (or `make release` to build the release binary and tag in one
-   step). This creates an annotated `vX.Y.Z` tag on the current commit.
-4. Run `make verify-tag` to confirm the tag is in place.
-5. Push: `git push && git push origin vX.Y.Z` (or `git push --follow-tags` to
-   push everything in one command).
-6. Run `make changelog` to generate release notes from the commit log.
-
-`make verify-tag` is a guardrail you can run at any point — it fails loudly when
-`Transcribe.version` has been bumped but the matching tag is missing. Run it
-before pushing if you want to be sure nothing slipped past.
+For the code map, pipeline flow, state files, tests, and release checklist, see
+[hacking.md](hacking.md).
 
 ## License
 

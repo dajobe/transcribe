@@ -65,6 +65,21 @@ func checkOverwrite(
     }
 }
 
+func outputPaths(
+    outputDir: String,
+    basename: String,
+    formats: [String],
+    writeTxtFile: Bool
+) -> [String] {
+    let dir = resolvedOutputDir(outputDir)
+    let extMap = ["txt": "txt", "json": "json", "srt": "srt", "vtt": "vtt", "md": "md"]
+    return formats.compactMap { format in
+        guard let ext = extMap[format] else { return nil }
+        if format == "txt" && !writeTxtFile { return nil }
+        return (dir as NSString).appendingPathComponent("\(basename).\(ext)")
+    }
+}
+
 /// Writes content to path atomically (write to temp file in same dir, then rename).
 func writeAtomically(content: Data, to path: String) throws {
     let dir = (path as NSString).deletingLastPathComponent
@@ -129,11 +144,17 @@ struct JSONMetadata: Encodable {
     let speakers_detected: Int?
     let transcribe_version: String
     let created_at: String
+    let source: String?
+    let recorded_at: String?
+    let recording_title: String?
+    let voice_memos_unique_id: String?
+    let voice_memos_path: String?
 
     private enum CodingKeys: String, CodingKey {
         case audio_file, audio_files, duration_seconds, model, language
         case diarization_enabled, speaker_strategy, speakers_detected
         case transcribe_version, created_at
+        case source, recorded_at, recording_title, voice_memos_unique_id, voice_memos_path
     }
 
     func encode(to encoder: Encoder) throws {
@@ -151,7 +172,20 @@ struct JSONMetadata: Encodable {
         try c.encode(speakers_detected, forKey: .speakers_detected)
         try c.encode(transcribe_version, forKey: .transcribe_version)
         try c.encode(created_at, forKey: .created_at)
+        try c.encodeIfPresent(source, forKey: .source)
+        try c.encodeIfPresent(recorded_at, forKey: .recorded_at)
+        try c.encodeIfPresent(recording_title, forKey: .recording_title)
+        try c.encodeIfPresent(voice_memos_unique_id, forKey: .voice_memos_unique_id)
+        try c.encodeIfPresent(voice_memos_path, forKey: .voice_memos_path)
     }
+}
+
+struct OutputSourceMetadata: Codable, Equatable {
+    let source: String
+    let recordedAt: String?
+    let recordingTitle: String?
+    let voiceMemosUniqueID: String?
+    let voiceMemosPath: String?
 }
 
 struct JSONSegmentWord: Encodable {
@@ -178,6 +212,7 @@ func renderJSON(
     output: TranscriptionOutput,
     audioFile: String,
     audioFiles: [String]? = nil,
+    sourceMetadata: OutputSourceMetadata? = nil,
     model: String,
     version: String
 ) throws -> Data {
@@ -195,7 +230,12 @@ func renderJSON(
         speaker_strategy: output.speakerStrategy,
         speakers_detected: output.speakersDetected,
         transcribe_version: version,
-        created_at: createdAt
+        created_at: createdAt,
+        source: sourceMetadata?.source,
+        recorded_at: sourceMetadata?.recordedAt,
+        recording_title: sourceMetadata?.recordingTitle,
+        voice_memos_unique_id: sourceMetadata?.voiceMemosUniqueID,
+        voice_memos_path: sourceMetadata?.voiceMemosPath
     )
 
     let segments = output.segments.map { seg in
@@ -267,6 +307,7 @@ func renderMarkdown(
     output: TranscriptionOutput,
     audioFile: String,
     audioFiles: [String]? = nil,
+    sourceMetadata: OutputSourceMetadata? = nil,
     model: String,
     version: String
 ) -> String {
@@ -289,6 +330,21 @@ func renderMarkdown(
         metaLines.append("- **Sources:**")
         for f in files {
             metaLines.append("  - `\(f)`")
+        }
+    }
+    if let sourceMetadata {
+        metaLines.append("- **Input source:** `\(sourceMetadata.source)`")
+        if let recordedAt = sourceMetadata.recordedAt {
+            metaLines.append("- **Recorded:** \(recordedAt)")
+        }
+        if let title = sourceMetadata.recordingTitle {
+            metaLines.append("- **Recording title:** `\(title)`")
+        }
+        if let uniqueID = sourceMetadata.voiceMemosUniqueID {
+            metaLines.append("- **Voice Memos ID:** `\(uniqueID)`")
+        }
+        if let path = sourceMetadata.voiceMemosPath {
+            metaLines.append("- **Voice Memos path:** `\(path)`")
         }
     }
     if let lang = output.language {
@@ -389,6 +445,7 @@ func writeOutputs(
     output: TranscriptionOutput,
     audioPath: String,
     audioFiles: [String]? = nil,
+    sourceMetadata: OutputSourceMetadata? = nil,
     outputDir: String,
     basename: String,
     formats: [String],
@@ -425,6 +482,7 @@ func writeOutputs(
                 output: output,
                 audioFile: audioPath,
                 audioFiles: audioFiles,
+                sourceMetadata: sourceMetadata,
                 model: model,
                 version: version
             )
@@ -451,6 +509,7 @@ func writeOutputs(
                 output: output,
                 audioFile: audioPath,
                 audioFiles: audioFiles,
+                sourceMetadata: sourceMetadata,
                 model: model,
                 version: version
             )

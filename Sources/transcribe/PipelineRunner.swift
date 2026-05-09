@@ -1,0 +1,568 @@
+import Foundation
+import SpeakerKit
+import WhisperKit
+#if canImport(Darwin)
+import Darwin
+#endif
+
+enum SourceMode {
+    case file
+    case directory
+    case voiceMemos
+}
+
+enum PipelineRequest {
+    case file(path: String)
+    case directory(path: String, options: DirectoryInputOptions)
+    case voiceMemos(recordingsDir: String, sessionGap: Int)
+}
+
+struct PipelineSessionPlan {
+    let session: AudioSession
+    let basename: String
+    let audioPathForOutput: String
+    let audioFilesForOutput: [String]?
+    let sourceKind: ProcessingSourceKind
+    let sourceID: String
+    let sourceMetadata: OutputSourceMetadata?
+}
+
+struct PipelineWorkItem {
+    let plan: PipelineSessionPlan
+    let fingerprint: SourceFingerprint
+    let outputPaths: [String]
+}
+
+enum SourcePlanner {
+    static func modeForAliasPath(_ rawPath: String) throws -> SourceMode {
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else {
+            throw TranscribeError(message: "Input does not exist: \(rawPath)", exitCode: .inputFile)
+        }
+        return isDir.boolValue ? .directory : .file
+    }
+
+    static func validateFilePath(_ rawPath: String) throws {
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else {
+            throw TranscribeError(message: "Input does not exist: \(rawPath)", exitCode: .inputFile)
+        }
+        if isDir.boolValue {
+            throw TranscribeError(message: "`transcribe file` requires an audio file, got directory: \(rawPath)", exitCode: .invalidUsage)
+        }
+    }
+
+    static func validateDirectoryPath(_ rawPath: String) throws {
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else {
+            throw TranscribeError(message: "Input does not exist: \(rawPath)", exitCode: .inputFile)
+        }
+        if !isDir.boolValue {
+            throw TranscribeError(message: "`transcribe dir` requires a directory, got file: \(rawPath)", exitCode: .invalidUsage)
+        }
+    }
+
+    static func filePlan(path: String, outputPrefix: String?) -> [PipelineSessionPlan] {
+        let resolved = ResolvedInput.file(path: (path as NSString).expandingTildeInPath)
+        let basename = InputResolver.sessionBasenames(for: resolved, prefixOverride: outputPrefix)[0]
+        let expanded = (path as NSString).expandingTildeInPath
+        return [
+            PipelineSessionPlan(
+                session: AudioSession(files: [expanded], recordedAt: nil),
+                basename: basename,
+                audioPathForOutput: expanded,
+                audioFilesForOutput: nil,
+                sourceKind: .file,
+                sourceID: sourceIDForFiles(kind: .file, files: [expanded]),
+                sourceMetadata: nil
+            )
+        ]
+    }
+
+    static func directoryPlans(
+        path: String,
+        options: DirectoryInputOptions,
+        outputPrefix: String?,
+        logger: VerboseLogger
+    ) async throws -> [PipelineSessionPlan] {
+        let sessionGapSeconds = Double(options.sessionGap) * 60.0
+        let resolvedInput = try await InputResolver.resolve(
+            path,
+            sort: options.sort,
+            sessionGapSeconds: sessionGapSeconds,
+            filenameTimeRecovery: options.filenameTimeRecovery,
+            logger: logger
+        )
+        guard case .directory(let dirPath, let sessions) = resolvedInput else {
+            throw TranscribeError(message: "`transcribe dir` requires a directory, got file: \(path)", exitCode: .invalidUsage)
+        }
+
+        let totalClips = sessions.reduce(0) { $0 + $1.files.count }
+        logger.log(
+            "Input is a directory: \(totalClips) audio file\(totalClips == 1 ? "" : "s"), "
+            + "\(sessions.count) session\(sessions.count == 1 ? "" : "s") "
+            + "(sort=\(options.sort.rawValue), session-gap=\(options.sessionGap)m)"
+        )
+
+        let basenames = InputResolver.sessionBasenames(
+            for: resolvedInput,
+            prefixOverride: outputPrefix,
+            autoSessionBasename: options.autoSessionBasename
+        )
+        return zip(sessions, basenames).map { (session, basename) in
+            PipelineSessionPlan(
+                session: session,
+                basename: basename,
+                audioPathForOutput: dirPath,
+                audioFilesForOutput: session.files.map { ($0 as NSString).lastPathComponent },
+                sourceKind: .directorySession,
+                sourceID: sourceIDForFiles(kind: .directorySession, files: session.files),
+                sourceMetadata: nil
+            )
+        }
+    }
+
+    static func voiceMemoPlans(
+        recordingsDir: String,
+        sessionGap: Int,
+        outputPrefix: String?,
+        logger: VerboseLogger
+    ) throws -> [PipelineSessionPlan] {
+        let recordings = try VoiceMemosImport.loadRecordings(recordingsDirectory: recordingsDir, logger: logger)
+        let clips = recordings.map {
+            AudioClip(path: $0.path, recordedAt: $0.recordedAt, durationSeconds: $0.durationSeconds)
+        }
+        let sessions = SessionGrouper.groupIntoSessions(
+            clips,
+            maxGapSeconds: Double(sessionGap) * 60.0,
+            logger: logger
+        )
+        let recordingsByPath = Dictionary(uniqueKeysWithValues: recordings.map { ($0.path, $0) })
+        let groupedRecordings = sessions.map { session in
+            session.files.compactMap { recordingsByPath[$0] }
+        }
+        let basenames = VoiceMemosImport.sessionBasenames(for: groupedRecordings, prefixOverride: outputPrefix)
+        logger.log(
+            "Voice Memos: planned \(sessions.count) session\(sessions.count == 1 ? "" : "s") "
+            + "from \(recordings.count) recording\(recordings.count == 1 ? "" : "s") "
+            + "(session-gap=\(sessionGap)m)"
+        )
+
+        return zip(zip(sessions, groupedRecordings), basenames).map { combined in
+            let ((session, group), basename) = combined
+            let single = group.count == 1 ? group[0] : nil
+            return PipelineSessionPlan(
+                session: session,
+                basename: basename,
+                audioPathForOutput: single?.path ?? (recordingsDir as NSString).expandingTildeInPath,
+                audioFilesForOutput: group.count > 1 ? group.map { ($0.path as NSString).lastPathComponent } : nil,
+                sourceKind: .voiceMemos,
+                sourceID: single?.sourceID ?? sourceIDForFiles(kind: .voiceMemos, files: session.files),
+                sourceMetadata: VoiceMemosImport.outputMetadata(for: group)
+            )
+        }
+    }
+}
+
+struct PipelineRunner {
+    let request: PipelineRequest
+    let options: SharedTranscriptionOptions
+
+    func run() async throws {
+        try validateSharedUsage()
+        let startDate = Date()
+        let logger = VerboseLogger(verbose: options.verbose, startDate: startDate)
+
+        let sessionPlans = try await buildSessionPlans(logger: logger)
+        if options.markImported {
+            var workItems: [PipelineWorkItem] = []
+            var skippedItems: [PipelineWorkItem] = []
+            for plan in sessionPlans {
+                let fingerprint = try ProcessingStore.fingerprint(files: plan.session.files)
+                let item = PipelineWorkItem(plan: plan, fingerprint: fingerprint, outputPaths: [])
+                if try ProcessingStore.shouldSkipImportedBaseline(sourceID: plan.sourceID, fingerprint: fingerprint) {
+                    skippedItems.append(item)
+                } else {
+                    workItems.append(item)
+                }
+            }
+            if options.dryRun {
+                emitDryRunMarkImported(workItems: workItems, skippedItems: skippedItems)
+            } else {
+                try markPlannedInputsImported(workItems: workItems)
+            }
+            return
+        }
+
+        let resolvedModel = try await resolveModel(explicit: options.model)
+        let settingsSignature = ProcessingSettingsSignature(
+            model: resolvedModel,
+            language: options.language,
+            diarization_enabled: !options.noDiarize,
+            speaker_strategy: options.speakerStrategy,
+            min_speakers: options.minSpeakers,
+            max_speakers: options.maxSpeakers,
+            formats: options.resolvedFormats,
+            write_txt_to_stdout: options.wantsTxt && options.stdout,
+            transcribe_version: Transcribe.version
+        )
+
+        let historicalRatio: Double? = {
+            guard options.timingStatsEnabled else { return nil }
+            guard let recs = try? TimingStore.loadRecent(model: resolvedModel, diarizationEnabled: !options.noDiarize) else {
+                return nil
+            }
+            return TimingStore.medianWallSecondsPerAudioSecond(records: recs)
+        }()
+
+        var workItems: [PipelineWorkItem] = []
+        var skippedItems: [PipelineWorkItem] = []
+        for plan in sessionPlans {
+            let fingerprint = try ProcessingStore.fingerprint(files: plan.session.files)
+            let paths = outputPaths(
+                outputDir: options.outputDir,
+                basename: plan.basename,
+                formats: options.resolvedFormats,
+                writeTxtFile: options.wantsTxt && !options.stdout
+            )
+            if try shouldSkip(plan: plan, fingerprint: fingerprint, settings: settingsSignature, outputPaths: paths) {
+                logger.log("Skipping already processed input: \(plan.basename)")
+                skippedItems.append(PipelineWorkItem(plan: plan, fingerprint: fingerprint, outputPaths: paths))
+                continue
+            }
+            workItems.append(PipelineWorkItem(plan: plan, fingerprint: fingerprint, outputPaths: paths))
+        }
+
+        if options.dryRun {
+            emitDryRun(workItems: workItems, skippedItems: skippedItems)
+            return
+        }
+
+        if workItems.isEmpty {
+            logger.log("No new work to process.")
+            return
+        }
+
+        for item in workItems {
+            try checkOverwrite(
+                outputDir: options.outputDir,
+                basename: item.plan.basename,
+                formats: options.resolvedFormats,
+                writeTxtFile: options.wantsTxt && !options.stdout,
+                overwrite: options.overwrite
+            )
+        }
+        try preflightAudioDecoding(for: workItems.map(\.plan.session), logger: logger)
+
+        let liveProgressMode: LiveProgressRenderMode? = {
+            if options.debugProgressLog { return .lineLog(minInterval: 1.0) }
+            if isStderrTTY() { return .tty }
+            return nil
+        }()
+
+        let computeOptions = RuntimeComputeOptions.resolve(
+            audioEncoder: options.audioEncoderCompute,
+            textDecoder: options.textDecoderCompute,
+            segmenter: options.segmenterCompute,
+            embedder: options.embedderCompute
+        )
+        let strategy = SpeakerInfoStrategy(from: options.speakerStrategy) ?? .subsegment
+        let (models, whisperInitMs, speakerInitMs) = try await loadModels(
+            model: resolvedModel,
+            modelDir: options.modelDir,
+            diarize: !options.noDiarize,
+            computeOptions: computeOptions,
+            verbose: options.verbose,
+            logger: logger
+        )
+
+        let resolvedDir = resolvedOutputDir(options.outputDir)
+
+        for (idx, item) in workItems.enumerated() {
+            let plan = item.plan
+            let session = plan.session
+            let sessionStartDate = Date()
+            let basename = plan.basename
+            if workItems.count > 1 {
+                logger.log("--- Session \(idx + 1)/\(workItems.count): \(basename) (\(session.files.count) clip\(session.files.count == 1 ? "" : "s")) ---")
+            }
+
+            let (preparedAudio, loadMs): (PreparedAudio, Int64)
+            if session.files.count == 1 {
+                (preparedAudio, loadMs) = try WallClock.measureMs {
+                    try loadPreparedAudio(audioPath: session.files[0], logger: logger)
+                }
+            } else {
+                (preparedAudio, loadMs) = try WallClock.measureMs {
+                    try loadPreparedAudio(fromFiles: session.files, logger: logger)
+                }
+            }
+
+            let (sessionOutput, sessionPhases) = try await runSession(
+                preparedAudio: preparedAudio,
+                audioLoadMs: loadMs,
+                models: models,
+                language: options.language,
+                minSpeakers: options.minSpeakers,
+                maxSpeakers: options.maxSpeakers,
+                speakerStrategy: strategy,
+                wordTimestamps: false,
+                liveProgressMode: liveProgressMode,
+                pipelineStartDate: startDate,
+                historicalWallSecondsPerAudioSecond: historicalRatio,
+                logger: logger
+            )
+
+            var out = sessionOutput
+            out.speakerStrategy = options.speakerStrategy
+            for warning in out.warnings {
+                emitWarning(warning)
+            }
+
+            let outputFiles = options.resolvedFormats.filter { fmt in fmt != "txt" || !options.stdout }.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
+            logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
+
+            let (_, writeMs) = try WallClock.measureMs {
+                try writeOutputs(
+                    output: out,
+                    audioPath: plan.audioPathForOutput,
+                    audioFiles: plan.audioFilesForOutput,
+                    sourceMetadata: plan.sourceMetadata,
+                    outputDir: options.outputDir,
+                    basename: basename,
+                    formats: options.resolvedFormats,
+                    writeTxtToStdout: options.wantsTxt && options.stdout,
+                    overwrite: options.overwrite,
+                    model: resolvedModel,
+                    version: Transcribe.version
+                )
+            }
+
+            if !options.noProcessingState {
+                try ProcessingStore.append(ProcessingRecord(
+                    completed_at: iso8601String(Date()),
+                    source_kind: plan.sourceKind,
+                    source_id: plan.sourceID,
+                    source_fingerprint: item.fingerprint,
+                    settings_signature: settingsSignature,
+                    output_dir: resolvedDir,
+                    basename: basename,
+                    output_paths: item.outputPaths,
+                    audio_duration_s: out.durationSeconds,
+                    warning_count: out.warnings.count,
+                    recording_title: plan.sourceMetadata?.recordingTitle,
+                    recorded_at: plan.sourceMetadata?.recordedAt,
+                    voice_memos_unique_id: plan.sourceMetadata?.voiceMemosUniqueID,
+                    voice_memos_path: plan.sourceMetadata?.voiceMemosPath
+                ))
+            }
+
+            if options.timingStatsEnabled {
+                let fileBytes: Int64 = session.files.reduce(into: Int64(0)) { total, p in
+                    let n = (try? FileManager.default.attributesOfItem(atPath: p)[.size] as? NSNumber)?.int64Value ?? 0
+                    total += n
+                }
+                var phasesForRecord = sessionPhases
+                if idx == 0 {
+                    phasesForRecord.whisperInitMs = whisperInitMs
+                    phasesForRecord.speakerInitMs = speakerInitMs
+                }
+                let endedAt = Date()
+                let timingStartDate = (idx == 0) ? startDate : sessionStartDate
+                let totalMs = Int64(endedAt.timeIntervalSince(timingStartDate) * 1000.0)
+                let record = RunTimingRecord(
+                    endedAt: endedAt,
+                    transcribeVersion: Transcribe.version,
+                    model: resolvedModel,
+                    diarizationEnabled: out.diarizationEnabled,
+                    inputBasename: basename,
+                    fileBytes: fileBytes,
+                    audioDurationS: out.durationSeconds,
+                    segmentCount: out.segments.count,
+                    speakersDetected: out.speakersDetected,
+                    phases: phasesForRecord,
+                    writeOutputsMs: writeMs,
+                    totalMs: totalMs
+                )
+                try? TimingStore.append(record)
+            }
+        }
+
+        let endedAt = Date()
+        let totalSec = Int(endedAt.timeIntervalSince(startDate))
+        logger.log("Done. Total: \(totalSec / 60)m \(totalSec % 60)s")
+    }
+
+    private func buildSessionPlans(logger: VerboseLogger) async throws -> [PipelineSessionPlan] {
+        switch request {
+        case .file(let path):
+            return SourcePlanner.filePlan(path: path, outputPrefix: options.outputPrefix)
+        case .directory(let path, let directoryOptions):
+            return try await SourcePlanner.directoryPlans(
+                path: path,
+                options: directoryOptions,
+                outputPrefix: options.outputPrefix,
+                logger: logger
+            )
+        case .voiceMemos(let recordingsDir, let sessionGap):
+            return try SourcePlanner.voiceMemoPlans(
+                recordingsDir: recordingsDir,
+                sessionGap: sessionGap,
+                outputPrefix: options.outputPrefix,
+                logger: logger
+            )
+        }
+    }
+
+    private func validateSharedUsage() throws {
+        let formats = options.resolvedFormats
+        if formats.isEmpty {
+            throw TranscribeError(message: "--format must include at least one of: txt, json, srt, vtt, md, all.", exitCode: .invalidUsage)
+        }
+        for f in formats where !validOutputFormats.contains(f) {
+            throw TranscribeError(message: "Unsupported format '\(f)'. Supported: txt, json, srt, vtt, md, all.", exitCode: .invalidUsage)
+        }
+
+        let strategy = options.speakerStrategy.lowercased()
+        if strategy != "subsegment" && strategy != "segment" {
+            throw TranscribeError(message: "--speaker-strategy must be 'subsegment' or 'segment'.", exitCode: .invalidUsage)
+        }
+
+        if options.stdout && !options.wantsTxt {
+            throw TranscribeError(message: "--stdout is only valid when txt is requested (e.g. --format txt,json or --format all).", exitCode: .invalidUsage)
+        }
+
+        if options.noDiarize && (options.minSpeakers != nil || options.maxSpeakers != nil) {
+            throw TranscribeError(message: "--min-speakers and --max-speakers are only valid when diarization is enabled.", exitCode: .invalidUsage)
+        }
+        if let min = options.minSpeakers, min <= 0 {
+            throw TranscribeError(message: "--min-speakers must be greater than 0.", exitCode: .invalidUsage)
+        }
+        if let max = options.maxSpeakers, max <= 0 {
+            throw TranscribeError(message: "--max-speakers must be greater than 0.", exitCode: .invalidUsage)
+        }
+        if let min = options.minSpeakers, let max = options.maxSpeakers, min > max {
+            throw TranscribeError(message: "--min-speakers (\(min)) must be less than or equal to --max-speakers (\(max)).", exitCode: .invalidUsage)
+        }
+
+        if options.markImported && options.redo {
+            throw TranscribeError(message: "--mark-imported cannot be combined with --redo.", exitCode: .invalidUsage)
+        }
+        if options.markImported && options.noProcessingState {
+            throw TranscribeError(message: "--mark-imported cannot be combined with --no-processing-state.", exitCode: .invalidUsage)
+        }
+
+        if case .directory(_, let directoryOptions) = request, directoryOptions.sessionGap < 0 {
+            throw TranscribeError(message: "--session-gap must be >= 0 (use 0 to disable session splitting).", exitCode: .invalidUsage)
+        }
+        if case .voiceMemos(_, let sessionGap) = request, sessionGap < 0 {
+            throw TranscribeError(message: "--session-gap must be >= 0 (use 0 to disable session splitting).", exitCode: .invalidUsage)
+        }
+    }
+
+    private func shouldSkip(
+        plan: PipelineSessionPlan,
+        fingerprint: SourceFingerprint,
+        settings: ProcessingSettingsSignature,
+        outputPaths: [String]
+    ) throws -> Bool {
+        if options.noProcessingState || options.redo {
+            return false
+        }
+        if try ProcessingStore.shouldSkipImportedBaseline(sourceID: plan.sourceID, fingerprint: fingerprint) {
+            return true
+        }
+        return try ProcessingStore.shouldSkipCompleted(
+            sourceKind: plan.sourceKind,
+            sourceID: plan.sourceID,
+            fingerprint: fingerprint,
+            settings: settings,
+            outputPaths: outputPaths
+        )
+    }
+
+    private func resolveModel(explicit: String?) async throws -> String {
+        let chosen = explicit ?? Transcribe.defaultModel
+        let label = (explicit == nil) ? "Auto-selected model" : "Using model"
+        FileHandle.standardError.write("\(label): \(chosen)\n".data(using: .utf8)!)
+        return chosen
+    }
+
+    private func markPlannedInputsImported(workItems: [PipelineWorkItem]) throws {
+        var marked = 0
+        for item in workItems {
+            let plan = item.plan
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                source_kind: .importedBaseline,
+                source_id: plan.sourceID,
+                source_fingerprint: item.fingerprint,
+                settings_signature: nil,
+                output_dir: nil,
+                basename: plan.basename,
+                output_paths: [],
+                audio_duration_s: nil,
+                warning_count: 0,
+                recording_title: plan.sourceMetadata?.recordingTitle,
+                recorded_at: plan.sourceMetadata?.recordedAt,
+                voice_memos_unique_id: plan.sourceMetadata?.voiceMemosUniqueID,
+                voice_memos_path: plan.sourceMetadata?.voiceMemosPath
+            ))
+            marked += 1
+        }
+        FileHandle.standardError.write("Marked \(marked) input session\(marked == 1 ? "" : "s") as imported.\n".data(using: .utf8)!)
+    }
+
+    private func emitDryRunMarkImported(workItems: [PipelineWorkItem], skippedItems: [PipelineWorkItem]) {
+        let total = workItems.count + skippedItems.count
+        var lines: [String] = [
+            "Dry run: \(total) session\(total == 1 ? "" : "s") scanned; \(workItems.count) would be marked imported, \(skippedItems.count) already imported or completed."
+        ]
+        for item in workItems {
+            lines.append(dryRunLine(status: "mark-imported", item: item))
+        }
+        for item in skippedItems {
+            lines.append(dryRunLine(status: "skip", item: item))
+        }
+        FileHandle.standardOutput.write((lines.joined(separator: "\n") + "\n").data(using: .utf8)!)
+    }
+
+    private func emitDryRun(workItems: [PipelineWorkItem], skippedItems: [PipelineWorkItem]) {
+        let total = workItems.count + skippedItems.count
+        var lines: [String] = [
+            "Dry run: \(total) session\(total == 1 ? "" : "s") scanned; \(workItems.count) would process, \(skippedItems.count) would skip."
+        ]
+        for item in workItems {
+            lines.append(dryRunLine(status: "process", item: item))
+        }
+        for item in skippedItems {
+            lines.append(dryRunLine(status: "skip", item: item))
+        }
+        FileHandle.standardOutput.write((lines.joined(separator: "\n") + "\n").data(using: .utf8)!)
+    }
+
+    private func dryRunLine(status: String, item: PipelineWorkItem) -> String {
+        let source = item.plan.sourceMetadata?.source ?? item.plan.sourceKind.rawValue
+        let files = item.plan.session.files.map { ($0 as NSString).lastPathComponent }.joined(separator: ",")
+        let outputs = item.outputPaths.map { ($0 as NSString).lastPathComponent }.joined(separator: ",")
+        return "\(status)\t\(source)\t\(item.plan.basename)\tfiles=\(files)\toutputs=\(outputs)"
+    }
+}
+
+func runAndExitOnError(_ body: () async throws -> Void) async {
+    do {
+        try await body()
+    } catch let e as TranscribeError {
+        FileHandle.standardError.write((e.message + "\n").data(using: .utf8)!)
+        Darwin.exit(e.exitCode.rawValue)
+    } catch let e as WhisperError {
+        FileHandle.standardError.write((e.localizedDescription + "\n").data(using: .utf8)!)
+        Darwin.exit(ExitCode.modelFailure.rawValue)
+    } catch {
+        FileHandle.standardError.write((error.localizedDescription + "\n").data(using: .utf8)!)
+        Darwin.exit(ExitCode.runtimeFailure.rawValue)
+    }
+}

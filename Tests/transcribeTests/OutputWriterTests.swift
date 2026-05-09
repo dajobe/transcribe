@@ -266,6 +266,35 @@ final class OutputWriterTests: XCTestCase {
         XCTAssertNil(metadata["audio_files"])
     }
 
+    func testRenderJSONIncludesVoiceMemosMetadata() throws {
+        let output = TranscriptionOutput(
+            segments: [],
+            language: "en",
+            durationSeconds: 0,
+            diarizationEnabled: false
+        )
+        let data = try renderJSON(
+            output: output,
+            audioFile: "/tmp/memo.m4a",
+            sourceMetadata: OutputSourceMetadata(
+                source: "voice_memos",
+                recordedAt: "2026-05-08T10:00:00Z",
+                recordingTitle: "Meeting",
+                voiceMemosUniqueID: "abc",
+                voiceMemosPath: "/Recordings/memo.m4a"
+            ),
+            model: "large-v3",
+            version: "1.2.3"
+        )
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let metadata = try XCTUnwrap(json["metadata"] as? [String: Any])
+        XCTAssertEqual(metadata["source"] as? String, "voice_memos")
+        XCTAssertEqual(metadata["recorded_at"] as? String, "2026-05-08T10:00:00Z")
+        XCTAssertEqual(metadata["recording_title"] as? String, "Meeting")
+        XCTAssertEqual(metadata["voice_memos_unique_id"] as? String, "abc")
+        XCTAssertEqual(metadata["voice_memos_path"] as? String, "/Recordings/memo.m4a")
+    }
+
     func testRenderMarkdownIncludesSourcesBlockForDirectory() {
         let output = TranscriptionOutput(
             segments: [
@@ -303,6 +332,34 @@ final class OutputWriterTests: XCTestCase {
             version: "1.2.3"
         )
         XCTAssertFalse(md.contains("- **Sources:**"))
+    }
+
+    func testRenderMarkdownIncludesVoiceMemosMetadata() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: nil, start: 0, end: 1, text: "Hello.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 1,
+            diarizationEnabled: false
+        )
+        let md = renderMarkdown(
+            output: output,
+            audioFile: "/tmp/memo.m4a",
+            sourceMetadata: OutputSourceMetadata(
+                source: "voice_memos",
+                recordedAt: "2026-05-08T10:00:00Z",
+                recordingTitle: "Meeting",
+                voiceMemosUniqueID: "abc",
+                voiceMemosPath: "/Recordings/memo.m4a"
+            ),
+            model: "large-v3",
+            version: "1.2.3"
+        )
+        XCTAssertTrue(md.contains("- **Input source:** `voice_memos`"))
+        XCTAssertTrue(md.contains("- **Recorded:** 2026-05-08T10:00:00Z"))
+        XCTAssertTrue(md.contains("- **Recording title:** `Meeting`"))
+        XCTAssertTrue(md.contains("- **Voice Memos ID:** `abc`"))
     }
 
     private func makeTemporaryDirectory() throws -> URL {

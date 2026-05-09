@@ -334,7 +334,7 @@ enum InputResolver {
                 + "but the longest clip is \(formatDuration(maxDuration)). The "
                 + "container creation_time was likely reset during export and "
                 + "does not reflect the original recording time. Falling back to "
-                + "filename sort and disabling session splitting. Pass --input-sort "
+                + "filename sort and disabling session splitting. Pass --sort "
                 + "name explicitly to silence this warning."
             emitWarning(warning)
             logger?.log("Recorded-date trust check: failed; using sort=name fallback.")

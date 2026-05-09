@@ -68,8 +68,8 @@ services.
 
 ## User Stories
 
-- As a user, I can run `transcribe meeting.m4a` and receive a transcript plus
-  machine-readable JSON.
+- As a user, I can run `transcribe file meeting.m4a` or the root alias
+  `transcribe meeting.m4a` and receive a transcript plus machine-readable JSON.
 - As a user, I can force the language or let it auto-detect.
 - As a user, I can disable diarization when I only want transcription.
 - As a user, I can constrain diarization with minimum and maximum speaker
@@ -82,13 +82,18 @@ services.
 ## CLI Contract
 
 ```text
-USAGE: transcribe <audio-file> [options]
+USAGE: transcribe [global-options] file <audio-file>
+       transcribe [global-options] dir [dir-options] <directory>
+       transcribe [global-options] voice-memos [voice-memos-options]
+       transcribe [global-options] <audio-file-or-directory>
 
 ARGUMENTS:
   <audio-file>              Path to the input audio file
+  <directory>               Path to a directory of audio files
+  <audio-file-or-directory> Root alias for simple file or directory runs
 
-OPTIONS:
-  -m, --model <name>        Whisper model to use (default: large-v3)
+GLOBAL OPTIONS:
+  -m, --model <name>        Whisper model to use (default: Transcribe.defaultModel)
   -l, --language <code>     Language code such as "en"; default is auto-detect
   -o, --output-dir <path>   Directory for output files (default: current directory)
   -f, --format <fmt>        Output formats, comma-separated (default: txt,json)
@@ -102,9 +107,20 @@ OPTIONS:
   --model-dir <path>        Directory used for downloaded model caches
                             Default: ~/.cache/transcribe
   --overwrite               Replace existing output files
+  --mark-imported           Mark planned inputs as imported without transcribing
   --verbose                 Print progress, timing, and cache details to stderr
   --version                 Print version and exit
   -h, --help                Show help
+
+DIR OPTIONS:
+  --sort <mode>             Directory input order: recorded, name, mtime
+  --input-sort <mode>       Alias for --sort
+
+VOICE MEMOS OPTIONS:
+  --recordings-dir <path>   Voice Memos recordings directory
+
+BATCH OPTIONS:
+  --session-gap <minutes>   Split dir or Voice Memos input into sessions
 ```
 
 ### Supported Input Formats
@@ -158,13 +174,13 @@ The tool should use stable process exit codes:
 transcribe meeting.mp3
 
 # Constrain diarization to two speakers and write all output formats
-transcribe meeting.mp3 --language en --min-speakers 2 --max-speakers 2 --format all
+transcribe --language en --min-speakers 2 --max-speakers 2 --format all file meeting.mp3
 
 # Transcript only, smaller model
-transcribe lecture.m4a --no-diarize --model medium
+transcribe --no-diarize --model medium file lecture.m4a
 
 # Emit human-readable transcript to stdout and JSON to disk
-transcribe interview.wav --stdout --format txt,json -o ./transcripts
+transcribe --stdout --format txt,json -o ./transcripts file interview.wav
 ```
 
 ## Output Contract
@@ -231,7 +247,7 @@ Example:
   "metadata": {
     "audio_file": "meeting.mp3",
     "duration_seconds": 1847.3,
-    "model": "large-v3",
+    "model": "openai_whisper-large-v3_turbo",
     "language": "en",
     "diarization_enabled": true,
     "speaker_strategy": "subsegment",
@@ -291,7 +307,7 @@ by talking about the infrastructure migration timeline.
 - The tool attempts diarization unless `--no-diarize` is set.
 - The default output formats are `txt,json`.
 - The default speaker merge strategy is `subsegment`.
-- The default model is `large-v3`.
+- The default model is `Transcribe.defaultModel`.
 
 ### Degraded Behavior
 
@@ -434,7 +450,7 @@ struct Transcribe: AsyncParsableCommand {
     var audioFile: String
 
     @Option(name: .shortAndLong)
-    var model: String = "large-v3"
+    var model: String = Transcribe.defaultModel
 
     @Option(name: .shortAndLong)
     var language: String?
@@ -547,8 +563,8 @@ into the repository and larger manual benchmark files kept out of git.
 
 - Should `--stdout` emit text only, or should a future version support `json` to
   stdout as well?
-- Should the default model remain `large-v3`, or should a smaller default be
-  used for startup latency and disk footprint?
+- Should `Transcribe.defaultModel` remain the long-term default, or should a
+  smaller model be used for startup latency and disk footprint?
 - Does WhisperKit expose enough control over model cache location for both
   transcription and diarization assets, or is extra cache management needed?
 - Are word timestamps always available for the selected model family, or only

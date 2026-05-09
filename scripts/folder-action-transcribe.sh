@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run transcribe when a file is added to a Folder Action folder (macOS Automator).
-# See specs/folder-action-markdown.md for environment variables and behavior.
+# See specs/voice-memos-cli-cleanup.md for environment variables and behavior.
 set -euo pipefail
 
 # ISO 8601 UTC (second precision), e.g. 2026-04-12T19:35:55Z
@@ -146,11 +146,12 @@ main() {
   local fmt="${TRANSCRIBE_FORMAT:-md}"
 
   local -a cmd
-  cmd=("$bin" "$f" -o "$outdir" --format "$fmt")
+  cmd=("$bin" -o "$outdir" --format "$fmt")
   if [[ -n "${TRANSCRIBE_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
     cmd+=(${TRANSCRIBE_EXTRA_ARGS})
   fi
+  cmd+=(file "$f")
 
   local flock_warned=0
   local err_tmp
