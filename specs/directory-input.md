@@ -102,7 +102,7 @@ identifying the mismatch:
 
 ```text
 Warning: Recorded timestamps span only 4s across 8 clips
-(shortest clip is 1m 27s). The container creation_time was likely
+(longest clip is 1m 27s). The container creation_time was likely
 reset during export and does not reflect the original recording time.
 Falling back to filename sort. Pass --input-sort name explicitly to
 silence this warning.

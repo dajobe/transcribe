@@ -92,6 +92,7 @@ enum InputResolver {
         // recovering recording times from filename prefixes.
         var clipsForOrdering = probed
         var effectiveSort = initialSort
+        var recoveredFilenameTimes = false
         let trustDowngraded = (sort == .recorded && initialSort != .recorded)
         let allRecordedAtMissing = (sort == .recorded && probed.allSatisfy { $0.recordedAt == nil })
         let shouldTryRecovery = trustDowngraded || allRecordedAtMissing
@@ -103,6 +104,7 @@ enum InputResolver {
                 if recoveredSort == .recorded {
                     clipsForOrdering = recovered
                     effectiveSort = .recorded
+                    recoveredFilenameTimes = true
                     logger?.log(
                         "filename time recovery: applied; using sort=recorded with filename-derived dates"
                     )
@@ -128,7 +130,12 @@ enum InputResolver {
         if effectiveGap == 0 && sessionGapSeconds > 0 && sort == .recorded && effectiveSort != .recorded {
             logger?.log("Session splitting disabled: same untrusted recorded-date metadata.")
         }
-        let sortedClips = sortClips(clipsForOrdering, by: effectiveSort, logger: logger)
+        let sortedClips = sortClips(
+            clipsForOrdering,
+            by: effectiveSort,
+            preferFilenameTiebreakForRecorded: recoveredFilenameTimes,
+            logger: logger
+        )
         let sessions = SessionGrouper.groupIntoSessions(
             sortedClips,
             maxGapSeconds: effectiveGap,
@@ -525,6 +532,7 @@ enum InputResolver {
     private static func sortClips(
         _ clips: [AudioClip],
         by mode: InputSortOrder,
+        preferFilenameTiebreakForRecorded: Bool = false,
         logger: VerboseLogger? = nil
     ) -> [AudioClip] {
         var keys: [SortKey] = clips.map { clip in
@@ -551,6 +559,12 @@ enum InputResolver {
                 }
                 if (lhs.clip.recordedAt == nil) != (rhs.clip.recordedAt == nil) {
                     return lhs.clip.recordedAt != nil
+                }
+                if preferFilenameTiebreakForRecorded {
+                    let byName = lhs.name.compare(rhs.name, options: .numeric)
+                    if byName != .orderedSame {
+                        return byName == .orderedAscending
+                    }
                 }
                 if let l = lhs.mtime, let r = rhs.mtime, l != r {
                     return l < r

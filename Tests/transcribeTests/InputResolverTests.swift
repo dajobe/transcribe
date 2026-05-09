@@ -642,6 +642,37 @@ final class InputResolverTests: XCTestCase {
         ])
     }
 
+    func testFilenameRecoveryUsesFilenameOrderForEqualRecoveredTimes() async throws {
+        let dir = try makeTempDir()
+        let part1 = dir.appendingPathComponent("09:30 design review part 1.m4a")
+        let part2 = dir.appendingPathComponent("09:30 design review part 2.m4a")
+        try Data().write(to: part1)
+        try Data().write(to: part2)
+
+        let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes(
+            [.modificationDate: baseDate.addingTimeInterval(60)],
+            ofItemAtPath: part1.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: baseDate],
+            ofItemAtPath: part2.path
+        )
+
+        let resolved = try await InputResolver.resolve(dir.path, sort: .recorded)
+        guard case .directory(_, let sessions) = resolved else {
+            return XCTFail("Expected .directory")
+        }
+
+        XCTAssertEqual(
+            sessions.flatMap(\.files).map { ($0 as NSString).lastPathComponent },
+            [
+                "09:30 design review part 1.m4a",
+                "09:30 design review part 2.m4a",
+            ]
+        )
+    }
+
     func testFilenameRecoveryDeclinesOnMixedInput() async throws {
         let dir = try makeTempDir()
         // Half the files have prefixes, half don't.

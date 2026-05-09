@@ -141,7 +141,7 @@ and runs the pipeline once per session.
 atom to "now" when files are exported via Files / iCloud Drive, so the embedded
 date no longer reflects when you actually recorded. `transcribe` detects this
 automatically: when the spread of recorded timestamps across clips is smaller
-than the shortest clip's duration, the timestamps cannot represent real
+than the longest clip's duration, the timestamps cannot represent real
 sequential recording starts, and the run falls back to filename ordering with a
 warning on stderr. Pass `--input-sort name` to silence the warning.
 

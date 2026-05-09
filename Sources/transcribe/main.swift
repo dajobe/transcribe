@@ -303,6 +303,7 @@ struct Transcribe: AsyncParsableCommand {
                 overwrite: overwrite
             )
         }
+        try preflightAudioDecoding(for: sessions, logger: logger)
 
         let liveProgressMode: LiveProgressRenderMode? = {
             if debugProgressLog { return .lineLog(minInterval: 1.0) }

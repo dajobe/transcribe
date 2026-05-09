@@ -79,6 +79,32 @@ func loadPreparedAudio(fromFiles paths: [String], logger: VerboseLogger? = nil) 
     return PreparedAudio(samples: combined, durationSeconds: durationSeconds)
 }
 
+/// Decodes every input audio file once before model initialization. This keeps
+/// bad or corrupt inputs on the cheap input-error path instead of discovering
+/// them only after Whisper/SpeakerKit models have been downloaded or loaded.
+func preflightAudioDecoding(for sessions: [AudioSession], logger: VerboseLogger? = nil) throws {
+    var seen: Set<String> = []
+    var paths: [String] = []
+    for session in sessions {
+        for path in session.files where !seen.contains(path) {
+            seen.insert(path)
+            paths.append(path)
+        }
+    }
+
+    guard !paths.isEmpty else { return }
+    if paths.count == 1 {
+        logger?.log("Validating audio before model init: \((paths[0] as NSString).lastPathComponent)")
+    } else {
+        logger?.log("Validating \(paths.count) audio files before model init...")
+    }
+
+    for path in paths {
+        let samples = try AudioLoader.loadAudio(fromPath: path)
+        _ = samples.count
+    }
+}
+
 func initializeWhisperKit(
     model: String,
     modelDir: String,
