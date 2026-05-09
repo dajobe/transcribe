@@ -499,9 +499,15 @@ struct PipelineRunner {
         var marked = 0
         for item in workItems {
             let plan = item.plan
+            // Tag Voice Memos imports with their own baseline kind so the
+            // history command (and any future tooling) can tell them apart
+            // from generic file/dir imports without inspecting metadata.
+            let baselineKind: ProcessingSourceKind = plan.sourceKind == .voiceMemos
+                ? .voiceMemosBaseline
+                : .importedBaseline
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
-                source_kind: .importedBaseline,
+                source_kind: baselineKind,
                 source_id: plan.sourceID,
                 source_fingerprint: item.fingerprint,
                 settings_signature: nil,

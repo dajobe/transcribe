@@ -181,14 +181,22 @@ Default skip behavior (in `PipelineRunner` via `ProcessingStore`):
 - `--no-processing-state` bypasses both reads and writes
 
 `--mark-imported` is global. It builds the normal source plan for `file`, `dir`,
-or `voice-memos`, fingerprints each planned session, and appends
-`imported_baseline` (or `voice_memos_baseline`) records without transcribing or
-writing transcript outputs.
+or `voice-memos`, fingerprints each planned session, and appends a baseline
+record without transcribing or writing transcript outputs. The ledger
+`source_kind` for the baseline depends on the original source:
+
+- `voice-memos --mark-imported` writes `voice_memos_baseline`
+- `file` and `dir` (and root path aliases) write `imported_baseline`
+
+Pre-2.1.2 builds tagged every baseline as `imported_baseline` regardless of
+source. `HistoryFormatter.displayKind` recovers the distinction for those old
+records by matching the `voice_memos:` prefix on `source_id`, so old and new
+ledgers render consistently in `transcribe history`.
 
 Use `transcribe history` to inspect the most recent records (newest first,
-relative timestamps within seven days, ISO 8601 beyond). The command does not
-mutate the ledger; treat it as a read-only viewer over
-`processing_history.jsonl`.
+relative timestamps within seven days, ISO 8601 beyond, original recording date
+in its own column). The command does not mutate the ledger; treat it as a
+read-only viewer over `processing_history.jsonl`.
 
 ## Outputs
 

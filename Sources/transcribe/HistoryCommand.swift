@@ -41,7 +41,7 @@ enum HistoryFormatter {
 
     static func line(for record: ProcessingRecord, now: Date) -> String {
         let time = formatTimestamp(record.completed_at, now: now)
-        let kind = displayKind(record.source_kind)
+        let kind = displayKind(record)
         let recorded = displayRecordedAt(record)
         let label = displayLabel(record)
         return pad(time, timeColumnWidth) + "  "
@@ -79,13 +79,21 @@ enum HistoryFormatter {
         return stored
     }
 
-    static func displayKind(_ kind: ProcessingSourceKind) -> String {
-        switch kind {
+    static func displayKind(_ record: ProcessingRecord) -> String {
+        switch record.source_kind {
         case .file: return "transcribed file"
         case .directorySession: return "transcribed dir"
         case .voiceMemos: return "transcribed voice"
-        case .importedBaseline: return "imported"
         case .voiceMemosBaseline: return "imported voice"
+        case .importedBaseline:
+            // Pre-2.1.2 always wrote `imported_baseline` regardless of source.
+            // Voice Memos source ids always start with `voice_memos:`, so we
+            // can recover the distinction for old records without rewriting
+            // the ledger.
+            if record.source_id.hasPrefix("voice_memos:") || record.voice_memos_unique_id != nil {
+                return "imported voice"
+            }
+            return "imported"
         }
     }
 

@@ -38,11 +38,23 @@ final class HistoryFormatterTests: XCTestCase {
     }
 
     func testKindDisplayCoversEveryCase() {
-        XCTAssertEqual(HistoryFormatter.displayKind(.file), "transcribed file")
-        XCTAssertEqual(HistoryFormatter.displayKind(.directorySession), "transcribed dir")
-        XCTAssertEqual(HistoryFormatter.displayKind(.voiceMemos), "transcribed voice")
-        XCTAssertEqual(HistoryFormatter.displayKind(.importedBaseline), "imported")
-        XCTAssertEqual(HistoryFormatter.displayKind(.voiceMemosBaseline), "imported voice")
+        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .file, sourceID: "file:/tmp/x.m4a")), "transcribed file")
+        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .directorySession, sourceID: "directory_session:/tmp/dir")), "transcribed dir")
+        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .voiceMemos, sourceID: "voice_memos:UUID")), "transcribed voice")
+        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .voiceMemosBaseline, sourceID: "voice_memos:UUID")), "imported voice")
+    }
+
+    func testImportedBaselineRetroactivelyClassifiesVoiceMemos() {
+        // Pre-2.1.2 ledger: source_kind=imported_baseline but source_id prefix
+        // identifies a Voice Memos import. Should still render as "imported voice".
+        let oldVoice = makeRecord(kind: .importedBaseline, sourceID: "voice_memos:ABC-123")
+        XCTAssertEqual(HistoryFormatter.displayKind(oldVoice), "imported voice")
+
+        let oldFile = makeRecord(kind: .importedBaseline, sourceID: "file:/tmp/x.m4a")
+        XCTAssertEqual(HistoryFormatter.displayKind(oldFile), "imported")
+
+        let oldDir = makeRecord(kind: .importedBaseline, sourceID: "directory_session:/tmp/dir")
+        XCTAssertEqual(HistoryFormatter.displayKind(oldDir), "imported")
     }
 
     func testLabelPrefersFilenameFromFingerprint() {
@@ -127,6 +139,7 @@ final class HistoryFormatterTests: XCTestCase {
     private func makeRecord(
         completed_at: String = "2026-05-09T18:00:00Z",
         kind: ProcessingSourceKind = .voiceMemos,
+        sourceID: String = "file:/tmp/x.m4a",
         recording_title: String? = nil,
         basename: String? = nil,
         recorded_at: String? = nil,
@@ -135,7 +148,7 @@ final class HistoryFormatterTests: XCTestCase {
         ProcessingRecord(
             completed_at: completed_at,
             source_kind: kind,
-            source_id: "file:/tmp/x.m4a",
+            source_id: sourceID,
             source_fingerprint: SourceFingerprint(files: files),
             settings_signature: nil,
             output_dir: nil,

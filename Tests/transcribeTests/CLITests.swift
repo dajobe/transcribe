@@ -538,6 +538,45 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: ledger.path))
     }
 
+    func testVoiceMemosMarkImportedWritesVoiceMemosBaseline() throws {
+        let dir = try makeTempDir()
+        let state = try makeTempDir()
+        try createVoiceMemosDB(in: dir, uniqueID: "real-import-a", path: "A.m4a", title: "Field Recording")
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("A.m4a"))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = [
+            "--mark-imported",
+            "voice-memos",
+            "--recordings-dir", dir.path,
+        ]
+        process.environment = ProcessInfo.processInfo.environment.merging(["XDG_STATE_HOME": state.path]) { _, new in new }
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let ledger = state.appendingPathComponent("transcribe").appendingPathComponent("processing_history.jsonl")
+        let raw = try String(contentsOf: ledger, encoding: .utf8)
+        XCTAssertTrue(raw.contains("\"source_kind\":\"voice_memos_baseline\""), "ledger: \(raw)")
+        XCTAssertFalse(raw.contains("\"source_kind\":\"imported_baseline\""), "should not write generic baseline kind for Voice Memos: \(raw)")
+
+        // history should render the new kind as "imported voice".
+        let history = Process()
+        history.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        history.arguments = ["history"]
+        history.environment = ProcessInfo.processInfo.environment.merging(["XDG_STATE_HOME": state.path]) { _, new in new }
+        let stdoutPipe = Pipe()
+        history.standardOutput = stdoutPipe
+        try history.run()
+        history.waitUntilExit()
+        let out = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(history.terminationStatus, 0)
+        XCTAssertTrue(out.contains("imported voice"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("A.m4a"), "stdout: \(out)")
+    }
+
     func testNegativeSessionGapExitTwo() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
