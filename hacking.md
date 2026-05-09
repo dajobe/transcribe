@@ -18,6 +18,9 @@ The Swift package currently has one executable target:
   probing, sort order, filename time recovery, and directory session basenames.
 - `Sources/transcribe/VoiceMemosImport.swift`: Voice Memos SQLite import,
   metadata extraction, path resolution, and Voice Memos basenames.
+- `Sources/transcribe/SQLiteReader.swift`: small read-only SQLite wrapper
+  (`ReadOnlyDatabase`, `Statement`) used by `VoiceMemosImport`. Built on
+  `import SQLite3` from the macOS SDK; opens with `SQLITE_OPEN_READONLY`.
 - `Sources/transcribe/SessionGrouper.swift`: pure gap-based grouping of ordered
   clips into sessions.
 - `Sources/transcribe/TranscriptionPipeline.swift`: audio loading/preflight,
@@ -261,6 +264,8 @@ Specs are still useful as design records:
 - `specs/folder-action-markdown.md`: Markdown output and Automator helper
 - `specs/timing-history.md`: timing history schema and ETA behavior
 - `specs/library-embedding.md`: future library split
+- `specs/voice-memos-direct-sqlite.md`: in-process read-only SQLite for Voice
+  Memos import (replaces the `/usr/bin/sqlite3` subprocess)
 
 Update the relevant spec and README when behavior visible to users changes.
 

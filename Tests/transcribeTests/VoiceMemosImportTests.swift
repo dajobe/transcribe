@@ -4,7 +4,6 @@ import XCTest
 
 final class VoiceMemosImportTests: XCTestCase {
     func testLoadsConfirmedCloudRecordingSchema() throws {
-        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/sqlite3"))
         let dir = try makeTempDir()
         try createVoiceMemosDB(in: dir)
         let audio = dir.appendingPathComponent("A.m4a")
@@ -31,7 +30,6 @@ final class VoiceMemosImportTests: XCTestCase {
     }
 
     func testTitleFallbackAndUniqueIDFallback() throws {
-        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/sqlite3"))
         let dir = try makeTempDir()
         try createVoiceMemosDB(in: dir)
         let audio = dir.appendingPathComponent("B.m4a")
@@ -53,7 +51,6 @@ final class VoiceMemosImportTests: XCTestCase {
     }
 
     func testMissingOptionalColumnsStillLoadsRecording() throws {
-        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/sqlite3"))
         let dir = try makeTempDir()
         try sqlite(dir, """
             CREATE TABLE ZCLOUDRECORDING (
@@ -76,7 +73,6 @@ final class VoiceMemosImportTests: XCTestCase {
     }
 
     func testMissingRequiredColumnThrowsInputError() throws {
-        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/sqlite3"))
         let dir = try makeTempDir()
         try sqlite(dir, """
             CREATE TABLE ZCLOUDRECORDING (
@@ -95,7 +91,6 @@ final class VoiceMemosImportTests: XCTestCase {
     }
 
     func testMissingAudioFileIsSkipped() throws {
-        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/sqlite3"))
         let dir = try makeTempDir()
         try createVoiceMemosDB(in: dir)
         try sqlite(dir, """
@@ -153,6 +148,44 @@ final class VoiceMemosImportTests: XCTestCase {
         XCTAssertFalse((VoiceMemosImport.defaultRecordingsDirectory as NSString).expandingTildeInPath.hasPrefix("~"))
     }
 
+    func testAudioDigestBlobIsHexEncodedInSwift() throws {
+        let dir = try makeTempDir()
+        try createVoiceMemosDB(in: dir)
+        let audio = dir.appendingPathComponent("D.m4a")
+        try Data("audio".utf8).write(to: audio)
+
+        // Insert the blob via sqlite hex literal so the byte content is exact
+        // (0xDE 0xAD 0xBE 0xEF). The reader must decode this from the BLOB
+        // column directly via sqlite3_column_blob/bytes (no SQL hex() wrapper).
+        try sqlite(dir, """
+            INSERT INTO ZCLOUDRECORDING
+              (Z_PK, ZDATE, ZPATH, ZUNIQUEID, ZAUDIODIGEST)
+            VALUES
+              (10, 789000010, 'D.m4a', 'unique-d', x'DEADBEEF');
+            """)
+
+        let recording = try XCTUnwrap(VoiceMemosImport.loadRecordings(recordingsDirectory: dir.path).first)
+
+        XCTAssertEqual(recording.audioDigestHex, "DEADBEEF")
+    }
+
+    func testAudioDigestNullBlobYieldsNil() throws {
+        let dir = try makeTempDir()
+        try createVoiceMemosDB(in: dir)
+        let audio = dir.appendingPathComponent("E.m4a")
+        try Data("audio".utf8).write(to: audio)
+        try sqlite(dir, """
+            INSERT INTO ZCLOUDRECORDING
+              (Z_PK, ZDATE, ZPATH, ZUNIQUEID)
+            VALUES
+              (11, 789000011, 'E.m4a', 'unique-e');
+            """)
+
+        let recording = try XCTUnwrap(VoiceMemosImport.loadRecordings(recordingsDirectory: dir.path).first)
+
+        XCTAssertNil(recording.audioDigestHex)
+    }
+
     private func createVoiceMemosDB(in dir: URL) throws {
         try sqlite(dir, """
             CREATE TABLE ZCLOUDRECORDING (
@@ -189,18 +222,13 @@ final class VoiceMemosImportTests: XCTestCase {
             """)
     }
 
-    private func sqlite(_ dir: URL, _ sql: String) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = ["-init", "/dev/null", dir.appendingPathComponent("CloudRecordings.db").path, sql]
-        let stderr = Pipe()
-        process.standardError = stderr
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            let text = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            XCTFail("sqlite failed: \(text)")
-        }
+    private func sqlite(_ dir: URL, _ sql: String, file: StaticString = #file, line: UInt = #line) throws {
+        SQLiteTestHelpers.executeScript(
+            at: dir.appendingPathComponent("CloudRecordings.db"),
+            sql,
+            file: file,
+            line: line
+        )
     }
 
     private func makeTempDir() throws -> URL {

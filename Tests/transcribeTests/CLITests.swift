@@ -351,7 +351,6 @@ final class CLITests: XCTestCase {
     }
 
     func testVoiceMemosDryRunListsProcessWithoutModelLoad() throws {
-        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/sqlite3"))
         let dir = try makeTempDir()
         try createVoiceMemosDB(in: dir, uniqueID: "dry-run-a", path: "A.m4a", title: "Dry Run")
         try Data("audio".utf8).write(to: dir.appendingPathComponent("A.m4a"))
@@ -380,7 +379,6 @@ final class CLITests: XCTestCase {
     }
 
     func testVoiceMemosMarkImportedDryRunDoesNotWriteLedger() throws {
-        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/sqlite3"))
         let dir = try makeTempDir()
         let state = try makeTempDir()
         try createVoiceMemosDB(in: dir, uniqueID: "dry-run-b", path: "B.m4a", title: "Baseline")
@@ -504,12 +502,8 @@ final class CLITests: XCTestCase {
     }
 
     private func createVoiceMemosDB(in dir: URL, uniqueID: String, path: String, title: String) throws {
-        let db = dir.appendingPathComponent("CloudRecordings.db")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = [
-            "-init", "/dev/null",
-            db.path,
+        SQLiteTestHelpers.executeScript(
+            at: dir.appendingPathComponent("CloudRecordings.db"),
             """
             CREATE TABLE ZCLOUDRECORDING (
                 Z_PK INTEGER PRIMARY KEY,
@@ -521,16 +515,8 @@ final class CLITests: XCTestCase {
             );
             INSERT INTO ZCLOUDRECORDING (Z_PK, ZDATE, ZDURATION, ZCUSTOMLABEL, ZPATH, ZUNIQUEID)
             VALUES (1, 789000000, 12.5, '\(title)', '\(path)', '\(uniqueID)');
-            """,
-        ]
-        let stderr = Pipe()
-        process.standardError = stderr
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            let text = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            XCTFail("sqlite failed: \(text)")
-        }
+            """
+        )
     }
 
     func testNegativeMaxSpeakersExitTwo() throws {

@@ -32,7 +32,8 @@ enum VoiceMemosImport {
             )
         }
 
-        let columns = try loadColumnNames(dbPath: dbPath)
+        let database = try ReadOnlyDatabase(path: dbPath)
+        let columns = try loadColumnNames(database: database)
         for required in ["Z_PK", "ZPATH", "ZDATE"] where !columns.contains(required) {
             throw TranscribeError(
                 message: "Voice Memos database is missing required column \(required) in ZCLOUDRECORDING.",
@@ -40,60 +41,58 @@ enum VoiceMemosImport {
             )
         }
 
-        func columnOrEmpty(_ name: String) -> String {
-            columns.contains(name) ? "IFNULL(\(name), '')" : "''"
+        func columnOrNull(_ name: String) -> String {
+            columns.contains(name) ? name : "NULL"
         }
 
         let sql = """
             SELECT
               Z_PK,
-              \(columnOrEmpty("ZUNIQUEID")),
-              IFNULL(ZPATH, ''),
-              IFNULL(ZDATE, ''),
-              \(columnOrEmpty("ZDURATION")),
-              \(columnOrEmpty("ZLOCALDURATION")),
-              \(columnOrEmpty("ZCUSTOMLABEL")),
-              \(columnOrEmpty("ZENCRYPTEDTITLE")),
-              \(columns.contains("ZAUDIODIGEST") ? "IFNULL(hex(ZAUDIODIGEST), '')" : "''"),
-              \(columnOrEmpty("ZFLAGS")),
-              \(columnOrEmpty("ZFOLDER"))
+              \(columnOrNull("ZUNIQUEID")),
+              ZPATH,
+              ZDATE,
+              \(columnOrNull("ZDURATION")),
+              \(columnOrNull("ZLOCALDURATION")),
+              \(columnOrNull("ZCUSTOMLABEL")),
+              \(columnOrNull("ZENCRYPTEDTITLE")),
+              \(columnOrNull("ZAUDIODIGEST")),
+              \(columnOrNull("ZFLAGS")),
+              \(columnOrNull("ZFOLDER"))
             FROM ZCLOUDRECORDING
             WHERE ZPATH IS NOT NULL AND ZPATH != '' AND ZDATE IS NOT NULL
             ORDER BY ZDATE ASC, Z_PK ASC;
             """
-        let rows = try runSQLiteQuery(dbPath: dbPath, sql: sql)
-        var recordings: [VoiceMemoRecording] = []
-        var skipped = 0
-        for row in rows {
-            guard row.count == 11,
-                  let primaryKey = Int(row[0]),
-                  let dateSeconds = Double(row[3]) else {
-                skipped += 1
-                continue
+        let rawRecordings: [VoiceMemoRecording?] = try database.query(sql) { row in
+            guard let primaryKey = row.int(0).map(Int.init),
+                  let rawPath = nilIfEmpty(row.text(2)),
+                  let dateSeconds = row.double(3) else {
+                return nil
             }
-            let resolvedPath = resolveRecordingPath(row[2], recordingsDirectory: directory)
+            let resolvedPath = resolveRecordingPath(rawPath, recordingsDirectory: directory)
             guard FileManager.default.fileExists(atPath: resolvedPath) else {
-                skipped += 1
-                emitWarning("Skipping Voice Memo row \(row[0]); audio file is missing: \(resolvedPath)")
-                continue
+                emitWarning("Skipping Voice Memo row \(primaryKey); audio file is missing: \(resolvedPath)")
+                return nil
             }
 
-            let customTitle = nilIfEmpty(row[6])
-            let encryptedTitle = nilIfEmpty(row[7])
+            let customTitle = nilIfEmpty(row.text(6))
+            let encryptedTitle = nilIfEmpty(row.text(7))
             let title = customTitle ?? encryptedTitle ?? "New Recording"
-            let duration = Double(row[4]) ?? Double(row[5])
-            recordings.append(VoiceMemoRecording(
+            let duration = row.double(4) ?? row.double(5)
+            let digestHex = nilIfEmpty(row.blob(8).map { $0.hexEncodedString })
+            return VoiceMemoRecording(
                 primaryKey: primaryKey,
-                uniqueID: nilIfEmpty(row[1]),
+                uniqueID: nilIfEmpty(row.text(1)),
                 path: resolvedPath,
                 recordedAt: Date(timeIntervalSinceReferenceDate: dateSeconds),
                 durationSeconds: duration,
                 title: title,
-                audioDigestHex: nilIfEmpty(row[8]),
-                flags: Int(row[9]),
-                folderID: Int(row[10])
-            ))
+                audioDigestHex: digestHex,
+                flags: row.int(9).map(Int.init),
+                folderID: row.int(10).map(Int.init)
+            )
         }
+        let recordings = rawRecordings.compactMap { $0 }
+        let skipped = rawRecordings.count - recordings.count
 
         if let logger {
             logger.log("Voice Memos: loaded \(recordings.count) recording\(recordings.count == 1 ? "" : "s") from CloudRecordings.db")
@@ -167,46 +166,11 @@ enum VoiceMemosImport {
         )
     }
 
-    private static func runSQLiteQuery(dbPath: String, sql: String) throws -> [[String]] {
-        let separator = "\u{1f}"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = ["-init", "/dev/null", "-readonly", "-batch", "-list", "-separator", separator, dbPath, sql]
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            throw TranscribeError(
-                message: "Failed to run sqlite3 for Voice Memos import: \(error.localizedDescription)",
-                exitCode: .runtimeFailure
-            )
+    private static func loadColumnNames(database: ReadOnlyDatabase) throws -> Set<String> {
+        let names = try database.query("PRAGMA table_info(ZCLOUDRECORDING);") { row in
+            row.text(1) ?? ""
         }
-
-        let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
-            let detail = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let suffix = detail.isEmpty ? "" : ": \(detail)"
-            throw TranscribeError(
-                message: "Failed to read Voice Memos database\(suffix). Grant Full Disk Access if macOS denies the recordings directory.",
-                exitCode: .inputFile
-            )
-        }
-        let text = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return text.split(separator: "\n", omittingEmptySubsequences: true).map { line in
-            line.split(separator: Character(separator), omittingEmptySubsequences: false).map(String.init)
-        }
-    }
-
-    private static func loadColumnNames(dbPath: String) throws -> Set<String> {
-        let rows = try runSQLiteQuery(dbPath: dbPath, sql: "PRAGMA table_info(ZCLOUDRECORDING);")
-        return Set(rows.compactMap { row in
-            guard row.count >= 2 else { return nil }
-            return row[1]
-        })
+        return Set(names.filter { !$0.isEmpty })
     }
 
     private static func resolveRecordingPath(_ rawPath: String, recordingsDirectory: String) -> String {
@@ -251,7 +215,8 @@ enum VoiceMemosImport {
         }
     }
 
-    private static func nilIfEmpty(_ value: String) -> String? {
-        value.isEmpty ? nil : value
+    private static func nilIfEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 }
