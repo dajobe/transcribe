@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run transcribe when a file is added to a Folder Action folder (macOS Automator).
-# See specs/voice-memos-cli-cleanup.md for environment variables and behavior.
+# See specs/folder-action-markdown.md for environment variables and behavior.
+# Requires transcribe >= 2.0 (uses the `file <path>` source command form).
 set -euo pipefail
 
 # ISO 8601 UTC (second precision), e.g. 2026-04-12T19:35:55Z
@@ -144,6 +145,22 @@ main() {
 
   local bin="${TRANSCRIBE_BIN:-transcribe}"
   local fmt="${TRANSCRIBE_FORMAT:-md}"
+
+  # 2.0 reorganised the CLI around source commands (`file <path>` etc).
+  # If the user upgraded the script but their installed binary is still
+  # pre-2.0, fail fast with a clear message instead of running with
+  # silently wrong argument ordering.
+  local bin_version
+  if bin_version="$("$bin" --version 2>/dev/null)"; then
+    case "$bin_version" in
+      0.*|1.*)
+        REASON=binary-too-old
+        log_line "transcribe-version=${bin_version} required>=2.0"
+        warn "folder-action-transcribe: $bin reports version $bin_version; this script requires transcribe >= 2.0"
+        exit 1
+        ;;
+    esac
+  fi
 
   local -a cmd
   cmd=("$bin" -o "$outdir" --format "$fmt")

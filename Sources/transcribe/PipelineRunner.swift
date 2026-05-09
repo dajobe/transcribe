@@ -34,6 +34,10 @@ struct PipelineWorkItem {
 }
 
 enum SourcePlanner {
+    /// Resolve a root path alias (`transcribe <path>`) to a file or directory
+    /// dispatch mode. Symlinks are followed: a path pointing at a directory
+    /// symlink is treated as a directory source. Use the explicit `file` or
+    /// `dir` subcommands if you need to disambiguate or restrict the kind.
     static func modeForAliasPath(_ rawPath: String) throws -> SourceMode {
         let expanded = (rawPath as NSString).expandingTildeInPath
         var isDir: ObjCBool = false

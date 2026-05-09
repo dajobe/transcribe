@@ -227,7 +227,10 @@ struct SharedTranscriptionOptions: ParsableArguments {
     @Flag(name: .long, help: "Do not use or write idempotent processing history")
     var noProcessingState: Bool = false
 
-    @Flag(name: .long, help: "Mark planned inputs as already imported without transcribing them")
+    @Flag(
+        name: .long,
+        help: "Mark planned inputs as already imported without transcribing them. Future runs skip them on source identity and content fingerprint alone, regardless of model, format, or other settings."
+    )
     var markImported: Bool = false
 
     @Flag(name: .long, help: "Show what would be processed or skipped without loading models, writing outputs, or updating processing history")
