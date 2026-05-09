@@ -123,6 +123,193 @@ final class ProcessingStoreTests: XCTestCase {
         }
     }
 
+    func testContentMatchSkipsMovedFileWithIntactPriorOutputs() throws {
+        let state = try makeTempDir()
+        let originalDir = try makeTempDir()
+        let elsewhere = try makeTempDir()
+        try withXDGStateHome(state.path) {
+            // Same bytes at two different paths => same SHA-256, different
+            // FileFingerprint.path entries.
+            let bytes = Data("payload-bytes".utf8)
+            let oldPath = originalDir.appendingPathComponent("clip.m4a")
+            let newPath = elsewhere.appendingPathComponent("clip.m4a")
+            try bytes.write(to: oldPath)
+            try bytes.write(to: newPath)
+
+            let oldFingerprint = try ProcessingStore.fingerprint(files: [oldPath.path])
+            let newFingerprint = try ProcessingStore.fingerprint(files: [newPath.path])
+            XCTAssertNotEqual(oldFingerprint, newFingerprint, "fingerprint paths should differ across the two locations")
+
+            let settings = sampleSettings()
+            let oldTranscript = originalDir.appendingPathComponent("clip.json")
+            try Data("{}".utf8).write(to: oldTranscript)
+
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                source_kind: .file,
+                source_id: "file:\(oldPath.path)",
+                source_fingerprint: oldFingerprint,
+                settings_signature: settings,
+                output_dir: originalDir.path,
+                basename: "clip",
+                output_paths: [oldTranscript.path],
+                audio_duration_s: 1,
+                warning_count: 0,
+                recording_title: nil,
+                recorded_at: nil,
+                voice_memos_unique_id: nil,
+                voice_memos_path: nil
+            ))
+
+            XCTAssertTrue(try ProcessingStore.shouldSkipByContent(
+                fingerprint: newFingerprint,
+                settings: settings
+            ))
+
+            // Strict path still says no (paths differ); the content path is what
+            // catches this case.
+            XCTAssertFalse(try ProcessingStore.shouldSkipCompleted(
+                sourceKind: .file,
+                sourceID: "file:\(newPath.path)",
+                fingerprint: newFingerprint,
+                settings: settings,
+                outputPaths: [newPath.deletingPathExtension().appendingPathExtension("json").path]
+            ))
+
+            // Delete the prior transcript: content match must back off and re-run.
+            try FileManager.default.removeItem(at: oldTranscript)
+            XCTAssertFalse(try ProcessingStore.shouldSkipByContent(
+                fingerprint: newFingerprint,
+                settings: settings
+            ))
+        }
+    }
+
+    func testContentMatchSkipsSingleFileExtractedFromPriorDirSession() throws {
+        let state = try makeTempDir()
+        let dir = try makeTempDir()
+        try withXDGStateHome(state.path) {
+            let a = dir.appendingPathComponent("a.m4a")
+            let b = dir.appendingPathComponent("b.m4a")
+            let c = dir.appendingPathComponent("c.m4a")
+            try Data("aaa".utf8).write(to: a)
+            try Data("bbb".utf8).write(to: b)
+            try Data("ccc".utf8).write(to: c)
+
+            let sessionFingerprint = try ProcessingStore.fingerprint(files: [a.path, b.path, c.path])
+            let solo = try ProcessingStore.fingerprint(files: [b.path])
+
+            let settings = sampleSettings()
+            let priorOutput = dir.appendingPathComponent("session.json")
+            try Data("{}".utf8).write(to: priorOutput)
+
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                source_kind: .directorySession,
+                source_id: sourceIDForFiles(kind: .directorySession, files: [a.path, b.path, c.path]),
+                source_fingerprint: sessionFingerprint,
+                settings_signature: settings,
+                output_dir: dir.path,
+                basename: "session",
+                output_paths: [priorOutput.path],
+                audio_duration_s: 1,
+                warning_count: 0,
+                recording_title: nil,
+                recorded_at: nil,
+                voice_memos_unique_id: nil,
+                voice_memos_path: nil
+            ))
+
+            XCTAssertTrue(try ProcessingStore.shouldSkipByContent(
+                fingerprint: solo,
+                settings: settings
+            ), "solo file whose SHA was in a prior dir session should skip")
+
+            // A new run that adds a fresh file should NOT skip — subset semantics.
+            let extra = dir.appendingPathComponent("d.m4a")
+            try Data("ddd".utf8).write(to: extra)
+            let supersetFingerprint = try ProcessingStore.fingerprint(files: [a.path, b.path, c.path, extra.path])
+            XCTAssertFalse(try ProcessingStore.shouldSkipByContent(
+                fingerprint: supersetFingerprint,
+                settings: settings
+            ), "a session containing genuinely new content must not skip")
+        }
+    }
+
+    func testContentMatchAgainstBaselineIgnoresSettings() throws {
+        let state = try makeTempDir()
+        let dir = try makeTempDir()
+        try withXDGStateHome(state.path) {
+            let audio = dir.appendingPathComponent("memo.m4a")
+            try Data("memo".utf8).write(to: audio)
+            let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                source_kind: .voiceMemosBaseline,
+                source_id: "voice_memos:abc",
+                source_fingerprint: fingerprint,
+                settings_signature: nil,
+                output_dir: nil,
+                basename: nil,
+                output_paths: [],
+                audio_duration_s: nil,
+                warning_count: 0,
+                recording_title: "Memo",
+                recorded_at: iso8601String(Date()),
+                voice_memos_unique_id: "abc",
+                voice_memos_path: audio.path
+            ))
+
+            XCTAssertTrue(try ProcessingStore.shouldSkipByContent(
+                fingerprint: fingerprint,
+                settings: sampleSettings(model: "any")
+            ))
+            XCTAssertTrue(try ProcessingStore.shouldSkipByContent(
+                fingerprint: fingerprint,
+                settings: sampleSettings(model: "different-model")
+            ))
+        }
+    }
+
+    func testContentMatchRespectsSettingsForCompletedRecords() throws {
+        let state = try makeTempDir()
+        let dir = try makeTempDir()
+        try withXDGStateHome(state.path) {
+            let audio = dir.appendingPathComponent("clip.m4a")
+            try Data("clip".utf8).write(to: audio)
+            let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+            let priorOutput = dir.appendingPathComponent("clip.json")
+            try Data("{}".utf8).write(to: priorOutput)
+
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                source_kind: .file,
+                source_id: "file:\(audio.path)",
+                source_fingerprint: fingerprint,
+                settings_signature: sampleSettings(model: "model-a"),
+                output_dir: dir.path,
+                basename: "clip",
+                output_paths: [priorOutput.path],
+                audio_duration_s: 1,
+                warning_count: 0,
+                recording_title: nil,
+                recorded_at: nil,
+                voice_memos_unique_id: nil,
+                voice_memos_path: nil
+            ))
+
+            XCTAssertTrue(try ProcessingStore.shouldSkipByContent(
+                fingerprint: fingerprint,
+                settings: sampleSettings(model: "model-a")
+            ))
+            XCTAssertFalse(try ProcessingStore.shouldSkipByContent(
+                fingerprint: fingerprint,
+                settings: sampleSettings(model: "model-b")
+            ), "different model should re-run; transcript content depends on settings")
+        }
+    }
+
     func testImportedBaselineSkipsWithoutOutputs() throws {
         let state = try makeTempDir()
         let dir = try makeTempDir()

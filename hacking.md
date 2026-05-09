@@ -169,16 +169,27 @@ The ledger records completed source sessions and imported baselines. It stores:
 - output paths and `output_dir` / `basename`
 - Voice Memos audit metadata when present (title, recorded-at, unique id, path)
 
-Default skip behavior (in `PipelineRunner` via `ProcessingStore`):
+Default skip behavior (in `PipelineRunner.shouldSkip` via `ProcessingStore`,
+checked in this order):
 
-- completed transcription records skip only when the source kind, source id,
-  fingerprint, settings, and `output_paths` all match exactly **and** every
-  listed output file currently exists on disk
-- imported baseline records skip purely when source id and fingerprint match;
-  settings are intentionally ignored so a `--mark-imported` mark stays sticky
-  across model/format changes
-- `--redo` bypasses skip checks
-- `--no-processing-state` bypasses both reads and writes
+1. **Imported-baseline match** (`shouldSkipImportedBaseline`): same `source_id`
+   and same fingerprint, regardless of settings. Sticky across model/format
+   changes by design.
+2. **Strict completed match** (`shouldSkipCompleted`): same source kind,
+   `source_id`, fingerprint, settings, **and** `output_paths`, with every listed
+   output file still on disk.
+3. **Content match** (`shouldSkipByContent`): the new fingerprint's SHA-256 set
+   is a subset of some prior record's SHA-256 set, ignoring file paths and
+   `source_kind`. This catches a moved file (`/a/x.m4a` → `/b/x.m4a`) and a
+   single-file run that pulls one clip out of a prior `dir` / `voice-memos`
+   session. Match conditions:
+   - **completed prior**: settings must match AND prior `output_paths` must all
+     still exist on disk
+   - **baseline prior** (`--mark-imported`): match on content alone, settings
+     ignored
+
+`--redo` bypasses all three skip paths; `--no-processing-state` bypasses both
+reads and writes of the ledger.
 
 `--mark-imported` is global. It builds the normal source plan for `file`, `dir`,
 or `voice-memos`, fingerprints each planned session, and appends a baseline

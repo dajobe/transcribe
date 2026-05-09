@@ -122,6 +122,47 @@ enum ProcessingStore {
         }
     }
 
+    /// Path-agnostic dedup: skip a planned run when every input file's
+    /// SHA-256 was already present in some prior record's fingerprint.
+    ///
+    /// - Completed records (`file`, `directory_session`, `voice_memos`) only
+    ///   match when their `settings_signature` equals `settings` AND their
+    ///   recorded `output_paths` still exist on disk; otherwise the prior
+    ///   transcript is gone or stale and we re-run.
+    /// - Baseline records (`imported_baseline`, `voice_memos_baseline`) match
+    ///   on content alone — they exist precisely to say "treat as done"
+    ///   without producing outputs.
+    ///
+    /// Subset semantics: a new session matches when its hash set is a subset
+    /// of a prior record's hash set (so a single-file run can match a
+    /// previous multi-file session, but a new session containing genuinely
+    /// new files does not).
+    static func shouldSkipByContent(
+        fingerprint: SourceFingerprint,
+        settings: ProcessingSettingsSignature
+    ) throws -> Bool {
+        let needed = Set(fingerprint.files.map { $0.sha256 })
+        guard !needed.isEmpty else { return false }
+
+        let records = try loadRecords()
+        for record in records.reversed() {
+            let recorded = Set(record.source_fingerprint.files.map { $0.sha256 })
+            guard !recorded.isEmpty, needed.isSubset(of: recorded) else { continue }
+
+            switch record.source_kind {
+            case .importedBaseline, .voiceMemosBaseline:
+                return true
+            case .file, .directorySession, .voiceMemos:
+                guard let prior = record.settings_signature, prior == settings else { continue }
+                if !record.output_paths.isEmpty,
+                   record.output_paths.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     static func fingerprint(files paths: [String]) throws -> SourceFingerprint {
         let files = try paths.map { path in
             try fingerprint(file: path)

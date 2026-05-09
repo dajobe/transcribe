@@ -479,13 +479,19 @@ struct PipelineRunner {
         if try ProcessingStore.shouldSkipImportedBaseline(sourceID: plan.sourceID, fingerprint: fingerprint) {
             return true
         }
-        return try ProcessingStore.shouldSkipCompleted(
+        if try ProcessingStore.shouldSkipCompleted(
             sourceKind: plan.sourceKind,
             sourceID: plan.sourceID,
             fingerprint: fingerprint,
             settings: settings,
             outputPaths: outputPaths
-        )
+        ) {
+            return true
+        }
+        // Path-agnostic content match: catch the same audio under a new path
+        // (file moved between directories) or extracted from a prior dir/voice
+        // memos session into a single-file run.
+        return try ProcessingStore.shouldSkipByContent(fingerprint: fingerprint, settings: settings)
     }
 
     private func resolveModel(explicit: String?) async throws -> String {
