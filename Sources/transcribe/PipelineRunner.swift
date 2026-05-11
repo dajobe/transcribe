@@ -32,6 +32,7 @@ struct PipelineWorkItem {
     let fingerprint: SourceFingerprint
     let outputPaths: [String]
     let historyReason: ProcessingHistoryReason
+    let recordsSkipHistory: Bool
 }
 
 enum SourcePlanner {
@@ -193,7 +194,8 @@ struct PipelineRunner {
                         plan: plan,
                         fingerprint: fingerprint,
                         outputPaths: [],
-                        historyReason: decision.reason
+                        historyReason: decision.reason,
+                        recordsSkipHistory: decision.recordsSkipHistory
                     )
                     skippedItems.append(item)
                 } else {
@@ -201,7 +203,8 @@ struct PipelineRunner {
                         plan: plan,
                         fingerprint: fingerprint,
                         outputPaths: [],
-                        historyReason: .imported
+                        historyReason: .imported,
+                        recordsSkipHistory: false
                     )
                     workItems.append(item)
                 }
@@ -251,7 +254,8 @@ struct PipelineRunner {
                 plan: plan,
                 fingerprint: fingerprint,
                 outputPaths: paths,
-                historyReason: decision.reason
+                historyReason: decision.reason,
+                recordsSkipHistory: decision.recordsSkipHistory
             )
             if decision.shouldSkip {
                 logger.log("Skipping already processed input: \(plan.basename)")
@@ -576,7 +580,7 @@ struct PipelineRunner {
 
     private func appendSkipRecords(workItems: [PipelineWorkItem], settings: ProcessingSettingsSignature?) throws {
         guard !options.stateless else { return }
-        for item in workItems {
+        for item in workItems where item.recordsSkipHistory {
             let plan = item.plan
             let outputDir = item.outputPaths.isEmpty ? nil : resolvedOutputDir(options.outputDir)
             try ProcessingStore.append(ProcessingRecord(

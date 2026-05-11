@@ -44,23 +44,28 @@ JSONL records remain readable without migration:
 - Baseline import records without `history_reason` render as `imported`.
 - Other records without `history_reason` render as `legacy`.
 
-Normal duplicate skips append a new row unless `--stateless` or `--dry-run` is
-active. Skip rows preserve source kind, source id, fingerprint, basename,
-requested output paths, and metadata, but do not set audio duration or warning
-counts as if transcription had run.
+Duplicate skips against prior completed transcriptions append a new row unless
+`--stateless` or `--dry-run` is active. Skips against `--mark-imported`
+baselines do not append another row, because a library rescan can otherwise
+flood the recent history view with old imported recordings. Skip rows preserve
+source kind, source id, fingerprint, basename, requested output paths, and
+metadata, but do not set audio duration or warning counts as if transcription
+had run.
 
 ## Decision Rules
 
 Reason selection is based on the first decisive history match:
 
-- Exact source, fingerprint, settings, and existing outputs: `skip dup`.
+- Exact source, fingerprint, settings, and existing outputs: `skip dup`, and
+  append a skip audit row.
 - Exact source with different fingerprint: `changed file`.
 - Exact source and fingerprint with changed settings or requested output paths:
   `settings`.
 - Exact source and fingerprint with matching settings but missing outputs:
   `missing out`.
 - Path-agnostic content matches with compatible settings and existing outputs:
-  `skip dup`.
+  `skip dup`, and append a skip audit row.
+- Baseline import matches: `skip dup`, without appending a new history row.
 - `--redo` processing rows: `redo`.
 - `--mark-imported` rows: `imported`.
 - No decisive prior match: `first run`.

@@ -276,8 +276,9 @@ reprocessed.
 - **Default behavior:** if the source audio, important settings, and requested
   output files match a previous completed run, and all requested outputs still
   exist, the session is skipped before audio preflight or model loading.
-  Duplicate skips are written back to history unless `--stateless` or
-  `--dry-run` is active.
+  Duplicate skips against prior completed transcriptions are written back to
+  history unless `--stateless` or `--dry-run` is active; skips against
+  `--mark-imported` baselines are not re-recorded.
 - **Changed input/settings:** changed audio bytes, model, language, diarization
   settings, speaker options, formats, or transcribe version cause a new run.
 - **Missing outputs:** if history says a session completed but the requested

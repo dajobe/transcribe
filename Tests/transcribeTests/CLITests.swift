@@ -681,8 +681,8 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(duplicate.terminationStatus, 0)
 
         let rawAfterDuplicate = try String(contentsOf: ledger, encoding: .utf8)
-        XCTAssertEqual(rawAfterDuplicate.split(separator: "\n").count, 2, "duplicate skip should append an audit row: \(rawAfterDuplicate)")
-        XCTAssertTrue(rawAfterDuplicate.contains("\"history_reason\":\"skip_duplicate\""), "ledger: \(rawAfterDuplicate)")
+        XCTAssertEqual(rawAfterDuplicate.split(separator: "\n").count, 1, "baseline duplicate skips should not flood history: \(rawAfterDuplicate)")
+        XCTAssertFalse(rawAfterDuplicate.contains("\"history_reason\":\"skip_duplicate\""), "ledger: \(rawAfterDuplicate)")
 
         // history should render the new reason and compact source kind.
         let history = Process()

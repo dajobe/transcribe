@@ -344,7 +344,7 @@ final class ProcessingStoreTests: XCTestCase {
             XCTAssertEqual(try ProcessingStore.contentDecision(
                 fingerprint: fingerprint,
                 settings: sampleSettings(model: "any")
-            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate, recordsSkipHistory: false))
             XCTAssertTrue(try ProcessingStore.shouldSkipByContent(
                 fingerprint: fingerprint,
                 settings: sampleSettings(model: "different-model")
@@ -427,7 +427,7 @@ final class ProcessingStoreTests: XCTestCase {
             XCTAssertEqual(try ProcessingStore.importedBaselineDecision(
                 sourceID: "file:\(audio.path)",
                 fingerprint: fingerprint
-            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate, recordsSkipHistory: false))
         }
     }
 

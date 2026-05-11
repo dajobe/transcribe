@@ -31,6 +31,17 @@ enum ProcessingDecisionAction: Equatable {
 struct ProcessingDecision: Equatable {
     let action: ProcessingDecisionAction
     let reason: ProcessingHistoryReason
+    let recordsSkipHistory: Bool
+
+    init(
+        action: ProcessingDecisionAction,
+        reason: ProcessingHistoryReason,
+        recordsSkipHistory: Bool = true
+    ) {
+        self.action = action
+        self.reason = reason
+        self.recordsSkipHistory = recordsSkipHistory
+    }
 
     var shouldSkip: Bool { action == .skip }
 }
@@ -174,7 +185,7 @@ enum ProcessingStore {
             guard record.source_fingerprint == fingerprint else {
                 return ProcessingDecision(action: .process, reason: .changedFile)
             }
-            return ProcessingDecision(action: .skip, reason: .skipDuplicate)
+            return ProcessingDecision(action: .skip, reason: .skipDuplicate, recordsSkipHistory: false)
         }
         return ProcessingDecision(action: .process, reason: .firstRun)
     }
@@ -218,7 +229,7 @@ enum ProcessingStore {
 
             switch record.source_kind {
             case .importedBaseline, .voiceMemosBaseline:
-                return ProcessingDecision(action: .skip, reason: .skipDuplicate)
+                return ProcessingDecision(action: .skip, reason: .skipDuplicate, recordsSkipHistory: false)
             case .file, .directorySession, .voiceMemos:
                 guard let prior = record.settings_signature, prior == settings else {
                     pendingReason = pendingReason ?? .settingsChanged
