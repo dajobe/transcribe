@@ -17,8 +17,8 @@ Voice-memo workflows produce many short clips (e.g. macOS Voice Memos: `New
 Recording.m4a`, `New Recording 2.m4a`, …) that the user thinks of as one long
 recording or as several distinct sessions captured across a day. Per-file
 invocations of `transcribe` lose cross-clip speaker continuity and force the
-user to stitch transcripts manually. Pointing `transcribe dir` at the
-containing directory is the natural UX.
+user to stitch transcripts manually. Pointing `transcribe dir` at the containing
+directory is the natural UX.
 
 Sequential clips a user records in one sitting should land in a single
 transcript. Clips recorded hours apart almost always represent different
@@ -90,8 +90,8 @@ Apple's Voice Memos app rewrites the M4A `creation_time` atom to "now" when
 files are exported via Files / iCloud Drive. The result is a directory of clips
 with timestamps clustered within a few seconds — useless for ordering.
 
-When `--sort=recorded` is in effect, `transcribe` runs a trust check
-before sorting:
+When `--sort=recorded` is in effect, `transcribe` runs a trust check before
+sorting:
 
 ```
 spread = max(recorded_at_i) - min(recorded_at_j)   # over clips with recorded_at set
@@ -251,17 +251,17 @@ No new exit codes. The directory path uses existing codes:
 
 ## Code touchpoints
 
-| File                                              | Role                                                                                                                          |
-|:--------------------------------------------------|:------------------------------------------------------------------------------------------------------------------------------|
-| `Sources/transcribe/InputResolver.swift`          | resolves the positional argument, sorts and probes per-clip metadata, builds `[AudioSession]`, derives per-session basenames. |
-| `Sources/transcribe/SessionGrouper.swift`         | pure session-grouping logic: `groupIntoSessions(clips:maxGapSeconds:logger:)`.                                                |
-| `Sources/transcribe/TranscriptionPipeline.swift`  | `loadModels(...)` + `runSession(preparedAudio:audioLoadMs:models:...)` to share Whisper/SpeakerKit across sessions.           |
-| `Sources/transcribe/OutputWriter.swift`           | `outputBasename(directoryPath:)` standardises relative paths; `audio_files` JSON metadata; markdown `Sources` block.          |
+| File                                              | Role                                                                                                                                |
+|:--------------------------------------------------|:------------------------------------------------------------------------------------------------------------------------------------|
+| `Sources/transcribe/InputResolver.swift`          | resolves the positional argument, sorts and probes per-clip metadata, builds `[AudioSession]`, derives per-session basenames.       |
+| `Sources/transcribe/SessionGrouper.swift`         | pure session-grouping logic: `groupIntoSessions(clips:maxGapSeconds:logger:)`.                                                      |
+| `Sources/transcribe/TranscriptionPipeline.swift`  | `loadModels(...)` + `runSession(preparedAudio:audioLoadMs:models:...)` to share Whisper/SpeakerKit across sessions.                 |
+| `Sources/transcribe/OutputWriter.swift`           | `outputBasename(directoryPath:)` standardises relative paths; `audio_files` JSON metadata; markdown `Sources` block.                |
 | `Sources/transcribe/CLICommands.swift`            | Root/global option parsing, source-specific `dir` options (`--sort`, `--input-sort`, filename recovery), and batch `--session-gap`. |
-| `Sources/transcribe/PipelineRunner.swift`         | Source planning, idempotency checks, dry-run handling, and per-session execution.                                             |
-| `Tests/transcribeTests/InputResolverTests.swift`  | resolver, sort, basenames.                                                                                                    |
-| `Tests/transcribeTests/SessionGrouperTests.swift` | gap-grouping algorithm.                                                                                                       |
-| `Tests/transcribeTests/CLITests.swift`            | `--sort` / `--input-sort` parsing, `--session-gap` validation, empty/non-audio dir exit codes.                                |
+| `Sources/transcribe/PipelineRunner.swift`         | Source planning, idempotency checks, dry-run handling, and per-session execution.                                                   |
+| `Tests/transcribeTests/InputResolverTests.swift`  | resolver, sort, basenames.                                                                                                          |
+| `Tests/transcribeTests/SessionGrouperTests.swift` | gap-grouping algorithm.                                                                                                             |
+| `Tests/transcribeTests/CLITests.swift`            | `--sort` / `--input-sort` parsing, `--session-gap` validation, empty/non-audio dir exit codes.                                      |
 
 ## Versioning
 

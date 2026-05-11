@@ -5,7 +5,7 @@ struct Transcribe: AsyncParsableCommand {
     // When bumping this, run `make tag` (or `make release`) immediately
     // afterwards so the matching `vX.Y.Z` annotated tag lands with the
     // version-bump commit. See README "Releasing" and AGENTS.md.
-    static let version = "2.2.0"
+    static let version = "2.3.0"
 
     /// Default Whisper model when `--model` is not supplied.
     /// `openai_whisper-large-v3_turbo` is the strongest model that runs at
@@ -30,10 +30,12 @@ struct Transcribe: AsyncParsableCommand {
 
             Other commands:
               history [--count <n>]   Show recent transcription/import history.
+              config <subcommand>     View or edit user defaults (JSON at ~/.config/transcribe/config.json).
 
             Global options must appear before the source command. For source-specific \
             options, run `transcribe file --help`, `transcribe dir --help`, \
-            `transcribe voice-memos --help`, or `transcribe history --help`.
+            `transcribe voice-memos --help`, `transcribe history --help`, or \
+            `transcribe config --help`.
             """,
         version: version
     )

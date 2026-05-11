@@ -13,7 +13,7 @@ enum SourceMode {
 
 enum PipelineRequest {
     case file(path: String)
-    case directory(path: String, options: DirectoryInputOptions)
+    case directory(path: String, options: ResolvedDirectoryOptions)
     case voiceMemos(recordingsDir: String, sessionGap: Int)
 }
 
@@ -88,7 +88,7 @@ enum SourcePlanner {
 
     static func directoryPlans(
         path: String,
-        options: DirectoryInputOptions,
+        options: ResolvedDirectoryOptions,
         outputPrefix: String?,
         logger: VerboseLogger
     ) async throws -> [PipelineSessionPlan] {
@@ -173,7 +173,7 @@ enum SourcePlanner {
 
 struct PipelineRunner {
     let request: PipelineRequest
-    let options: SharedTranscriptionOptions
+    let options: ResolvedSharedOptions
 
     func run() async throws {
         try validateSharedUsage()
@@ -201,12 +201,12 @@ struct PipelineRunner {
             return
         }
 
-        let resolvedModel = try await resolveModel(explicit: options.model)
+        let resolvedModel = try await resolveModel()
         let settingsSignature = ProcessingSettingsSignature(
             model: resolvedModel,
             language: options.language,
-            diarization_enabled: !options.noDiarize,
-            speaker_strategy: options.speakerStrategy,
+            diarization_enabled: options.speakersEnabled,
+            speaker_strategy: options.speakerMerge,
             min_speakers: options.minSpeakers,
             max_speakers: options.maxSpeakers,
             formats: options.resolvedFormats,
@@ -216,7 +216,7 @@ struct PipelineRunner {
 
         let historicalRatio: Double? = {
             guard options.timingStatsEnabled else { return nil }
-            guard let recs = try? TimingStore.loadRecent(model: resolvedModel, diarizationEnabled: !options.noDiarize) else {
+            guard let recs = try? TimingStore.loadRecent(model: resolvedModel, diarizationEnabled: options.speakersEnabled) else {
                 return nil
             }
             return TimingStore.medianWallSecondsPerAudioSecond(records: recs)
@@ -262,9 +262,15 @@ struct PipelineRunner {
         try preflightAudioDecoding(for: workItems.map(\.plan.session), logger: logger)
 
         let liveProgressMode: LiveProgressRenderMode? = {
-            if options.debugProgressLog { return .lineLog(minInterval: 1.0) }
-            if isStderrTTY() { return .tty }
-            return nil
+            switch options.progressLogMode {
+            case .plain:
+                return .lineLog(minInterval: 1.0)
+            case .off:
+                return nil
+            case .auto:
+                if isStderrTTY() { return .tty }
+                return nil
+            }
         }()
 
         let computeOptions = RuntimeComputeOptions.resolve(
@@ -273,11 +279,11 @@ struct PipelineRunner {
             segmenter: options.segmenterCompute,
             embedder: options.embedderCompute
         )
-        let strategy = SpeakerInfoStrategy(from: options.speakerStrategy) ?? .subsegment
+        let strategy = SpeakerInfoStrategy(from: options.speakerMerge) ?? .subsegment
         let (models, whisperInitMs, speakerInitMs) = try await loadModels(
             model: resolvedModel,
             modelDir: options.modelDir,
-            diarize: !options.noDiarize,
+            diarize: options.speakersEnabled,
             computeOptions: computeOptions,
             verbose: options.verbose,
             logger: logger
@@ -321,7 +327,7 @@ struct PipelineRunner {
             )
 
             var out = sessionOutput
-            out.speakerStrategy = options.speakerStrategy
+            out.speakerStrategy = options.speakerMerge
             for warning in out.warnings {
                 emitWarning(warning)
             }
@@ -345,7 +351,7 @@ struct PipelineRunner {
                 )
             }
 
-            if !options.noProcessingState {
+            if !options.stateless {
                 try ProcessingStore.append(ProcessingRecord(
                     completed_at: iso8601String(Date()),
                     source_kind: plan.sourceKind,
@@ -430,33 +436,33 @@ struct PipelineRunner {
             throw TranscribeError(message: "Unsupported format '\(f)'. Supported: txt, json, srt, vtt, md, all.", exitCode: .invalidUsage)
         }
 
-        let strategy = options.speakerStrategy.lowercased()
+        let strategy = options.speakerMerge.lowercased()
         if strategy != "subsegment" && strategy != "segment" {
-            throw TranscribeError(message: "--speaker-strategy must be 'subsegment' or 'segment'.", exitCode: .invalidUsage)
+            throw TranscribeError(message: "--speaker-merge must be 'subsegment' or 'segment'.", exitCode: .invalidUsage)
         }
 
         if options.stdout && !options.wantsTxt {
             throw TranscribeError(message: "--stdout is only valid when txt is requested (e.g. --format txt,json or --format all).", exitCode: .invalidUsage)
         }
 
-        if options.noDiarize && (options.minSpeakers != nil || options.maxSpeakers != nil) {
-            throw TranscribeError(message: "--min-speakers and --max-speakers are only valid when diarization is enabled.", exitCode: .invalidUsage)
+        if !options.speakersEnabled && (options.minSpeakers != nil || options.maxSpeakers != nil) {
+            throw TranscribeError(message: "--speakers-min and --speakers-max are only valid when speaker labels are enabled.", exitCode: .invalidUsage)
         }
         if let min = options.minSpeakers, min <= 0 {
-            throw TranscribeError(message: "--min-speakers must be greater than 0.", exitCode: .invalidUsage)
+            throw TranscribeError(message: "--speakers-min must be greater than 0.", exitCode: .invalidUsage)
         }
         if let max = options.maxSpeakers, max <= 0 {
-            throw TranscribeError(message: "--max-speakers must be greater than 0.", exitCode: .invalidUsage)
+            throw TranscribeError(message: "--speakers-max must be greater than 0.", exitCode: .invalidUsage)
         }
         if let min = options.minSpeakers, let max = options.maxSpeakers, min > max {
-            throw TranscribeError(message: "--min-speakers (\(min)) must be less than or equal to --max-speakers (\(max)).", exitCode: .invalidUsage)
+            throw TranscribeError(message: "--speakers-min (\(min)) must be less than or equal to --speakers-max (\(max)).", exitCode: .invalidUsage)
         }
 
         if options.markImported && options.redo {
             throw TranscribeError(message: "--mark-imported cannot be combined with --redo.", exitCode: .invalidUsage)
         }
-        if options.markImported && options.noProcessingState {
-            throw TranscribeError(message: "--mark-imported cannot be combined with --no-processing-state.", exitCode: .invalidUsage)
+        if options.markImported && options.stateless {
+            throw TranscribeError(message: "--mark-imported cannot be combined with --stateless.", exitCode: .invalidUsage)
         }
 
         if case .directory(_, let directoryOptions) = request, directoryOptions.sessionGap < 0 {
@@ -473,7 +479,7 @@ struct PipelineRunner {
         settings: ProcessingSettingsSignature,
         outputPaths: [String]
     ) throws -> Bool {
-        if options.noProcessingState || options.redo {
+        if options.stateless || options.redo {
             return false
         }
         if try ProcessingStore.shouldSkipImportedBaseline(sourceID: plan.sourceID, fingerprint: fingerprint) {
@@ -494,9 +500,15 @@ struct PipelineRunner {
         return try ProcessingStore.shouldSkipByContent(fingerprint: fingerprint, settings: settings)
     }
 
-    private func resolveModel(explicit: String?) async throws -> String {
-        let chosen = explicit ?? Transcribe.defaultModel
-        let label = (explicit == nil) ? "Auto-selected model" : "Using model"
+    private func resolveModel() async throws -> String {
+        let chosen = options.model
+        let label: String
+        switch options.modelSource {
+        case .cli, .userFile:
+            label = "Using model"
+        case .builtin:
+            label = "Auto-selected model"
+        }
         FileHandle.standardError.write("\(label): \(chosen)\n".data(using: .utf8)!)
         return chosen
     }

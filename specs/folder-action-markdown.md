@@ -34,7 +34,7 @@ output directory (see `-o` / `--output-dir`).
    - **Language:** present only when the pipeline detected or was given a
      language (backticks).
    - **Diarization:** `on` or `off`.
-   - **Speaker strategy:** when diarization is on, `subsegment` or `segment`
+   - **Speaker merge:** when diarization is on, `subsegment` or `segment`
      (backticks).
    - **Speakers detected:** when the pipeline provides a count.
    - **transcribe:** tool version (backticks).
@@ -120,26 +120,35 @@ each new item as an argument).
    your install (e.g. `~/.local/bin/transcribe`).
 
 6. **Output directory** — If **`TRANSCRIBE_OUTPUT_DIR`** is unset or empty, pass
-   **`-o "$(dirname "$file")" file "$file"`** (outputs next to the source
-   file). If set, pass **`-o "$TRANSCRIBE_OUTPUT_DIR" file "$file"`** (all
-   transcripts go to that folder).
+   **`-o "$(dirname "$file")" file "$file"`** (outputs next to the source file).
+   If set, pass **`-o "$TRANSCRIBE_OUTPUT_DIR" file "$file"`** (all transcripts
+   go to that folder).
 
 7. **Format** — **`TRANSCRIBE_FORMAT`** (default **`md`**). Passed to
    **`--format`**.
 
 8. **Extra CLI arguments** — **`TRANSCRIBE_EXTRA_ARGS`**: optional
    space-separated global flags inserted before the `file` source command (e.g.
-   `--no-diarize --language en`). Users must not pass a second `--format`
-   unless they override intentionally.
+   `--transcript-only --language en`). Flags must match the current binary’s
+   `transcribe --help` (older releases used different names such as
+   `--no-diarize`). Users must not pass a second `--format` unless they override
+   intentionally.
 
-9. **Serialization** — If **`flock`** is available **and**
-   **`TRANSCRIBE_LOCK_FILE`** is non-empty, the script runs `transcribe` under
-   **`flock "$TRANSCRIBE_LOCK_FILE"`** so concurrent drops do not overlap GPU
-   work. If **`flock`** is missing, the script runs without locking and logs a
-   warning to stderr once.
+9. **Timing / ETA environment** — The child **`transcribe`** inherits the shell
+   environment. Export **`TRANSCRIBE_ETA_HINTS=0`** in the Automator step or a
+   wrapper to disable timing-store writes and ETA-from-history (same as
+   **`transcribe --eta-hints off`**). Legacy: **`TRANSCRIBE_TIMING_STATS=0`** is
+   still honored.
 
-10. **Logging** — If **`TRANSCRIBE_LOG`** is set, append lines with an **ISO 8601
-    UTC** timestamp prefix (`YYYY-MM-DDThh:mm:ssZ`). For each file path processed:
+10. **Serialization** — If **`flock`** is available **and**
+**`TRANSCRIBE_LOCK_FILE`** is non-empty, the script runs `transcribe` under
+**`flock "$TRANSCRIBE_LOCK_FILE"`** so concurrent drops do not overlap GPU work.
+If **`flock`** is missing, the script runs without locking and logs a warning to
+stderr once.
+
+11. **Logging** — If **`TRANSCRIBE_LOG`** is set, append lines with an **ISO
+    8601 UTC** timestamp prefix (`YYYY-MM-DDThh:mm:ssZ`). For each file path
+    processed:
     - **`event=start`** — beginning of handling (after the path is resolved).
     - **`event=end`** — always logged on exit, with **`path=`**, **`exit=`** (exit
       code), **`duration_s=`** (wall-clock seconds from start to end), and

@@ -1,4 +1,5 @@
 import XCTest
+@testable import transcribe
 
 final class CLITests: XCTestCase {
     /// Path to the built transcribe executable (relative to package root).
@@ -25,6 +26,12 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(output.contains("--model"), "root help should include global options")
         XCTAssertTrue(output.contains("--mark-imported"), "root help should include global mark-imported option")
         XCTAssertTrue(output.contains("Source commands:"), "root help should list source commands")
+        // ArgumentHelp wraps long lines; compare against whitespace-collapsed text.
+        let collapsedHelp = output.split { $0.isNewline || $0.isWhitespace }.joined(separator: " ")
+        XCTAssertTrue(
+            collapsedHelp.contains(ConfigSemanticStrings.languageWhenUnset),
+            "root help should document language computed-default wording shared with config show; stdout: \(output)"
+        )
     }
 
     func testSubcommandHelpIsSourceSpecific() throws {
@@ -64,7 +71,7 @@ final class CLITests: XCTestCase {
     func testMissingFileExitThree() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--no-diarize", "/nonexistent/file.wav"]
+        process.arguments = ["--transcript-only", "/nonexistent/file.wav"]
         let pipe = Pipe()
         process.standardError = pipe
         try process.run()
@@ -91,25 +98,25 @@ final class CLITests: XCTestCase {
         let file = try makeTempAudioFile()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--min-speakers", "3", "--max-speakers", "2", file.path]
+        process.arguments = ["--speakers-min", "3", "--speakers-max", "2", file.path]
         try process.run()
         process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 2, "min-speakers > max-speakers should exit 2")
+        XCTAssertEqual(process.terminationStatus, 2, "speakers-min > speakers-max should exit 2")
     }
 
     func testSpeakerOptionsWithNoDiarizeExitTwo() throws {
         let file = try makeTempAudioFile()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--no-diarize", "--min-speakers", "2", file.path]
+        process.arguments = ["--transcript-only", "--speakers-min", "2", file.path]
         let pipe = Pipe()
         process.standardError = pipe
         try process.run()
         process.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let stderr = String(data: data, encoding: .utf8) ?? ""
-        XCTAssertEqual(process.terminationStatus, 2, "speaker options with --no-diarize should exit 2")
-        XCTAssertTrue(stderr.contains("only valid when diarization is enabled"), "stderr should explain the invalid combination")
+        XCTAssertEqual(process.terminationStatus, 2, "speaker options with --transcript-only should exit 2")
+        XCTAssertTrue(stderr.contains("only valid when speaker labels are enabled"), "stderr should explain the invalid combination")
     }
 
     func testEmptyFormatExitTwo() throws {
@@ -131,15 +138,15 @@ final class CLITests: XCTestCase {
         let file = try makeTempAudioFile()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--min-speakers", "0", file.path]
+        process.arguments = ["--speakers-min", "0", file.path]
         let pipe = Pipe()
         process.standardError = pipe
         try process.run()
         process.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let stderr = String(data: data, encoding: .utf8) ?? ""
-        XCTAssertEqual(process.terminationStatus, 2, "zero --min-speakers should exit 2")
-        XCTAssertTrue(stderr.contains("--min-speakers must be greater than 0"), "stderr should explain the invalid speaker count")
+        XCTAssertEqual(process.terminationStatus, 2, "zero --speakers-min should exit 2")
+        XCTAssertTrue(stderr.contains("--speakers-min must be greater than 0"), "stderr should explain the invalid speaker count")
     }
 
     func testEmptyDirectoryExitThree() throws {
@@ -162,7 +169,7 @@ final class CLITests: XCTestCase {
         // but we should reach validation rather than hit a parser error (64).
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--no-diarize", "dir", "--no-filename-time-recovery", "/nonexistent/path"]
+        process.arguments = ["--transcript-only", "dir", "--input-time-source", "off", "/nonexistent/path"]
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 3, "flag should be accepted; exit 3 is from missing input, not arg parsing")
@@ -171,7 +178,7 @@ final class CLITests: XCTestCase {
     func testNoAutoSessionBasenameFlagAccepted() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--no-diarize", "dir", "--no-auto-session-basename", "/nonexistent/path"]
+        process.arguments = ["--transcript-only", "dir", "--session-naming", "off", "/nonexistent/path"]
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 3)
@@ -197,7 +204,104 @@ final class CLITests: XCTestCase {
         )
         XCTAssertTrue(stdout.contains("Usage: transcribe"), "stdout: \(stdout)")
         XCTAssertTrue(stdout.contains("Sources:"), "stdout: \(stdout)")
+        XCTAssertTrue(stdout.contains("config"), "stdout: \(stdout)")
         XCTAssertTrue(stdout.contains("transcribe --help"), "stdout: \(stdout)")
+    }
+
+    func testConfigPathUsesTranscribeConfigEnv() throws {
+        let tmp = try makeTempDir()
+        let cfg = tmp.appendingPathComponent("my.json")
+        try Data("{}".utf8).write(to: cfg)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["config", "path"]
+        process.environment = ProcessInfo.processInfo.environment.merging(["TRANSCRIBE_CONFIG": cfg.path]) { _, new in new }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        process.waitUntilExit()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .newlines) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertEqual(out, cfg.path)
+    }
+
+    func testConfigShowIncludesCatalogKeys() throws {
+        let tmp = try makeTempDir()
+        let cfg = tmp.appendingPathComponent("cfg.json")
+        try Data("{}".utf8).write(to: cfg)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["config", "show"]
+        process.environment = ProcessInfo.processInfo.environment.merging(["TRANSCRIBE_CONFIG": cfg.path]) { _, new in new }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        process.waitUntilExit()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertTrue(out.contains("model "), "stdout: \(out)")
+        XCTAssertTrue(out.contains("output.dir "), "stdout: \(out)")
+        XCTAssertTrue(out.contains("dir.sessionGap "), "stdout: \(out)")
+        XCTAssertTrue(out.contains("voiceMemos.sessionGap "), "stdout: \(out)")
+        XCTAssertTrue(
+            out.contains("# \(ConfigSemanticStrings.languageWhenUnset)"),
+            "expected computed-default comment before language; stdout: \(out)"
+        )
+        XCTAssertTrue(
+            out.contains("# \(ConfigSemanticStrings.outputPrefixWhenUnset)"),
+            "expected computed-default comment before output.prefix; stdout: \(out)"
+        )
+    }
+
+    func testConfigShowAnnotatesBuiltinDefaultWhenOverridden() throws {
+        let tmp = try makeTempDir()
+        let cfg = tmp.appendingPathComponent("cfg.json")
+        let json = """
+        {"logging":{"verbose":true}}
+        """
+        try Data(json.utf8).write(to: cfg)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["config", "show"]
+        process.environment = ProcessInfo.processInfo.environment.merging(["TRANSCRIBE_CONFIG": cfg.path]) { _, new in new }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        process.waitUntilExit()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertTrue(
+            out.contains("logging.verbose true (default false)"),
+            "expected override annotation; stdout: \(out)"
+        )
+    }
+
+    func testConfigShowOmitsComputedCommentsWhenUnsetSentinelsNotShown() throws {
+        let tmp = try makeTempDir()
+        let cfg = tmp.appendingPathComponent("cfg.json")
+        let json = """
+        {"language":"en","output":{"prefix":"meet"},"speakers":{"min":2,"max":2}}
+        """
+        try Data(json.utf8).write(to: cfg)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["config", "show"]
+        process.environment = ProcessInfo.processInfo.environment.merging(["TRANSCRIBE_CONFIG": cfg.path]) { _, new in new }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        process.waitUntilExit()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertFalse(out.contains("# \(ConfigSemanticStrings.languageWhenUnset)"), "stdout: \(out)")
+        XCTAssertFalse(out.contains("# \(ConfigSemanticStrings.outputPrefixWhenUnset)"), "stdout: \(out)")
+        XCTAssertFalse(out.contains("# \(ConfigSemanticStrings.speakersMinWhenUnset)"), "stdout: \(out)")
+        XCTAssertFalse(out.contains("# \(ConfigSemanticStrings.speakersMaxWhenUnset)"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("language en"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("output.prefix meet"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("speakers.min 2"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("speakers.max 2"), "stdout: \(out)")
     }
 
     func testHistoryWithEmptyLedgerHintsAtPath() throws {
@@ -368,7 +472,7 @@ final class CLITests: XCTestCase {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--dry-run", "--no-diarize", file.path]
+        process.arguments = ["--dry-run", "--transcript-only", file.path]
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -388,7 +492,7 @@ final class CLITests: XCTestCase {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--dry-run", "--no-diarize", dir.path]
+        process.arguments = ["--dry-run", "--transcript-only", dir.path]
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -455,9 +559,9 @@ final class CLITests: XCTestCase {
         let file = dir.appendingPathComponent("meeting.m4a")
         try Data("audio".utf8).write(to: file)
 
-        let fileResult = try runCommand(["file", file.path, "--no-diarize"])
+        let fileResult = try runCommand(["file", file.path, "--transcript-only"])
         XCTAssertNotEqual(fileResult.status, 0)
-        XCTAssertTrue(fileResult.stderr.contains("--no-diarize"), "stderr: \(fileResult.stderr)")
+        XCTAssertTrue(fileResult.stderr.contains("--transcript-only"), "stderr: \(fileResult.stderr)")
 
         let dirResult = try runCommand(["dir", dir.path, "--format", "md"])
         XCTAssertNotEqual(dirResult.status, 0)
@@ -477,7 +581,7 @@ final class CLITests: XCTestCase {
     func testRedoFlagAcceptedForNormalInput() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--redo", "--no-diarize", "/nonexistent/path"]
+        process.arguments = ["--redo", "--transcript-only", "/nonexistent/path"]
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 3)
@@ -492,7 +596,7 @@ final class CLITests: XCTestCase {
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
         process.arguments = [
             "--dry-run",
-            "--no-diarize",
+            "--transcript-only",
             "voice-memos",
             "--recordings-dir", dir.path,
         ]
@@ -695,14 +799,14 @@ final class CLITests: XCTestCase {
         let file = try makeTempAudioFile()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
-        process.arguments = ["--max-speakers=-1", file.path]
+        process.arguments = ["--speakers-max=-1", file.path]
         let pipe = Pipe()
         process.standardError = pipe
         try process.run()
         process.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let stderr = String(data: data, encoding: .utf8) ?? ""
-        XCTAssertEqual(process.terminationStatus, 2, "negative --max-speakers should exit 2")
-        XCTAssertTrue(stderr.contains("--max-speakers must be greater than 0"), "stderr should explain the invalid speaker count")
+        XCTAssertEqual(process.terminationStatus, 2, "negative --speakers-max should exit 2")
+        XCTAssertTrue(stderr.contains("--speakers-max must be greater than 0"), "stderr should explain the invalid speaker count")
     }
 }

@@ -203,7 +203,7 @@ func initializeSpeakerKit(
                 return speakerKit
             } catch {
                 throw TranscribeError(
-                    message: "SpeakerKit initialization failed after GPU/Metal fallback: \(error.localizedDescription). Use --no-diarize for transcript-only.",
+                    message: "SpeakerKit initialization failed after GPU/Metal fallback: \(error.localizedDescription). Use --transcript-only for transcript-only output.",
                     exitCode: .modelFailure
                 )
             }
@@ -216,7 +216,7 @@ func initializeSpeakerKit(
             return speakerKit
         } catch {
             throw TranscribeError(
-                message: "SpeakerKit initialization failed: \(error.localizedDescription). Use --no-diarize for transcript-only.",
+                message: "SpeakerKit initialization failed: \(error.localizedDescription). Use --transcript-only for transcript-only output.",
                 exitCode: .modelFailure
             )
         }
@@ -690,10 +690,10 @@ private func runTranscriptionWithDiarization(
         warnings.append("Diarization returned no speakers; segment labels omitted.")
     } else {
         if let min = minSpeakers, speakersDetected < min {
-            warnings.append("Diarization detected \(speakersDetected) speaker(s), fewer than --min-speakers (\(min)).")
+            warnings.append("Diarization detected \(speakersDetected) speaker(s), fewer than --speakers-min (\(min)).")
         }
         if let max = maxSpeakers, speakersDetected > max {
-            warnings.append("Diarization detected \(speakersDetected) speaker(s), more than --max-speakers (\(max)).")
+            warnings.append("Diarization detected \(speakersDetected) speaker(s), more than --speakers-max (\(max)).")
         }
     }
 
@@ -920,10 +920,10 @@ func runSession(
         warnings.append("Diarization returned no speakers; segment labels omitted.")
     } else {
         if let mn = minSpeakers, speakersDetected < mn {
-            warnings.append("Diarization detected \(speakersDetected) speaker(s), fewer than --min-speakers (\(mn)).")
+            warnings.append("Diarization detected \(speakersDetected) speaker(s), fewer than --speakers-min (\(mn)).")
         }
         if let mx = maxSpeakers, speakersDetected > mx {
-            warnings.append("Diarization detected \(speakersDetected) speaker(s), more than --max-speakers (\(mx)).")
+            warnings.append("Diarization detected \(speakersDetected) speaker(s), more than --speakers-max (\(mx)).")
         }
     }
 

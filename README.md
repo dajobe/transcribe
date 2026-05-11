@@ -37,6 +37,7 @@ for development and can be slower. Ensure the install directory is on your
 transcribe [global-options] file <audio-file>
 transcribe [global-options] dir [dir-options] <directory>
 transcribe [global-options] voice-memos [voice-memos-options]
+transcribe config <subcommand>   # user defaults: JSON at ~/.config/transcribe/config.json; see specs/user-config.md
 
 # Convenience aliases:
 transcribe [global-options] <audio-file>
@@ -67,10 +68,10 @@ Recording 2.txt` when split).
 transcribe file meeting.mp3
 
 # Constrain to two speakers, all output formats
-transcribe --language en --min-speakers 2 --max-speakers 2 --format all file meeting.mp3
+transcribe --language en --speakers-min 2 --speakers-max 2 --format all file meeting.mp3
 
-# Transcript only, no diarization, smaller model
-transcribe --no-diarize --model medium file lecture.m4a
+# Transcript only, no speaker labels, smaller model
+transcribe --transcript-only --model medium file lecture.m4a
 
 # Transcript to stdout and JSON to disk
 transcribe --stdout --format txt,json -o ./transcripts file interview.wav
@@ -107,19 +108,18 @@ transcribe \
 ### Directory input
 
 Use `transcribe dir <directory>` for directories of sequential audio clips. The
-root alias `transcribe <directory>` accepts global options only; use
-`transcribe dir` for directory-specific options.
-`transcribe` orders the directory's top-level audio files, splits them into one
-or more sessions at gaps over the threshold, and runs the pipeline once per
-session.
+root alias `transcribe <directory>` accepts global options only; use `transcribe
+dir` for directory-specific options. `transcribe` orders the directory's
+top-level audio files, splits them into one or more sessions at gaps over the
+threshold, and runs the pipeline once per session.
 
 - **Sort order:** by default clips are ordered by their embedded recording
   timestamp (the M4A `creation_time` atom). Files without that metadata fall
   back to file modification time, then to natural-sort filename, so order stays
-  deterministic for mixed directories. Use `--sort name` to force
-  natural-sort filename ordering (handles `Note 1.m4a, …, Note 10.m4a`) or
-  `--sort mtime` to use file modification time only. The previous
-  `--input-sort` spelling is still accepted as an alias.
+  deterministic for mixed directories. Use `--sort name` to force natural-sort
+  filename ordering (handles `Note 1.m4a, …, Note 10.m4a`) or `--sort mtime` to
+  use file modification time only. The previous `--input-sort` spelling is still
+  accepted as an alias.
 - **Session splitting:** if adjacent clips have a recorded-at gap larger than
   `--session-gap` minutes (default `10`), the directory is split into separate
   transcripts — one per detected session. Set `--session-gap 0` to disable
@@ -195,53 +195,55 @@ session basename rules, and verbose-log examples — see
 Global options are accepted before `file`, `dir`, `voice-memos`, and the root
 file/directory alias. Run `transcribe --help` to see these options.
 
-| Option                            | Description                                                                                      |
-|:----------------------------------|:-------------------------------------------------------------------------------------------------|
-| `-m, --model <name>`              | Whisper model (default: `openai_whisper-large-v3_turbo`; ~1.5 GB on first run)                   |
-| `-l, --language <code>`           | Language code (default: auto-detect)                                                             |
-| `-o, --output-dir <path>`         | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                         |
-| `-f, --format <fmt>`              | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `md`, `all` (default: `txt,json`)  |
-| `--stdout`                        | Write transcript text to stdout instead of a file                                                |
-| `--min-speakers <n>`              | Minimum speakers for diarization                                                                 |
-| `--max-speakers <n>`              | Maximum speakers for diarization                                                                 |
-| `--no-diarize`                    | Disable speaker diarization                                                                      |
-| `--speaker-strategy <s>`          | Speaker merge strategy: `subsegment` or `segment` (default: `subsegment`)                        |
-| `--model-dir <path>`              | Model cache directory (default: `~/.cache/transcribe`)                                           |
-| `--overwrite`                     | Replace existing output files                                                                    |
-| `--redo`                          | Reprocess inputs even when processing history says they already completed                         |
-| `--no-processing-state`           | Do not consult or write idempotent processing history                                             |
-| `--mark-imported`                 | Mark planned inputs as already imported without transcribing                                      |
-| `--dry-run`                       | Show what would process or skip without loading models, writing outputs, or updating history      |
-| `--verbose`                       | Print progress and timing to stderr                                                              |
-| `--debug-progress-log`            | Log progress/ETA as plain stderr lines (~1/s) without a TTY (e.g. capture to a file or pipe)     |
-| `--no-timing-stats`               | Do not save timing history or use prior runs for ETA hints on the transcription line             |
-| `--audio-encoder-compute <units>` | Whisper audio encoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine` |
-| `--text-decoder-compute <units>`  | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
-| `--segmenter-compute <units>`     | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
-| `--embedder-compute <units>`      | SpeakerKit embedder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`   |
+| Option                                  | Description                                                                                      |
+|:----------------------------------------|:-------------------------------------------------------------------------------------------------|
+| `-m, --model <name>`                    | Whisper model (default: `openai_whisper-large-v3_turbo`; ~1.5 GB on first run)                   |
+| `-l, --language <code>`                 | Language code; when omitted or `(auto)`, Whisper auto-detects (see `transcribe --help`)            |
+| `-o, --output-dir <path>`               | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                         |
+| `-f, --format <fmt>`                    | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `md`, `all` (default: `txt,json`)  |
+| `--stdout`                              | Write transcript text to stdout instead of a file                                                |
+| `--speakers-min <n>`                    | Minimum speaker count hint for diarization                                                       |
+| `--speakers-max <n>`                    | Maximum speaker count hint for diarization                                                       |
+| `--transcript-only`                     | Skip speaker labels (transcript only)                                                            |
+| `--with-speakers`                       | Add speaker labels for this run (overrides config; opposite of `--transcript-only`)              |
+| `--speaker-merge <s>`                   | How segments are merged: `subsegment` or `segment` (default: `subsegment`)                       |
+| `--model-dir <path>`                    | Model cache directory (default: `~/.cache/transcribe`)                                           |
+| `--overwrite`                           | Replace existing output files                                                                    |
+| `--redo`                                | Reprocess inputs even when processing history says they already completed                        |
+| `--stateless`                           | Do not consult or write idempotent processing history                                            |
+| `--mark-imported`                       | Mark planned inputs as already imported without transcribing                                     |
+| `--dry-run` / `--dryrun`                | Show what would process or skip without loading models, writing outputs, or updating history     |
+| `--verbose`                             | Print progress and timing to stderr                                                              |
+| `--quiet`                               | Reduce stderr logging (overrides config verbose for this run)                                    |
+| `--eta-hints on` or `off`               | Record timing for ETA hints from prior runs (default: on)                                        |
+| `--progress-log auto` / `plain` / `off` | Progress on stderr: TTY spinner, plain throttled lines, or off                                   |
+| `--audio-encoder-compute <units>`       | Whisper audio encoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine` |
+| `--text-decoder-compute <units>`        | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
+| `--segmenter-compute <units>`           | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
+| `--embedder-compute <units>`            | SpeakerKit embedder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`   |
 
 Directory-only options for `transcribe dir`:
 
-| Option                                              | Description                                                                       |
-|:----------------------------------------------------|:----------------------------------------------------------------------------------|
-| `--sort <mode>` / `--input-sort <mode>`             | Order directory input: `recorded` (default), `name`, `mtime`                      |
-| `--filename-time-recovery` / `--no-filename-time-recovery` | Recover leading filename times when embedded dates are missing or untrusted |
-| `--auto-session-basename` / `--no-auto-session-basename` | Derive session output basenames from common filename prefixes                |
+| Option                                  | Description                                                                                 |
+|:----------------------------------------|:--------------------------------------------------------------------------------------------|
+| `--sort <mode>` / `--input-sort <mode>` | Order directory input: `recorded` (default), `name`, `mtime`                                |
+| `--input-time-source <mode>`            | `auto`, `embedded`, `filename`, or `off` — filename time recovery when `auto` or `filename` |
+| `--session-naming <mode>`               | `auto`, `clip`, or `off` — auto prefix–based session basenames when `auto`                  |
 
 Batch session option for `transcribe dir` and `transcribe voice-memos`:
 
-| Option                    | Description                                                                       |
-|:--------------------------|:----------------------------------------------------------------------------------|
-| `--session-gap <min>`     | Split batch input at gaps > N minutes between clips (0 disables; default: 10)     |
+| Option                | Description                                                                   |
+|:----------------------|:------------------------------------------------------------------------------|
+| `--session-gap <min>` | Split batch input at gaps > N minutes between clips (0 disables; default: 10) |
 
 Voice Memos-only options for `transcribe voice-memos`:
 
-| Option                     | Description                                                                           |
-|:---------------------------|:--------------------------------------------------------------------------------------|
-| `--recordings-dir <path>`  | Voice Memos recordings directory (default: Apple’s synced recordings group container) |
+| Option                    | Description                                                                           |
+|:--------------------------|:--------------------------------------------------------------------------------------|
+| `--recordings-dir <path>` | Voice Memos recordings directory (default: Apple’s synced recordings group container) |
 
 When SpeakerKit can accept an exact speaker count hint, `transcribe` passes it
-only when `--min-speakers` and `--max-speakers` are both set to the same value.
+only when `--speakers-min` and `--speakers-max` are both set to the same value.
 Otherwise diarization runs unconstrained and warns if the detected count falls
 outside the requested bounds.
 
@@ -253,7 +255,9 @@ Neural Engine, and CPU rather than forcing every component onto the GPU. Use
 ### Timing statistics
 
 Successful runs can append timing records for ETA hints on the **transcription**
-progress line. Disable with `--no-timing-stats` or `TRANSCRIBE_TIMING_STATS=0`.
+progress line. Disable with `--eta-hints off` or **`TRANSCRIBE_ETA_HINTS=0`**
+(inherited by the process environment). **`TRANSCRIBE_TIMING_STATS=0`** is still
+honored as a legacy alias.
 
 Full schema, paths, and ETA behavior:
 **[specs/timing-history.md](specs/timing-history.md)**.
@@ -268,18 +272,17 @@ settings, requested output files, and completion metadata.
 - **Default behavior:** if the source audio, important settings, and requested
   output files match a previous completed run, and all requested outputs still
   exist, the session is skipped before audio preflight or model loading.
-- **Changed input/settings:** changed audio bytes, model, language,
-  diarization settings, speaker options, formats, or transcribe version cause a
-  new run.
+- **Changed input/settings:** changed audio bytes, model, language, diarization
+  settings, speaker options, formats, or transcribe version cause a new run.
 - **Missing outputs:** if history says a session completed but the requested
   output files are missing, the session is processed again.
 - **Redo:** pass `--redo` to ignore processing history and process matching
   inputs again. Existing output files still require `--overwrite`.
-- **Opt out:** pass `--no-processing-state` to neither consult nor write
-  processing history.
+- **Opt out:** pass `--stateless` to neither consult nor write processing
+  history.
 - **Dry run:** pass `--dry-run` to scan inputs, compute fingerprints, and show
-  what would process or skip without preflighting audio, loading models,
-  writing outputs, or updating processing history.
+  what would process or skip without preflighting audio, loading models, writing
+  outputs, or updating processing history.
 
 The processing history lives next to the timing history under the transcribe
 state directory as `processing_history.jsonl`.
@@ -301,13 +304,13 @@ files in place. There is no download, copy, or conversion step.
   identity prefers `ZUNIQUEID` and falls back to the audio path.
 - **Output names:** Voice Memos use `YYYY-MM-DD HHMM <title>`, with unsafe
   filename characters stripped and numeric suffixes added for collisions.
-- **Output metadata:** JSON and Markdown include `source: voice_memos`,
-  recorded time, recording title, Voice Memos unique ID when present, and the
-  source path.
+- **Output metadata:** JSON and Markdown include `source: voice_memos`, recorded
+  time, recording title, Voice Memos unique ID when present, and the source
+  path.
 - **Session grouping:** Voice Memos use the same `--session-gap` default as
   directory input. Adjacent memos recorded within the gap are processed as one
-  transcript session; gaps larger than the threshold start a new transcript.
-  Use `--session-gap 0` to process all synced memos as one session.
+  transcript session; gaps larger than the threshold start a new transcript. Use
+  `--session-gap 0` to process all synced memos as one session.
 - **Baseline import:** `transcribe --mark-imported voice-memos` records the
   planned Voice Memo sessions as imported without writing transcript outputs.
   The same global `--mark-imported` option works for `file` and `dir` inputs.
@@ -357,20 +360,21 @@ script (path to the checked-in script or a copy).
 Full behavior, stable-file wait, and exit codes:
 **[specs/folder-action-markdown.md](specs/folder-action-markdown.md)**.
 
-| Variable                       | Meaning                                                                                         |
-|:-------------------------------|:------------------------------------------------------------------------------------------------|
-| `TRANSCRIBE_BIN`               | Path to `transcribe` (default: `transcribe` on `PATH`)                                          |
-| `TRANSCRIBE_OUTPUT_DIR`        | If set, `-o` for all runs; if unset, outputs go next to each input file                         |
-| `TRANSCRIBE_FORMAT`            | `--format` value (default: `md`)                                                                |
-| `TRANSCRIBE_EXTRA_ARGS`        | Extra global CLI flags inserted before `file` (space-separated)                                  |
-| `TRANSCRIBE_STABLE_SECS`       | Seconds of unchanged file size before running (default: `2`)                                    |
-| `TRANSCRIBE_MAX_STABLE_WAIT`   | Max seconds to wait for a stable file (default: `3600`)                                         |
-| `TRANSCRIBE_LOCK_FILE`         | If set and `flock` exists, serialize concurrent runs                                            |
-| `TRANSCRIBE_SKIP_IF_MD_EXISTS` | If `1`, skip when `basename.md` already exists in the output dir                                |
-| `TRANSCRIBE_LOG`               | Structured events (`event=start` / `event=end`, etc.); see the spec                             |
-| `TRANSCRIBE_STDERR_LOG`        | Full `transcribe` stderr on failure (default: `transcribe.stderr.log` next to `TRANSCRIBE_LOG`) |
-| `TRANSCRIBE_SCRIPT_DIR`        | Directory containing `folder-action-transcribe.sh` (if the wrapper cannot resolve it)           |
-| `TRANSCRIBE_SMOKE_LOG`         | If set, append debug lines (argc, `script_dir`, helper present) to this path                    |
+| Variable                       | Meaning                                                                                                                                                                                 |
+|:-------------------------------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `TRANSCRIBE_BIN`               | Path to `transcribe` (default: `transcribe` on `PATH`)                                                                                                                                  |
+| `TRANSCRIBE_OUTPUT_DIR`        | If set, `-o` for all runs; if unset, outputs go next to each input file                                                                                                                 |
+| `TRANSCRIBE_FORMAT`            | `--format` value (default: `md`)                                                                                                                                                        |
+| `TRANSCRIBE_EXTRA_ARGS`        | Extra global CLI flags inserted before `file` (space-separated). Use names from `transcribe --help` (e.g. `--transcript-only`, `--language en`; not removed flags like `--no-diarize`). |
+| `TRANSCRIBE_ETA_HINTS`         | If `0`, disables timing-store / ETA-from-history for the child `transcribe` (same as `--eta-hints off`). Legacy: `TRANSCRIBE_TIMING_STATS=0` still works.                               |
+| `TRANSCRIBE_STABLE_SECS`       | Seconds of unchanged file size before running (default: `2`)                                                                                                                            |
+| `TRANSCRIBE_MAX_STABLE_WAIT`   | Max seconds to wait for a stable file (default: `3600`)                                                                                                                                 |
+| `TRANSCRIBE_LOCK_FILE`         | If set and `flock` exists, serialize concurrent runs                                                                                                                                    |
+| `TRANSCRIBE_SKIP_IF_MD_EXISTS` | If `1`, skip when `basename.md` already exists in the output dir                                                                                                                        |
+| `TRANSCRIBE_LOG`               | Structured events (`event=start` / `event=end`, etc.); see the spec                                                                                                                     |
+| `TRANSCRIBE_STDERR_LOG`        | Full `transcribe` stderr on failure (default: `transcribe.stderr.log` next to `TRANSCRIBE_LOG`)                                                                                         |
+| `TRANSCRIBE_SCRIPT_DIR`        | Directory containing `folder-action-transcribe.sh` (if the wrapper cannot resolve it)                                                                                                   |
+| `TRANSCRIBE_SMOKE_LOG`         | If set, append debug lines (argc, `script_dir`, helper present) to this path                                                                                                            |
 
 **Troubleshooting**
 

@@ -42,7 +42,7 @@ without replacing the spec text below.
   `diarization_enabled`), then median of `total_ms / 1000 / audio_duration_s` →
   **wall seconds per second of audio** (not microseconds; stored times are
   **milliseconds**).
-- **Opt-out:** `--no-timing-stats` or `TRANSCRIBE_TIMING_STATS=0` disables load,
+- **Opt-out:** `--eta-hints off` or `TRANSCRIBE_ETA_HINTS=0` disables load,
   ETA-from-history, and append. Append failures are non-fatal (`try?`).
 - **User docs:** [README.md](../README.md) “Timing statistics” links here.
 - **Tests:**
@@ -116,10 +116,10 @@ callbacks and/or **audio duration** + historical wall-time ratios for ETA.
   worth **flagging** in the record so averages can exclude outliers or use a
   separate bucket)
 - `speaker_init_ms` — `initializeSpeakerKit` when diarization runs (0 or omit
-  when `--no-diarize` / short-audio fallback)
+  when `--transcript-only` / short-audio fallback)
 - `parallel_ms` — for diarization path, time for the `async let` block where
   transcribe and diarize run together (dominant cost)
-- `transcribe_only_ms` — for `--no-diarize` path, time inside
+- `transcribe_only_ms` — for `--transcript-only` path, time inside
   `whisperKit.transcribe` only (after init)
 - `merge_ms` — speaker merge + building segments (small but measurable)
 - `write_outputs_ms` — `writeOutputs` in `main`
@@ -208,8 +208,9 @@ compatibility.
 - **Default:** Record stats on successful completion (and optionally on failure
   with `error_stage` for debugging—can be phase 2). *Shipped:* successful path
   only; no failure records yet.
-- **`--no-timing-stats`** (or env `TRANSCRIBE_TIMING_STATS=0`): disable write
-  and disable ETA-from-history for users who do not want persistence.
+- **`--eta-hints off`** (or env `TRANSCRIBE_ETA_HINTS=0`; legacy
+  `TRANSCRIBE_TIMING_STATS=0`): disable write and disable ETA-from-history for
+  users who do not want persistence.
 - Document path in [README.md](../README.md) under “Timing statistics” (links to
   this file).
 

@@ -24,3 +24,11 @@
 * The model name default lives in `Transcribe.defaultModel`; reference that
   constant rather than the literal string when documenting or testing the
   default.
+
+## Environment (CLI)
+
+* **`TRANSCRIBE_ETA_HINTS=0`** disables writing timing history and
+  ETA-from-history (same effect as `--eta-hints off`).
+  **`TRANSCRIBE_TIMING_STATS=0`** is still honored as a legacy alias
+  (`ResolvedSharedOptions.timingStatsEnabled` in
+  [`ConfigMerge.swift`](Sources/transcribe/ConfigMerge.swift)).

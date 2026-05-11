@@ -352,7 +352,7 @@ func renderMarkdown(
     }
     metaLines.append("- **Diarization:** \(output.diarizationEnabled ? "on" : "off")")
     if output.diarizationEnabled {
-        metaLines.append("- **Speaker strategy:** `\(output.speakerStrategy)`")
+        metaLines.append("- **Speaker merge:** `\(output.speakerStrategy)`")
     }
     if let n = output.speakersDetected {
         metaLines.append("- **Speakers detected:** \(n)")

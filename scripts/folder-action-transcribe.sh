@@ -2,6 +2,10 @@
 # Run transcribe when a file is added to a Folder Action folder (macOS Automator).
 # See specs/folder-action-markdown.md for environment variables and behavior.
 # Requires transcribe >= 2.0 (uses the `file <path>` source command form).
+#
+# Optional env passed through to the child (export in Automator or a wrapper if needed):
+#   TRANSCRIBE_ETA_HINTS=0  — disable timing-store + ETA-from-history (same as --eta-hints off).
+#   Legacy alias: TRANSCRIBE_TIMING_STATS=0 (still honored by the binary).
 set -euo pipefail
 
 # ISO 8601 UTC (second precision), e.g. 2026-04-12T19:35:55Z
@@ -164,6 +168,8 @@ main() {
 
   local -a cmd
   cmd=("$bin" -o "$outdir" --format "$fmt")
+  # TRANSCRIBE_EXTRA_ARGS: global flags only; must match current `transcribe --help`
+  # (e.g. --transcript-only, --eta-hints off — not legacy spellings such as --no-diarize).
   if [[ -n "${TRANSCRIBE_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
     cmd+=(${TRANSCRIBE_EXTRA_ARGS})

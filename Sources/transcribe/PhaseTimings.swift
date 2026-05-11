@@ -7,7 +7,7 @@ struct PhaseTimings: Equatable {
     var speakerInitMs: Int64 = 0
     /// Concurrent transcribe + diarization wall time (diarization path).
     var parallelMs: Int64 = 0
-    /// `whisperKit.transcribe` only (`--no-diarize` or short-audio path).
+    /// `whisperKit.transcribe` only (`--transcript-only` or short-audio path).
     var transcribeOnlyMs: Int64 = 0
     var mergeMs: Int64 = 0
     var decodingWindows: Int? = nil

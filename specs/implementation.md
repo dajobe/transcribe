@@ -81,8 +81,8 @@ no real audio or model work yet.
 - Implement CLI parsing for the [CLI Contract](specs/transcribe.md): root/global
   options, `file`, `dir`, and `voice-memos` source commands, plus the simple
   root file/directory alias. Enforce semantics: `--stdout` only with txt;
-  `--min-speakers` / `--max-speakers` invalid with `--no-diarize`; `min <= max`
-  when both speaker options set; invalid combinations exit with code `2`.
+  `--speakers-min` / `--speakers-max` invalid with `--transcript-only`; `min <=
+  max` when both speaker options set; invalid combinations exit with code `2`.
 - Use a single, consistent exit-code scheme: `0` success, `1` runtime failure,
   `2` invalid usage, `3` input file, `4` model, `5` output write. Ensure all
   user-facing errors and logs go to stderr.
@@ -91,8 +91,9 @@ no real audio or model work yet.
 
 - CLI parsing: valid invocations succeed (e.g. exit 0 with a stub run or early
   "not implemented" exit 1).
-- Invalid option combinations (e.g. `--stdout` without txt, `--min-speakers`
-  with `--no-diarize`, `--min-speakers 3 --max-speakers 2`) exit with code `2`.
+- Invalid option combinations (e.g. `--stdout` without txt, `--speakers-min`
+  with `--transcript-only`, `--speakers-min 3 --speakers-max 2`) exit with code
+  `2`.
 - `--help` and `--version` produce expected output to stdout; nothing else to
   stdout unless `--stdout` is used later.
 
@@ -108,12 +109,12 @@ diarization); produce an in-memory transcript structure.
   missing, unreadable, or unsupported/undecodable; list supported formats in
   error when known.
 - Initialize WhisperKit with `--model` and `--model-dir`; implement
-  transcription-only path when `--no-diarize` is set. Output: internal
+  transcription-only path when `--transcript-only` is set. Output: internal
   transcript representation (segments with start/end/text, optional words)
   suitable for later JSON and other formats.
 - Handle "no speech" and very short audio: produce valid empty segment list; no
   crash. If spike shows short audio must skip diarization, apply the same rule
-  here for the no-diarize path.
+  here for the transcript-only path.
 
 **Testing checkpoint:**
 
@@ -157,8 +158,8 @@ matching the spec.
 - JSON schema stability: test asserts structure (metadata, segments array,
   segment fields, optional words).
 - Golden-file tests: small fixture with known transcript; compare generated txt,
-  json, srt, vtt to golden files (or structured assertions). Include no-diarize
-  case (no speaker labels in outputs).
+  json, srt, vtt to golden files (or structured assertions). Include
+  transcript-only case (no speaker labels in outputs).
 - `--stdout`: transcript on stdout, no `.txt` file; stderr unchanged.
 
 ---
@@ -169,7 +170,7 @@ matching the spec.
 and merge speaker labels into the transcript.
 
 - Initialize SpeakerKit (with cache/model-dir from spike). Run diarization with
-  a fixed speaker-count hint only when `--min-speakers` and `--max-speakers` are
+  a fixed speaker-count hint only when `--speakers-min` and `--speakers-max` are
   both provided and equal; otherwise run unconstrained and validate the detected
   count after the fact. Implement or use library "merge" (from spike): assign
   speaker labels to segments (subsegment vs segment strategy).
@@ -229,7 +230,7 @@ README/build/install instructions.
 
 - Add any missing tests from the [Test Plan](specs/transcribe.md): CLI parsing
   and invalid combinations, output naming and overwrite, JSON stability,
-  no-diarize mode, diarization fallbacks, empty/no-speech, short-audio
+  transcript-only mode, diarization fallbacks, empty/no-speech, short-audio
   diarization skip, golden files for all four formats.
 - Use short deterministic fixtures in repo; document how to run tests and how to
   do a manual benchmark with a larger file (not in git).
@@ -241,7 +242,7 @@ README/build/install instructions.
 
 - Full test suite passes.
 - Manual run: `transcribe <audio>` produces expected txt + json (and optionally
-  srt/vtt with `--format all`) with or without `--no-diarize`.
+  srt/vtt with `--format all`) with or without `--transcript-only`.
 
 ---
 
@@ -251,8 +252,8 @@ README/build/install instructions.
   audio (e.g. a few seconds) for deterministic tests; optionally a no-speech and
   a "two speaker" clip. Keep large files out of git.
 - **Golden files:** `Tests/fixtures/golden/` or next to fixtures: e.g.
-  `expected.txt`, `expected.json`, etc., for one or two input clips (no-diarize
-  and diarize variants).
+  `expected.txt`, `expected.json`, etc., for one or two input clips
+  (transcript-only and diarize variants).
 - **Unit tests:** CLI parsing, output naming, overwrite, JSON structure,
   renderers (txt/srt/vtt) from in-memory model. Use mocks or very short fixtures
   for WhisperKit/SpeakerKit if needed to avoid model download in CI.

@@ -121,7 +121,7 @@ enum InputResolver {
                 effectiveSort = .name
             }
         } else if shouldTryRecovery && !filenameTimeRecovery {
-            logger?.log("filename time recovery: disabled by --no-filename-time-recovery")
+            logger?.log("filename time recovery: disabled (input-time-source is embedded or off)")
         }
 
         // If we couldn't trust the recorded dates for ordering, the same dates

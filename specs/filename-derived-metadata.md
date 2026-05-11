@@ -69,12 +69,13 @@ A parsed prefix is rejected (treated as no prefix) if any of the following hold:
 
 1. The requested sort is `recorded`.
 2. Either (a) the 1.5.0 trust check on embedded `creation_time` returned a
-   downgrade, OR (b) no clip in the directory has any embedded recorded-at
-   value at all (a directory of files where the export pipeline didn't
-   write `creation_time` reliably). Both cases mean the embedded data is
-   not usable for ordering.
+   downgrade, OR (b) no clip in the directory has any embedded recorded-at value
+   at all (a directory of files where the export pipeline didn't write
+   `creation_time` reliably). Both cases mean the embedded data is not usable
+   for ordering.
 3. Every clip in the directory has a parseable filename time prefix.
-4. `--no-filename-time-recovery` was not supplied.
+4. Effective `--input-time-source` is **`auto`** or **`filename`** (not
+   **`embedded`** or **`off`**); default is **`auto`**.
 
 When recovery applies, each clip's `recordedAt` is set to the filename-derived
 value and the synthesized clip set is fed back through the trust check. On a
@@ -148,8 +149,8 @@ common-prefix derivation and the directory-derived fallback. With multiple
 sessions and an explicit prefix the existing `"<prefix> - Recording N"` pattern
 applies unchanged.
 
-A `--no-auto-session-basename` opt-out is provided for users who want the
-previous `"<dir> - Recording N"` behaviour.
+Use **`--session-naming off`** or **`clip`** to disable common-prefix session
+basenames and keep the previous `"<dir> - Recording N"` style behaviour.
 
 ### Examples
 
@@ -261,14 +262,20 @@ handle the rest.
 
 ## CLI surface
 
-Two opt-out flags:
+Directory source (`transcribe dir …`):
 
-| Option                        | Effect                                                                                                                              |
-|:------------------------------|:------------------------------------------------------------------------------------------------------------------------------------|
-| `--no-filename-time-recovery` | Disable filename time-prefix recovery; fall back to the 1.5.0 behaviour (sort=name, splitting disabled) when the trust check fails. |
-| `--no-auto-session-basename`  | Disable common-prefix basenames; always use `<dir> - Recording N` (or `Recording N`).                                               |
+| Option                         | Effect                                                                                                                                |
+|:-------------------------------|:--------------------------------------------------------------------------------------------------------------------------------------|
+| `--input-time-source auto`     | Default: allow filename time-prefix recovery when embedded metadata is missing or untrusted (same as **`filename`**).                 |
+| `--input-time-source embedded` | Do not recover times from filenames; fall back to 1.5.0-style behaviour when the trust check fails (`sort=name`, splitting disabled). |
+| `--input-time-source filename` | Same recovery policy as **`auto`**.                                                                                                   |
+| `--input-time-source off`      | Same as **`embedded`** for recovery (disabled).                                                                                       |
+| `--session-naming auto`        | Default: derive session basenames from common filename prefixes when rules match.                                                     |
+| `--session-naming clip`        | Disable that derivation (directory-style basenames).                                                                                  |
+| `--session-naming off`         | Same as **`clip`** in current behaviour.                                                                                              |
 
-Both default to off (i.e. recovery and auto-basenames are enabled).
+Config file equivalents: `dir.inputTimeSource`, `dir.sessionNaming` (see
+[user-config.md](user-config.md)).
 
 ## Verbose logging
 
@@ -289,7 +296,8 @@ filename time recovery: 3/4 clips parsed; recovery declines (mixed)
   unparsed: random_recording.m4a
 ```
 
-When the auto-session-basename derives a name, `--verbose` notes the choice:
+When common-prefix session basename derivation applies, `--verbose` notes the
+choice:
 
 ```text
 session 1/2 basename: derived 'morning keynote' from 3 clips' common prefix
@@ -315,18 +323,19 @@ with the existing 1.5.0 fallback.
 
 ## Code touchpoints
 
-| File                                             | Role                                                                                                                                               |
-|:-------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Sources/transcribe/InputResolver.swift`         | New `parseFilenameRecordedAt(filename:fileMtime:)`; recovery hook in `resolve(...)`; updated `sessionBasenames(...)` for common-prefix derivation. |
-| `Sources/transcribe/main.swift`                  | `--no-filename-time-recovery` and `--no-auto-session-basename` flags; plumbed through to `InputResolver`.                                          |
-| `Tests/transcribeTests/InputResolverTests.swift` | Filename-parser unit tests; recovery integration tests; common-prefix basename tests.                                                              |
-| `Tests/transcribeTests/CLITests.swift`           | Argument-parsing tests for both new flags.                                                                                                         |
+| File                                                             | Role                                                                                                                                               |
+|:-----------------------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Sources/transcribe/InputResolver.swift`                         | New `parseFilenameRecordedAt(filename:fileMtime:)`; recovery hook in `resolve(...)`; updated `sessionBasenames(...)` for common-prefix derivation. |
+| `Sources/transcribe/CLICommands.swift` (`DirectoryInputOptions`) | `--input-time-source` and `--session-naming`; plumbed through merge to `InputResolver`.                                                            |
+| `Tests/transcribeTests/InputResolverTests.swift`                 | Filename-parser unit tests; recovery integration tests; common-prefix basename tests.                                                              |
+| `Tests/transcribeTests/CLITests.swift`                           | Argument-parsing tests for both new flags.                                                                                                         |
 
 ## Versioning
 
-| Version | Change                                                                                                                                                                                                                                                                             |
-|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1.6.0   | Filename time-prefix recovery layered on top of the 1.5.0 trust check; common-prefix session basenames replace `<dir> - Recording N` when a session's clips share a meaningful prefix. Both behaviours opt-out via `--no-filename-time-recovery` and `--no-auto-session-basename`. |
+| Version | Change                                                                                                                                                                                 |
+|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1.6.0   | Filename time-prefix recovery layered on top of the 1.5.0 trust check; common-prefix session basenames replace `<dir> - Recording N` when a session's clips share a meaningful prefix. |
+| (later) | CLI flags renamed to `--input-time-source` and `--session-naming`; config uses `dir.inputTimeSource` / `dir.sessionNaming`.                                                            |
 
 ## Risks / notes
 

@@ -99,22 +99,31 @@ GLOBAL OPTIONS:
   -f, --format <fmt>        Output formats, comma-separated (default: txt,json)
                             Supported: txt, json, srt, vtt, md, all
   --stdout                  Write the primary transcript to stdout instead of a text file
-  --min-speakers <n>        Minimum number of speakers for diarization
-  --max-speakers <n>        Maximum number of speakers for diarization
-  --no-diarize              Disable diarization and produce transcript-only output
-  --speaker-strategy <s>    Speaker merge strategy: subsegment or segment
+  --speakers-min <n>        Minimum speaker count hint for diarization
+  --speakers-max <n>        Maximum speaker count hint for diarization
+  --transcript-only         Skip speaker labels (transcript only)
+  --with-speakers           Add speaker labels for this run (overrides config)
+  --speaker-merge <s>       Speaker segment merge: subsegment or segment
                             Default: subsegment
   --model-dir <path>        Directory used for downloaded model caches
                             Default: ~/.cache/transcribe
   --overwrite               Replace existing output files
+  --redo                    Reprocess even when processing history says completed
+  --stateless               Do not read or write processing history
   --mark-imported           Mark planned inputs as imported without transcribing
+  --dry-run, --dryrun       Show planned work without loading models or writing outputs
   --verbose                 Print progress, timing, and cache details to stderr
+  --quiet                   Reduce stderr logging for this run
+  --eta-hints on|off        Record timing for ETA hints from prior runs (default: on)
+  --progress-log auto|plain|off   Progress rendering on stderr (default: auto)
   --version                 Print version and exit
   -h, --help                Show help
 
 DIR OPTIONS:
   --sort <mode>             Directory input order: recorded, name, mtime
   --input-sort <mode>       Alias for --sort
+  --input-time-source <mode>   auto, embedded, filename, or off (filename time recovery)
+  --session-naming <mode>      auto, clip, or off (common-prefix session basenames)
 
 VOICE MEMOS OPTIONS:
   --recordings-dir <path>   Voice Memos recordings directory
@@ -122,6 +131,9 @@ VOICE MEMOS OPTIONS:
 BATCH OPTIONS:
   --session-gap <minutes>   Split dir or Voice Memos input into sessions
 ```
+
+User defaults and `transcribe config` (JSON on disk, CLI for read/write) are
+specified in [user-config.md](user-config.md).
 
 ### Supported Input Formats
 
@@ -143,16 +155,16 @@ formats in `--help` output and error messages.
   `all`.
 - `--stdout` writes transcript text to stdout and suppresses the `.txt` file.
 - Logs and diagnostics must always go to stderr.
-- `--min-speakers` and `--max-speakers` are only valid when diarization is
+- `--speakers-min` and `--speakers-max` are only valid when speaker labels are
   enabled.
-- If both `--min-speakers` and `--max-speakers` are provided, `min <= max` is
+- If both `--speakers-min` and `--speakers-max` are provided, `min <= max` is
   required.
-- If both `--min-speakers` and `--max-speakers` are provided and equal, the tool
+- If both `--speakers-min` and `--speakers-max` are provided and equal, the tool
   passes a fixed speaker-count hint to SpeakerKit.
 - If only one bound is provided, or if `min < max`, the tool runs diarization
   without a fixed count hint and warns when the detected speaker count falls
   outside the requested range.
-- If `--max-speakers` is omitted, no upper bound is applied.
+- If `--speakers-max` is omitted, no upper bound is applied.
 - If output files already exist and `--overwrite` is not set, the command must
   fail before starting expensive work.
 
@@ -174,10 +186,10 @@ The tool should use stable process exit codes:
 transcribe meeting.mp3
 
 # Constrain diarization to two speakers and write all output formats
-transcribe --language en --min-speakers 2 --max-speakers 2 --format all file meeting.mp3
+transcribe --language en --speakers-min 2 --speakers-max 2 --format all file meeting.mp3
 
 # Transcript only, smaller model
-transcribe --no-diarize --model medium file lecture.m4a
+transcribe --transcript-only --model medium file lecture.m4a
 
 # Emit human-readable transcript to stdout and JSON to disk
 transcribe --stdout --format txt,json -o ./transcripts file interview.wav
@@ -304,7 +316,8 @@ by talking about the infrastructure migration timeline.
 
 ### Default Behavior
 
-- The tool attempts diarization unless `--no-diarize` is set.
+- The tool attempts speaker labels unless `--transcript-only` is set (or config
+  disables `speakers.enabled`).
 - The default output formats are `txt,json`.
 - The default speaker merge strategy is `subsegment`.
 - The default model is `Transcribe.defaultModel`.
@@ -318,8 +331,8 @@ still be delivered.
 |:----------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------|
 | Audio too short for diarization                                                               | Warn to stderr, skip diarization, continue with transcription-only output     |
 | Diarization returns no speakers                                                               | Continue with transcript-only output, set `speaker` to `null`, record warning |
-| Diarization returns fewer than `--min-speakers`                                               | Continue with detected count, warn to stderr, record warning                  |
-| Diarization returns more than `--max-speakers` when no fixed speaker-count hint was available | Continue with detected count, warn to stderr, record warning                  |
+| Diarization returns fewer than `--speakers-min`                                               | Continue with detected count, warn to stderr, record warning                  |
+| Diarization returns more than `--speakers-max` when no fixed speaker-count hint was available | Continue with detected count, warn to stderr, record warning                  |
 | No speech detected                                                                            | Produce valid empty output files and warn to stderr                           |
 | Requested diarization but SpeakerKit unavailable after init failure                           | Fail with exit code `4`                                                       |
 

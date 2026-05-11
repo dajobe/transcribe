@@ -52,14 +52,23 @@ struct VoiceMemosSourceArguments: ParsableCommand {
         discussion: "Run `transcribe --help` to see global model, output, diarization, idempotency, timing, and compute options."
     )
 
-    @Option(name: .long, help: "Voice Memos recordings directory containing CloudRecordings.db.")
-    var recordingsDir: String = VoiceMemosImport.defaultRecordingsDirectory
+    @Option(
+        name: .long,
+        help: """
+            Voice Memos recordings directory containing CloudRecordings.db \
+            (default: \(TranscriptionDefaults.voiceMemosRecordingsDir)).
+            """
+    )
+    var recordingsDir: String?
 
     @Option(
         name: .long,
-        help: "Split Voice Memos into separate transcripts at gaps larger than N minutes between recordings (0 disables; default: 10)"
+        help: """
+            Split Voice Memos into separate transcripts at gaps larger than N minutes between recordings \
+            (0 disables; default: \(TranscriptionDefaults.voiceMemosSessionGapMinutes)).
+            """
     )
-    var sessionGap: Int = 10
+    var sessionGap: Int?
 }
 
 struct SourceCommandDispatcher {
@@ -85,6 +94,8 @@ struct SourceCommandDispatcher {
         switch source {
         case "help":
             try printSourceHelp(args)
+        case "config":
+            try runConfig(args)
         case "file":
             try await runFile(args)
         case "dir":
@@ -116,9 +127,11 @@ struct SourceCommandDispatcher {
         }
         let source = try parse(FileSourceArguments.self, args)
         try SourcePlanner.validateFilePath(source.audioFile)
+        let userFile = try ConfigMerge.loadUserFile()
+        let merged = try ConfigMerge.mergeShared(cli: options, file: userFile)
         try await PipelineRunner(
             request: .file(path: source.audioFile),
-            options: options
+            options: merged
         ).run()
     }
 
@@ -129,9 +142,12 @@ struct SourceCommandDispatcher {
         }
         let source = try parse(DirSourceArguments.self, args)
         try SourcePlanner.validateDirectoryPath(source.directory)
+        let userFile = try ConfigMerge.loadUserFile()
+        let mergedShared = try ConfigMerge.mergeShared(cli: options, file: userFile)
+        let mergedDir = try ConfigMerge.mergeDirectory(cli: source.options, file: userFile)
         try await PipelineRunner(
-            request: .directory(path: source.directory, options: source.options),
-            options: options
+            request: .directory(path: source.directory, options: mergedDir),
+            options: mergedShared
         ).run()
     }
 
@@ -141,9 +157,12 @@ struct SourceCommandDispatcher {
             return
         }
         let source = try parse(VoiceMemosSourceArguments.self, args)
+        let userFile = try ConfigMerge.loadUserFile()
+        let mergedShared = try ConfigMerge.mergeShared(cli: options, file: userFile)
+        let mergedVM = ConfigMerge.mergeVoiceMemos(cli: source, file: userFile)
         try await PipelineRunner(
-            request: .voiceMemos(recordingsDir: source.recordingsDir, sessionGap: source.sessionGap),
-            options: options
+            request: .voiceMemos(recordingsDir: mergedVM.recordingsDir, sessionGap: mergedVM.sessionGap),
+            options: mergedShared
         ).run()
     }
 
@@ -156,6 +175,10 @@ struct SourceCommandDispatcher {
         try HistoryCommand.run(count: parsed.count)
     }
 
+    private func runConfig(_ args: [String]) throws {
+        try ConfigCommand.run(globalArgs: options, argv: args)
+    }
+
     private func runRootAlias(path: String, remaining: [String]) async throws {
         guard remaining.isEmpty else {
             throw TranscribeError(
@@ -165,22 +188,25 @@ struct SourceCommandDispatcher {
         }
 
         let mode = try SourcePlanner.modeForAliasPath(path)
+        let userFile = try ConfigMerge.loadUserFile()
+        let mergedShared = try ConfigMerge.mergeShared(cli: options, file: userFile)
         let request: PipelineRequest
         switch mode {
         case .file:
             request = .file(path: path)
         case .directory:
-            request = .directory(path: path, options: try DirectoryInputOptions.parse([]))
+            let mergedDir = try ConfigMerge.mergeDirectory(cli: try DirectoryInputOptions.parse([]), file: userFile)
+            request = .directory(path: path, options: mergedDir)
         case .voiceMemos:
             preconditionFailure("Root alias cannot resolve to Voice Memos")
         }
-        try await PipelineRunner(request: request, options: options).run()
+        try await PipelineRunner(request: request, options: mergedShared).run()
     }
 
     private func printSourceHelp(_ args: [String]) throws {
         guard args.count == 1 else {
             throw TranscribeError(
-                message: "Use `transcribe file --help`, `transcribe dir --help`, `transcribe voice-memos --help`, or `transcribe history --help`.",
+                message: "Use `transcribe file --help`, `transcribe dir --help`, `transcribe voice-memos --help`, `transcribe history --help`, or `transcribe config --help`.",
                 exitCode: .invalidUsage
             )
         }
@@ -193,6 +219,8 @@ struct SourceCommandDispatcher {
             printHelp(VoiceMemosSourceArguments.helpMessage())
         case "history":
             printHelp(HistoryArguments.helpMessage())
+        case "config":
+            printHelp(ConfigCommand.helpText())
         default:
             throw TranscribeError(message: "Unknown source command '\(args[0])'.", exitCode: .invalidUsage)
         }
@@ -230,6 +258,7 @@ struct SourceCommandDispatcher {
 
         Other commands:
           history [--count <n>]         Show recent transcription/import history.
+          config <subcommand>           View or edit JSON-backed user defaults (see `transcribe config --help`).
 
         Examples:
           transcribe file meeting.m4a
@@ -247,43 +276,72 @@ struct SharedTranscriptionOptions: ParsableArguments {
     @Option(
         name: [.short, .long],
         help: ArgumentHelp(
-            "Whisper model to use (default: \(Transcribe.defaultModel); first run downloads ~1.5 GB to the model cache directory)"
+            "Whisper model to use (default: \(TranscriptionDefaults.defaultModel); first run downloads ~1.5 GB to the model cache directory)"
         )
     )
     var model: String?
 
-    @Option(name: [.short, .long], help: "Language code such as \"en\"; default is auto-detect")
+    @Option(
+        name: [.short, .long],
+        help: ArgumentHelp(
+            "Language code such as \"en\". \(ConfigSemanticStrings.languageWhenUnset)"
+        )
+    )
     var language: String?
 
     @Option(
         name: [.short, .long],
-        help: "Directory for output files. ~ expands to your home directory (not /tmp)."
+        help: "Directory for output files (default: \(TranscriptionDefaults.outputDir)). ~ expands to your home directory (not /tmp)."
     )
-    var outputDir: String = "."
+    var outputDir: String?
 
-    @Option(name: .long, help: "Output file prefix (default: input filename without extension)")
+    @Option(
+        name: .long,
+        help: ArgumentHelp(
+            "Output file basename prefix. \(ConfigSemanticStrings.outputPrefixWhenUnset)"
+        )
+    )
     var outputPrefix: String?
 
-    @Option(name: [.short, .long], help: "Output formats, comma-separated: txt, json, srt, vtt, md, all")
-    var format: String = "txt,json"
+    @Option(
+        name: [.short, .long],
+        help: "Output formats, comma-separated (default: \(TranscriptionDefaults.format)): txt, json, srt, vtt, md, all"
+    )
+    var format: String?
 
     @Flag(help: "Write the primary transcript to stdout instead of a text file")
     var stdout: Bool = false
 
-    @Option(name: .long, help: "Minimum number of speakers for diarization")
-    var minSpeakers: Int?
+    @Option(
+        name: .long,
+        help: ArgumentHelp(
+            "Minimum speaker count hint for diarization. \(ConfigSemanticStrings.speakersMinWhenUnset)"
+        )
+    )
+    var speakersMin: Int?
 
-    @Option(name: .long, help: "Maximum number of speakers for diarization")
-    var maxSpeakers: Int?
+    @Option(
+        name: .long,
+        help: ArgumentHelp(
+            "Maximum speaker count hint for diarization. \(ConfigSemanticStrings.speakersMaxWhenUnset)"
+        )
+    )
+    var speakersMax: Int?
 
-    @Flag(name: .long, help: "Disable diarization and produce transcript-only output")
-    var noDiarize: Bool = false
+    @Flag(name: .long, help: "Transcript only: skip speaker labels")
+    var transcriptOnly: Bool = false
 
-    @Option(name: .long, help: "Speaker merge strategy: subsegment or segment")
-    var speakerStrategy: String = "subsegment"
+    @Flag(name: .long, help: "Add speaker labels for this run (overrides config; opposite of --transcript-only)")
+    var withSpeakers: Bool = false
 
-    @Option(name: .long, help: "Directory used for downloaded model caches")
-    var modelDir: String = "~/.cache/transcribe"
+    @Option(name: .long, help: "How speaker segments are merged: subsegment or segment (default: \(TranscriptionDefaults.speakerMerge))")
+    var speakerMerge: String?
+
+    @Option(
+        name: .long,
+        help: "Directory used for downloaded model caches (default: \(TranscriptionDefaults.modelDir))"
+    )
+    var modelDir: String?
 
     @Flag(help: "Replace existing output files")
     var overwrite: Bool = false
@@ -291,8 +349,8 @@ struct SharedTranscriptionOptions: ParsableArguments {
     @Flag(name: .long, help: "Reprocess inputs even when processing history says they were already completed")
     var redo: Bool = false
 
-    @Flag(name: .long, help: "Do not use or write idempotent processing history")
-    var noProcessingState: Bool = false
+    @Flag(name: .long, help: "Do not read or write processing history (fully non-idempotent)")
+    var stateless: Bool = false
 
     @Flag(
         name: .long,
@@ -301,7 +359,7 @@ struct SharedTranscriptionOptions: ParsableArguments {
     var markImported: Bool = false
 
     @Flag(
-        name: [.long, .customLong("dryrun")],
+        name: [.customLong("dry-run"), .customLong("dryrun")],
         help: "Show what would be processed or skipped without loading models, writing outputs, or updating processing history"
     )
     var dryRun: Bool = false
@@ -309,70 +367,77 @@ struct SharedTranscriptionOptions: ParsableArguments {
     @Flag(name: .long, help: "Print progress, timing, and cache details to stderr")
     var verbose: Bool = false
 
-    @Flag(name: .long, help: "Do not record timing statistics or use prior runs for ETA hints")
-    var noTimingStats: Bool = false
-
-    @Flag(
-        name: .long,
-        help: "Log progress/ETA as plain stderr lines (throttled to ~1/s) for testing without a TTY; use with a pipe or file"
-    )
-    var debugProgressLog: Bool = false
+    @Flag(name: .long, help: "Reduce stderr logging (overrides config verbose for this run)")
+    var quiet: Bool = false
 
     @Option(
         name: .long,
-        help: "Whisper audio encoder compute units; auto selects the recommended backend mix"
+        help: "Record timing for ETA hints from prior runs: on or off (default: \(TranscriptionDefaults.etaHintsEnabled ? "on" : "off"))"
     )
-    var audioEncoderCompute: ComputeUnitsOption = .auto
+    var etaHints: OnOff?
 
     @Option(
         name: .long,
-        help: "Whisper text decoder compute units; auto selects the recommended backend mix"
+        help: "Progress on stderr: auto (TTY spinner when a terminal), plain (throttled lines for pipes/logs), or off"
     )
-    var textDecoderCompute: ComputeUnitsOption = .auto
+    var progressLog: ProgressLogMode?
 
     @Option(
         name: .long,
-        help: "SpeakerKit segmenter compute units; auto selects the recommended backend mix"
+        help: "Whisper audio encoder compute units; default \(TranscriptionDefaults.audioEncoderCompute.rawValue)"
     )
-    var segmenterCompute: ComputeUnitsOption = .auto
+    var audioEncoderCompute: ComputeUnitsOption?
 
     @Option(
         name: .long,
-        help: "SpeakerKit embedder compute units; auto selects the recommended backend mix"
+        help: "Whisper text decoder compute units; default \(TranscriptionDefaults.textDecoderCompute.rawValue)"
     )
-    var embedderCompute: ComputeUnitsOption = .auto
+    var textDecoderCompute: ComputeUnitsOption?
 
-    var resolvedFormats: [String] {
-        parseOutputFormats(format)
-    }
+    @Option(
+        name: .long,
+        help: "SpeakerKit segmenter compute units; default \(TranscriptionDefaults.segmenterCompute.rawValue)"
+    )
+    var segmenterCompute: ComputeUnitsOption?
 
-    var wantsTxt: Bool {
-        resolvedFormats.contains("txt")
-    }
-
-    var timingStatsEnabled: Bool {
-        if noTimingStats { return false }
-        if ProcessInfo.processInfo.environment["TRANSCRIBE_TIMING_STATS"] == "0" { return false }
-        return true
-    }
+    @Option(
+        name: .long,
+        help: "SpeakerKit embedder compute units; default \(TranscriptionDefaults.embedderCompute.rawValue)"
+    )
+    var embedderCompute: ComputeUnitsOption?
 }
 
 struct DirectoryInputOptions: ParsableArguments {
     @Option(
         name: [.customLong("sort"), .customLong("input-sort")],
-        help: "Order for directory input: recorded (embedded creation timestamp; default), name (natural-sort filename), mtime (file modification time)"
+        help: """
+            Order for directory input: recorded (embedded creation timestamp; default), name (natural-sort filename), \
+            mtime (file modification time). Default: \(TranscriptionDefaults.dirSort.rawValue).
+            """
     )
-    var sort: InputSortOrder = .recorded
+    var sort: InputSortOrder?
 
     @Option(
         name: .long,
-        help: "Split a directory input into separate transcripts at gaps larger than N minutes between consecutive recordings (0 disables; default: 10)"
+        help: """
+            Split a directory input into separate transcripts at gaps larger than N minutes between consecutive recordings \
+            (0 disables; default: \(TranscriptionDefaults.dirSessionGapMinutes)).
+            """
     )
-    var sessionGap: Int = 10
+    var sessionGap: Int?
 
-    @Flag(name: .long, inversion: .prefixedNo, help: "Recover recording times from filename prefixes when embedded recorded dates are missing or untrusted")
-    var filenameTimeRecovery: Bool = true
+    @Option(
+        name: .long,
+        help: """
+            When embedded recording times are missing or untrusted: auto (default, may recover from filename prefixes), \
+            filename (same as auto), embedded (metadata only; no filename recovery), or off.
+            """
+    )
+    var inputTimeSource: InputTimeSource?
 
-    @Flag(name: .long, inversion: .prefixedNo, help: "Derive session output basenames from common filename prefixes")
-    var autoSessionBasename: Bool = true
+    @Option(
+        name: .long,
+        help: "Session output basename style: auto (derive shared prefixes when possible), clip (disable prefix derivation), or off (same as clip)."
+    )
+    var sessionNaming: SessionNamingMode?
 }

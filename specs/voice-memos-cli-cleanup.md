@@ -9,11 +9,11 @@ root positional form as a convenience alias:
 transcribe file meeting.m4a
 transcribe dir ~/recordings/
 transcribe voice-memos
-transcribe --no-diarize --format md,json file meeting.m4a
+transcribe --transcript-only --format md,json file meeting.m4a
 transcribe --dry-run voice-memos
 
 transcribe meeting.m4a              # alias for file
-transcribe --no-diarize meeting.m4a # alias for file
+transcribe --transcript-only meeting.m4a # alias for file
 transcribe ~/recordings/            # alias for dir
 ```
 
@@ -43,9 +43,9 @@ Cons:
 - Examples such as `transcribe file meeting.m4a --format md` become invalid.
 - Root directory alias no longer supports directory-specific flags; users must
   use `transcribe dir`.
-- Implementation needs root-level dispatch because Swift ArgumentParser does
-  not naturally pass root option values into subcommand `run()` without
-  duplicating option groups.
+- Implementation needs root-level dispatch because Swift ArgumentParser does not
+  naturally pass root option values into subcommand `run()` without duplicating
+  option groups.
 
 ## Command Grammar
 
@@ -78,14 +78,15 @@ Global options are owned by the root command and must appear before `file`,
 
 - `--model`, `--language`, `--model-dir`
 - `--output-dir`, `--output-prefix`, `--format`, `--stdout`
-- `--no-diarize`, `--min-speakers`, `--max-speakers`, `--speaker-strategy`
-- `--overwrite`, `--redo`, `--no-processing-state`, `--mark-imported`,
-  `--dry-run`
-- timing, progress, and compute-unit options
+- `--transcript-only`, `--with-speakers`, `--speakers-min`, `--speakers-max`,
+  `--speaker-merge`
+- `--overwrite`, `--redo`, `--stateless`, `--mark-imported`, `--dry-run` /
+  `--dryrun`
+- `--eta-hints`, `--progress-log`, `--quiet`, and compute-unit options
 
 Global options are intentionally not accepted after source commands. For
-example, `transcribe file meeting.m4a --format md` is invalid; use
-`transcribe --format md file meeting.m4a`.
+example, `transcribe file meeting.m4a --format md` is invalid; use `transcribe
+--format md file meeting.m4a`.
 
 `file` only:
 
@@ -96,8 +97,8 @@ example, `transcribe file meeting.m4a --format md` is invalid; use
 - positional `<directory>`
 - `--sort recorded|name|mtime`
 - `--input-sort recorded|name|mtime` as an alias for `--sort`
-- `--filename-time-recovery` / `--no-filename-time-recovery`
-- `--auto-session-basename` / `--no-auto-session-basename`
+- `--input-time-source auto|embedded|filename|off`
+- `--session-naming auto|clip|off`
 
 `dir` and `voice-memos` batch inputs:
 
@@ -105,8 +106,8 @@ example, `transcribe file meeting.m4a --format md` is invalid; use
 
 `voice-memos` only:
 
-- `--recordings-dir <path>`, defaulting to
-  `~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings`
+- `--recordings-dir <path>`, defaulting to `~/Library/Group
+  Containers/group.com.apple.VoiceMemos.shared/Recordings`
 
 Removed root-level options:
 
@@ -121,17 +122,16 @@ Removed root-level options:
 - Shared/global options after `file`, `dir`, or `voice-memos` are invalid.
 - Directory-specific options on the root path alias are invalid.
 - `--mark-imported --redo` is invalid.
-- `--mark-imported --no-processing-state` is invalid.
+- `--mark-imported --stateless` is invalid.
 - `--stdout` requires `txt` to be one of the requested formats.
-- Speaker bounds must be positive; `--min-speakers` must be less than or equal
-  to `--max-speakers`.
-- Speaker bounds are invalid with `--no-diarize`.
+- Speaker bounds must be positive; `--speakers-min` must be less than or equal
+  to `--speakers-max`.
+- Speaker bounds are invalid with `--transcript-only`.
 - `--session-gap` must be non-negative.
 - `--overwrite` controls output replacement only. It does not imply
   reprocessing.
 - `--redo` controls reprocessing and is valid for all input sources.
-- `--no-processing-state` bypasses processing-history skip checks and ledger
-  writes.
+- `--stateless` bypasses processing-history skip checks and ledger writes.
 
 ## Directory Metadata Behavior
 
@@ -185,9 +185,9 @@ after success.
 
 ## Voice Memos Import
 
-`transcribe voice-memos` reads Apple Voice Memos that are already synced to disk.
-It uses actual files under the recordings directory; there is no download, copy,
-or conversion step.
+`transcribe voice-memos` reads Apple Voice Memos that are already synced to
+disk. It uses actual files under the recordings directory; there is no download,
+copy, or conversion step.
 
 Voice Memos are batch input. By default, adjacent memos are grouped with the
 same session-gap logic used by `transcribe dir`: gaps larger than
@@ -241,15 +241,15 @@ without writing ledger entries.
 
 ## Markdown Output
 
-`md` is a first-class output format. It writes `basename.md` in the chosen output
-directory, following the same overwrite rules as other output formats.
+`md` is a first-class output format. It writes `basename.md` in the chosen
+output directory, following the same overwrite rules as other output formats.
 
 Markdown structure:
 
 - Title: a single `#` heading derived from the input basename, with `#`
   characters stripped. If nothing remains, use `# Transcript`.
 - Metadata: a `## Metadata` section with source filename, duration, model,
-  language when known, diarization state, speaker strategy when applicable,
+  language when known, diarization state, speaker merge style when applicable,
   speakers detected when available, transcribe version, and creation time.
 - Transcript: a `## Transcript` section, followed by merged transcript groups.
   Groups with speakers use `## **SPEAKER** - _HH:MM:SS - HH:MM:SS_`; groups
@@ -292,6 +292,8 @@ Behavior:
 - Use `TRANSCRIBE_FORMAT`, defaulting to `md`.
 - Insert `TRANSCRIBE_EXTRA_ARGS` as additional global CLI flags before the
   `file` source command.
+- Export `TRANSCRIBE_ETA_HINTS=0` to disable timing-store / ETA hints for the
+  child (legacy: `TRANSCRIBE_TIMING_STATS=0`).
 - If `TRANSCRIBE_LOCK_FILE` is set and `flock` exists, serialize runs under that
   lock.
 - If `TRANSCRIBE_LOG` is set, append structured start/end lines with UTC

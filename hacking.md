@@ -188,8 +188,8 @@ checked in this order):
    - **baseline prior** (`--mark-imported`): match on content alone, settings
      ignored
 
-`--redo` bypasses all three skip paths; `--no-processing-state` bypasses both
-reads and writes of the ledger.
+`--redo` bypasses all three skip paths; `--stateless` bypasses both reads and
+writes of the ledger.
 
 `--mark-imported` is global. It builds the normal source plan for `file`, `dir`,
 or `voice-memos`, fingerprints each planned session, and appends a baseline
@@ -285,7 +285,7 @@ env TRANSCRIBE_BIN=/bin/echo \
   TRANSCRIBE_MAX_STABLE_WAIT=3 \
   TRANSCRIBE_OUTPUT_DIR=/tmp \
   TRANSCRIBE_FORMAT=md \
-  TRANSCRIBE_EXTRA_ARGS="--no-diarize --language en" \
+  TRANSCRIBE_EXTRA_ARGS="--transcript-only --language en" \
   bash scripts/folder-action-transcribe.sh /tmp/transcribe-folder-action-smoke.m4a
 ```
 
