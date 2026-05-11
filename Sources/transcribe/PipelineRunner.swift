@@ -31,6 +31,7 @@ struct PipelineWorkItem {
     let plan: PipelineSessionPlan
     let fingerprint: SourceFingerprint
     let outputPaths: [String]
+    let historyReason: ProcessingHistoryReason
 }
 
 enum SourcePlanner {
@@ -186,16 +187,29 @@ struct PipelineRunner {
             var skippedItems: [PipelineWorkItem] = []
             for plan in sessionPlans {
                 let fingerprint = try ProcessingStore.fingerprint(files: plan.session.files)
-                let item = PipelineWorkItem(plan: plan, fingerprint: fingerprint, outputPaths: [])
-                if try ProcessingStore.shouldSkipImportedBaseline(sourceID: plan.sourceID, fingerprint: fingerprint) {
+                let decision = try ProcessingStore.importedBaselineDecision(sourceID: plan.sourceID, fingerprint: fingerprint)
+                if decision.shouldSkip {
+                    let item = PipelineWorkItem(
+                        plan: plan,
+                        fingerprint: fingerprint,
+                        outputPaths: [],
+                        historyReason: decision.reason
+                    )
                     skippedItems.append(item)
                 } else {
+                    let item = PipelineWorkItem(
+                        plan: plan,
+                        fingerprint: fingerprint,
+                        outputPaths: [],
+                        historyReason: .imported
+                    )
                     workItems.append(item)
                 }
             }
             if options.dryRun {
                 emitDryRunMarkImported(workItems: workItems, skippedItems: skippedItems)
             } else {
+                try appendSkipRecords(workItems: skippedItems, settings: nil)
                 try markPlannedInputsImported(workItems: workItems)
             }
             return
@@ -232,18 +246,27 @@ struct PipelineRunner {
                 formats: options.resolvedFormats,
                 writeTxtFile: options.wantsTxt && !options.stdout
             )
-            if try shouldSkip(plan: plan, fingerprint: fingerprint, settings: settingsSignature, outputPaths: paths) {
+            let decision = try processingDecision(plan: plan, fingerprint: fingerprint, settings: settingsSignature, outputPaths: paths)
+            let item = PipelineWorkItem(
+                plan: plan,
+                fingerprint: fingerprint,
+                outputPaths: paths,
+                historyReason: decision.reason
+            )
+            if decision.shouldSkip {
                 logger.log("Skipping already processed input: \(plan.basename)")
-                skippedItems.append(PipelineWorkItem(plan: plan, fingerprint: fingerprint, outputPaths: paths))
+                skippedItems.append(item)
                 continue
             }
-            workItems.append(PipelineWorkItem(plan: plan, fingerprint: fingerprint, outputPaths: paths))
+            workItems.append(item)
         }
 
         if options.dryRun {
             emitDryRun(workItems: workItems, skippedItems: skippedItems)
             return
         }
+
+        try appendSkipRecords(workItems: skippedItems, settings: settingsSignature)
 
         if workItems.isEmpty {
             logger.log("No new work to process.")
@@ -354,6 +377,7 @@ struct PipelineRunner {
             if !options.stateless {
                 try ProcessingStore.append(ProcessingRecord(
                     completed_at: iso8601String(Date()),
+                    history_reason: item.historyReason,
                     source_kind: plan.sourceKind,
                     source_id: plan.sourceID,
                     source_fingerprint: item.fingerprint,
@@ -473,31 +497,36 @@ struct PipelineRunner {
         }
     }
 
-    private func shouldSkip(
+    private func processingDecision(
         plan: PipelineSessionPlan,
         fingerprint: SourceFingerprint,
         settings: ProcessingSettingsSignature,
         outputPaths: [String]
-    ) throws -> Bool {
-        if options.stateless || options.redo {
-            return false
+    ) throws -> ProcessingDecision {
+        if options.stateless {
+            return ProcessingDecision(action: .process, reason: .firstRun)
         }
-        if try ProcessingStore.shouldSkipImportedBaseline(sourceID: plan.sourceID, fingerprint: fingerprint) {
-            return true
+        if options.redo {
+            return ProcessingDecision(action: .process, reason: .redo)
         }
-        if try ProcessingStore.shouldSkipCompleted(
+        let imported = try ProcessingStore.importedBaselineDecision(sourceID: plan.sourceID, fingerprint: fingerprint)
+        if imported.shouldSkip || imported.reason != .firstRun {
+            return imported
+        }
+        let completed = try ProcessingStore.completionDecision(
             sourceKind: plan.sourceKind,
             sourceID: plan.sourceID,
             fingerprint: fingerprint,
             settings: settings,
             outputPaths: outputPaths
-        ) {
-            return true
+        )
+        if completed.shouldSkip || completed.reason != .firstRun {
+            return completed
         }
         // Path-agnostic content match: catch the same audio under a new path
         // (file moved between directories) or extracted from a prior dir/voice
         // memos session into a single-file run.
-        return try ProcessingStore.shouldSkipByContent(fingerprint: fingerprint, settings: settings)
+        return try ProcessingStore.contentDecision(fingerprint: fingerprint, settings: settings)
     }
 
     private func resolveModel() async throws -> String {
@@ -525,6 +554,7 @@ struct PipelineRunner {
                 : .importedBaseline
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
+                history_reason: item.historyReason,
                 source_kind: baselineKind,
                 source_id: plan.sourceID,
                 source_fingerprint: item.fingerprint,
@@ -542,6 +572,31 @@ struct PipelineRunner {
             marked += 1
         }
         FileHandle.standardError.write("Marked \(marked) input session\(marked == 1 ? "" : "s") as imported.\n".data(using: .utf8)!)
+    }
+
+    private func appendSkipRecords(workItems: [PipelineWorkItem], settings: ProcessingSettingsSignature?) throws {
+        guard !options.stateless else { return }
+        for item in workItems {
+            let plan = item.plan
+            let outputDir = item.outputPaths.isEmpty ? nil : resolvedOutputDir(options.outputDir)
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                history_reason: item.historyReason,
+                source_kind: plan.sourceKind,
+                source_id: plan.sourceID,
+                source_fingerprint: item.fingerprint,
+                settings_signature: settings,
+                output_dir: outputDir,
+                basename: plan.basename,
+                output_paths: item.outputPaths,
+                audio_duration_s: nil,
+                warning_count: 0,
+                recording_title: plan.sourceMetadata?.recordingTitle,
+                recorded_at: plan.sourceMetadata?.recordedAt,
+                voice_memos_unique_id: plan.sourceMetadata?.voiceMemosUniqueID,
+                voice_memos_path: plan.sourceMetadata?.voiceMemosPath
+            ))
+        }
     }
 
     private func emitDryRunMarkImported(workItems: [PipelineWorkItem], skippedItems: [PipelineWorkItem]) {

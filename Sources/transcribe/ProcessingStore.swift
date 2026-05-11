@@ -12,6 +12,29 @@ enum ProcessingSourceKind: String, Codable, Equatable {
     case voiceMemosBaseline = "voice_memos_baseline"
 }
 
+enum ProcessingHistoryReason: String, Codable, Equatable {
+    case firstRun = "first_run"
+    case skipDuplicate = "skip_duplicate"
+    case settingsChanged = "settings_changed"
+    case missingOutputs = "missing_outputs"
+    case redo
+    case imported
+    case changedFile = "changed_file"
+    case legacy
+}
+
+enum ProcessingDecisionAction: Equatable {
+    case process
+    case skip
+}
+
+struct ProcessingDecision: Equatable {
+    let action: ProcessingDecisionAction
+    let reason: ProcessingHistoryReason
+
+    var shouldSkip: Bool { action == .skip }
+}
+
 struct FileFingerprint: Codable, Equatable {
     let path: String
     let sha256: String
@@ -40,6 +63,7 @@ struct ProcessingRecord: Codable, Equatable {
 
     var schema_version: Int = schemaVersion
     let completed_at: String
+    let history_reason: ProcessingHistoryReason?
     let source_kind: ProcessingSourceKind
     let source_id: String
     let source_fingerprint: SourceFingerprint
@@ -93,33 +117,66 @@ enum ProcessingStore {
         settings: ProcessingSettingsSignature,
         outputPaths: [String]
     ) throws -> Bool {
+        try completionDecision(
+            sourceKind: sourceKind,
+            sourceID: sourceID,
+            fingerprint: fingerprint,
+            settings: settings,
+            outputPaths: outputPaths
+        ).shouldSkip
+    }
+
+    static func completionDecision(
+        sourceKind: ProcessingSourceKind,
+        sourceID: String,
+        fingerprint: SourceFingerprint,
+        settings: ProcessingSettingsSignature,
+        outputPaths: [String]
+    ) throws -> ProcessingDecision {
         let records = try loadRecords()
         for record in records.reversed() {
             guard record.source_kind == sourceKind,
-                  record.source_id == sourceID,
-                  record.source_fingerprint == fingerprint,
-                  record.settings_signature == settings,
-                  record.output_paths == outputPaths else {
+                  record.source_id == sourceID else {
                 continue
             }
-            if outputPaths.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) {
-                return true
+            guard record.source_fingerprint == fingerprint else {
+                return ProcessingDecision(action: .process, reason: .changedFile)
             }
-            return false
+            guard record.settings_signature == settings,
+                  record.output_paths == outputPaths else {
+                return ProcessingDecision(action: .process, reason: .settingsChanged)
+            }
+            if outputPaths.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) {
+                return ProcessingDecision(action: .skip, reason: .skipDuplicate)
+            }
+            return ProcessingDecision(action: .process, reason: .missingOutputs)
         }
-        return false
+        return ProcessingDecision(action: .process, reason: .firstRun)
     }
 
     static func shouldSkipImportedBaseline(
         sourceID: String,
         fingerprint: SourceFingerprint
     ) throws -> Bool {
+        try importedBaselineDecision(sourceID: sourceID, fingerprint: fingerprint).shouldSkip
+    }
+
+    static func importedBaselineDecision(
+        sourceID: String,
+        fingerprint: SourceFingerprint
+    ) throws -> ProcessingDecision {
         let records = try loadRecords()
-        return records.reversed().contains { record in
-            (record.source_kind == .importedBaseline || record.source_kind == .voiceMemosBaseline)
-                && record.source_id == sourceID
-                && record.source_fingerprint == fingerprint
+        for record in records.reversed() {
+            guard record.source_kind == .importedBaseline || record.source_kind == .voiceMemosBaseline,
+                  record.source_id == sourceID else {
+                continue
+            }
+            guard record.source_fingerprint == fingerprint else {
+                return ProcessingDecision(action: .process, reason: .changedFile)
+            }
+            return ProcessingDecision(action: .skip, reason: .skipDuplicate)
         }
+        return ProcessingDecision(action: .process, reason: .firstRun)
     }
 
     /// Path-agnostic dedup: skip a planned run when every input file's
@@ -141,26 +198,40 @@ enum ProcessingStore {
         fingerprint: SourceFingerprint,
         settings: ProcessingSettingsSignature
     ) throws -> Bool {
+        try contentDecision(fingerprint: fingerprint, settings: settings).shouldSkip
+    }
+
+    static func contentDecision(
+        fingerprint: SourceFingerprint,
+        settings: ProcessingSettingsSignature
+    ) throws -> ProcessingDecision {
         let needed = Set(fingerprint.files.map { $0.sha256 })
-        guard !needed.isEmpty else { return false }
+        guard !needed.isEmpty else {
+            return ProcessingDecision(action: .process, reason: .firstRun)
+        }
 
         let records = try loadRecords()
+        var pendingReason: ProcessingHistoryReason?
         for record in records.reversed() {
             let recorded = Set(record.source_fingerprint.files.map { $0.sha256 })
             guard !recorded.isEmpty, needed.isSubset(of: recorded) else { continue }
 
             switch record.source_kind {
             case .importedBaseline, .voiceMemosBaseline:
-                return true
+                return ProcessingDecision(action: .skip, reason: .skipDuplicate)
             case .file, .directorySession, .voiceMemos:
-                guard let prior = record.settings_signature, prior == settings else { continue }
+                guard let prior = record.settings_signature, prior == settings else {
+                    pendingReason = pendingReason ?? .settingsChanged
+                    continue
+                }
                 if !record.output_paths.isEmpty,
                    record.output_paths.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) {
-                    return true
+                    return ProcessingDecision(action: .skip, reason: .skipDuplicate)
                 }
+                pendingReason = pendingReason ?? .missingOutputs
             }
         }
-        return false
+        return ProcessingDecision(action: .process, reason: pendingReason ?? .firstRun)
     }
 
     static func fingerprint(files paths: [String]) throws -> SourceFingerprint {

@@ -50,6 +50,7 @@ final class ProcessingStoreTests: XCTestCase {
             let sourceID = sourceIDForFiles(kind: .file, files: [audio.path])
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
                 source_kind: .file,
                 source_id: sourceID,
                 source_fingerprint: fingerprint,
@@ -72,6 +73,13 @@ final class ProcessingStoreTests: XCTestCase {
                 settings: settings,
                 outputPaths: [transcript.path]
             ))
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file,
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                settings: settings,
+                outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
 
             try FileManager.default.removeItem(at: transcript)
             XCTAssertFalse(try ProcessingStore.shouldSkipCompleted(
@@ -81,6 +89,13 @@ final class ProcessingStoreTests: XCTestCase {
                 settings: settings,
                 outputPaths: [transcript.path]
             ))
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file,
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                settings: settings,
+                outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .process, reason: .missingOutputs))
         }
     }
 
@@ -98,6 +113,7 @@ final class ProcessingStoreTests: XCTestCase {
             let sourceID = sourceIDForFiles(kind: .file, files: [audio.path])
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
                 source_kind: .file,
                 source_id: sourceID,
                 source_fingerprint: fingerprint,
@@ -120,6 +136,55 @@ final class ProcessingStoreTests: XCTestCase {
                 settings: changed,
                 outputPaths: [transcript.path]
             ))
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file,
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                settings: changed,
+                outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .process, reason: .settingsChanged))
+        }
+    }
+
+    func testSameSourceWithChangedFileReportsChangedFile() throws {
+        let state = try makeTempDir()
+        let output = try makeTempDir()
+        try withXDGStateHome(state.path) {
+            let audio = output.appendingPathComponent("clip.m4a")
+            try Data("old audio".utf8).write(to: audio)
+            let oldFingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+            let transcript = output.appendingPathComponent("clip.json")
+            try Data("{}".utf8).write(to: transcript)
+            let settings = sampleSettings()
+            let sourceID = sourceIDForFiles(kind: .file, files: [audio.path])
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
+                source_kind: .file,
+                source_id: sourceID,
+                source_fingerprint: oldFingerprint,
+                settings_signature: settings,
+                output_dir: output.path,
+                basename: "clip",
+                output_paths: [transcript.path],
+                audio_duration_s: 1,
+                warning_count: 0,
+                recording_title: nil,
+                recorded_at: nil,
+                voice_memos_unique_id: nil,
+                voice_memos_path: nil
+            ))
+
+            try Data("new audio".utf8).write(to: audio)
+            let newFingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file,
+                sourceID: sourceID,
+                fingerprint: newFingerprint,
+                settings: settings,
+                outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .process, reason: .changedFile))
         }
     }
 
@@ -146,6 +211,7 @@ final class ProcessingStoreTests: XCTestCase {
 
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
                 source_kind: .file,
                 source_id: "file:\(oldPath.path)",
                 source_fingerprint: oldFingerprint,
@@ -165,6 +231,10 @@ final class ProcessingStoreTests: XCTestCase {
                 fingerprint: newFingerprint,
                 settings: settings
             ))
+            XCTAssertEqual(try ProcessingStore.contentDecision(
+                fingerprint: newFingerprint,
+                settings: settings
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
 
             // Strict path still says no (paths differ); the content path is what
             // catches this case.
@@ -182,6 +252,10 @@ final class ProcessingStoreTests: XCTestCase {
                 fingerprint: newFingerprint,
                 settings: settings
             ))
+            XCTAssertEqual(try ProcessingStore.contentDecision(
+                fingerprint: newFingerprint,
+                settings: settings
+            ), ProcessingDecision(action: .process, reason: .missingOutputs))
         }
     }
 
@@ -205,6 +279,7 @@ final class ProcessingStoreTests: XCTestCase {
 
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
                 source_kind: .directorySession,
                 source_id: sourceIDForFiles(kind: .directorySession, files: [a.path, b.path, c.path]),
                 source_fingerprint: sessionFingerprint,
@@ -246,6 +321,7 @@ final class ProcessingStoreTests: XCTestCase {
 
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
+                history_reason: .imported,
                 source_kind: .voiceMemosBaseline,
                 source_id: "voice_memos:abc",
                 source_fingerprint: fingerprint,
@@ -265,6 +341,10 @@ final class ProcessingStoreTests: XCTestCase {
                 fingerprint: fingerprint,
                 settings: sampleSettings(model: "any")
             ))
+            XCTAssertEqual(try ProcessingStore.contentDecision(
+                fingerprint: fingerprint,
+                settings: sampleSettings(model: "any")
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
             XCTAssertTrue(try ProcessingStore.shouldSkipByContent(
                 fingerprint: fingerprint,
                 settings: sampleSettings(model: "different-model")
@@ -284,6 +364,7 @@ final class ProcessingStoreTests: XCTestCase {
 
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
                 source_kind: .file,
                 source_id: "file:\(audio.path)",
                 source_fingerprint: fingerprint,
@@ -307,6 +388,10 @@ final class ProcessingStoreTests: XCTestCase {
                 fingerprint: fingerprint,
                 settings: sampleSettings(model: "model-b")
             ), "different model should re-run; transcript content depends on settings")
+            XCTAssertEqual(try ProcessingStore.contentDecision(
+                fingerprint: fingerprint,
+                settings: sampleSettings(model: "model-b")
+            ), ProcessingDecision(action: .process, reason: .settingsChanged))
         }
     }
 
@@ -319,6 +404,7 @@ final class ProcessingStoreTests: XCTestCase {
             let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
             try ProcessingStore.append(ProcessingRecord(
                 completed_at: iso8601String(Date()),
+                history_reason: .imported,
                 source_kind: .importedBaseline,
                 source_id: "file:\(audio.path)",
                 source_fingerprint: fingerprint,
@@ -338,6 +424,10 @@ final class ProcessingStoreTests: XCTestCase {
                 sourceID: "file:\(audio.path)",
                 fingerprint: fingerprint
             ))
+            XCTAssertEqual(try ProcessingStore.importedBaselineDecision(
+                sourceID: "file:\(audio.path)",
+                fingerprint: fingerprint
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
         }
     }
 

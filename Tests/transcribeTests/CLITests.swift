@@ -349,13 +349,15 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(process.terminationStatus, 0)
         XCTAssertEqual(outputLines.count, 3, "expected header + 2 rows; stdout: \(stdout)")
         XCTAssertTrue(outputLines[0].contains("WHEN"), "header missing: \(outputLines[0])")
+        XCTAssertTrue(outputLines[0].contains("WHY"), "header missing: \(outputLines[0])")
         XCTAssertTrue(outputLines[0].contains("KIND"), "header missing: \(outputLines[0])")
         XCTAssertTrue(outputLines[0].contains("RECORDED"), "header missing: \(outputLines[0])")
         XCTAssertTrue(outputLines[0].contains("FILE"), "header missing: \(outputLines[0])")
+        XCTAssertTrue(outputLines[1].contains("legacy"), "old records should infer legacy reason: \(outputLines[1])")
         XCTAssertTrue(outputLines[1].contains("fresh.m4a"), "newest first: \(outputLines[1])")
         XCTAssertTrue(outputLines[1].contains("2026-05-09"), "newest entry should show recorded date: \(outputLines[1])")
         XCTAssertTrue(outputLines[2].contains("mid.m4a"), "second: \(outputLines[2])")
-        XCTAssertTrue(outputLines[2].contains("—"), "missing recorded_at should render as em dash: \(outputLines[2])")
+        XCTAssertTrue(outputLines[2].contains("-"), "missing recorded_at should render as dash: \(outputLines[2])")
         XCTAssertFalse(stdout.contains("old.m4a"), "--count 2 should drop the third entry")
     }
 
@@ -667,9 +669,22 @@ final class CLITests: XCTestCase {
         let ledger = state.appendingPathComponent("transcribe").appendingPathComponent("processing_history.jsonl")
         let raw = try String(contentsOf: ledger, encoding: .utf8)
         XCTAssertTrue(raw.contains("\"source_kind\":\"voice_memos_baseline\""), "ledger: \(raw)")
+        XCTAssertTrue(raw.contains("\"history_reason\":\"imported\""), "ledger: \(raw)")
         XCTAssertFalse(raw.contains("\"source_kind\":\"imported_baseline\""), "should not write generic baseline kind for Voice Memos: \(raw)")
 
-        // history should render the new kind as "imported voice".
+        let duplicate = Process()
+        duplicate.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        duplicate.arguments = process.arguments
+        duplicate.environment = process.environment
+        try duplicate.run()
+        duplicate.waitUntilExit()
+        XCTAssertEqual(duplicate.terminationStatus, 0)
+
+        let rawAfterDuplicate = try String(contentsOf: ledger, encoding: .utf8)
+        XCTAssertEqual(rawAfterDuplicate.split(separator: "\n").count, 2, "duplicate skip should append an audit row: \(rawAfterDuplicate)")
+        XCTAssertTrue(rawAfterDuplicate.contains("\"history_reason\":\"skip_duplicate\""), "ledger: \(rawAfterDuplicate)")
+
+        // history should render the new reason and compact source kind.
         let history = Process()
         history.executableURL = URL(fileURLWithPath: Self.transcribePath)
         history.arguments = ["history"]
@@ -681,7 +696,8 @@ final class CLITests: XCTestCase {
         let out = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
 
         XCTAssertEqual(history.terminationStatus, 0)
-        XCTAssertTrue(out.contains("imported voice"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("imported"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("voice"), "stdout: \(out)")
         XCTAssertTrue(out.contains("A.m4a"), "stdout: \(out)")
     }
 

@@ -32,7 +32,8 @@ enum HistoryCommand {
 
 enum HistoryFormatter {
     static let timeColumnWidth = 18
-    static let kindColumnWidth = 18
+    static let whyColumnWidth = 11
+    static let kindColumnWidth = 6
     static let recordedColumnWidth = 12
 
     static func format(records: [ProcessingRecord], now: Date) -> String {
@@ -41,6 +42,7 @@ enum HistoryFormatter {
 
     static func header() -> String {
         pad("WHEN", timeColumnWidth) + "  "
+            + pad("WHY", whyColumnWidth) + "  "
             + pad("KIND", kindColumnWidth) + "  "
             + pad("RECORDED", recordedColumnWidth) + "  "
             + "FILE"
@@ -48,10 +50,12 @@ enum HistoryFormatter {
 
     static func line(for record: ProcessingRecord, now: Date) -> String {
         let time = formatTimestamp(record.completed_at, now: now)
+        let why = displayReason(record)
         let kind = displayKind(record)
         let recorded = displayRecordedAt(record)
         let label = displayLabel(record)
         return pad(time, timeColumnWidth) + "  "
+            + pad(why, whyColumnWidth) + "  "
             + pad(kind, kindColumnWidth) + "  "
             + pad(recorded, recordedColumnWidth) + "  "
             + label
@@ -88,27 +92,50 @@ enum HistoryFormatter {
 
     static func displayKind(_ record: ProcessingRecord) -> String {
         switch record.source_kind {
-        case .file: return "transcribed file"
-        case .directorySession: return "transcribed dir"
-        case .voiceMemos: return "transcribed voice"
-        case .voiceMemosBaseline: return "imported voice"
+        case .file: return "file"
+        case .directorySession: return "dir"
+        case .voiceMemos: return "voice"
+        case .voiceMemosBaseline: return "voice"
         case .importedBaseline:
             // Pre-2.1.2 always wrote `imported_baseline` regardless of source.
             // Voice Memos source ids always start with `voice_memos:`, so we
             // can recover the distinction for old records without rewriting
             // the ledger.
             if record.source_id.hasPrefix("voice_memos:") || record.voice_memos_unique_id != nil {
-                return "imported voice"
+                return "voice"
             }
-            return "imported"
+            return "import"
         }
     }
 
-    /// Date-only ("YYYY-MM-DD") slice of `recorded_at`, or "—" when absent.
+    static func displayReason(_ record: ProcessingRecord) -> String {
+        let reason = record.history_reason ?? inferredLegacyReason(record)
+        switch reason {
+        case .firstRun: return "first run"
+        case .skipDuplicate: return "skip dup"
+        case .settingsChanged: return "settings"
+        case .missingOutputs: return "missing out"
+        case .redo: return "redo"
+        case .imported: return "imported"
+        case .changedFile: return "changed file"
+        case .legacy: return "legacy"
+        }
+    }
+
+    static func inferredLegacyReason(_ record: ProcessingRecord) -> ProcessingHistoryReason {
+        switch record.source_kind {
+        case .importedBaseline, .voiceMemosBaseline:
+            return .imported
+        case .file, .directorySession, .voiceMemos:
+            return .legacy
+        }
+    }
+
+    /// Date-only ("YYYY-MM-DD") slice of `recorded_at`, or "-" when absent.
     /// `recorded_at` is canonical ISO 8601, so the first 10 characters are
     /// the calendar date in UTC.
     static func displayRecordedAt(_ record: ProcessingRecord) -> String {
-        guard let raw = record.recorded_at, raw.count >= 10 else { return "—" }
+        guard let raw = record.recorded_at, raw.count >= 10 else { return "-" }
         return String(raw.prefix(10))
     }
 

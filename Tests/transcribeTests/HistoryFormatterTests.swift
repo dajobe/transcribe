@@ -38,23 +38,40 @@ final class HistoryFormatterTests: XCTestCase {
     }
 
     func testKindDisplayCoversEveryCase() {
-        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .file, sourceID: "file:/tmp/x.m4a")), "transcribed file")
-        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .directorySession, sourceID: "directory_session:/tmp/dir")), "transcribed dir")
-        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .voiceMemos, sourceID: "voice_memos:UUID")), "transcribed voice")
-        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .voiceMemosBaseline, sourceID: "voice_memos:UUID")), "imported voice")
+        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .file, sourceID: "file:/tmp/x.m4a")), "file")
+        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .directorySession, sourceID: "directory_session:/tmp/dir")), "dir")
+        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .voiceMemos, sourceID: "voice_memos:UUID")), "voice")
+        XCTAssertEqual(HistoryFormatter.displayKind(makeRecord(kind: .voiceMemosBaseline, sourceID: "voice_memos:UUID")), "voice")
     }
 
     func testImportedBaselineRetroactivelyClassifiesVoiceMemos() {
         // Pre-2.1.2 ledger: source_kind=imported_baseline but source_id prefix
-        // identifies a Voice Memos import. Should still render as "imported voice".
+        // identifies a Voice Memos import. Should still render as "voice".
         let oldVoice = makeRecord(kind: .importedBaseline, sourceID: "voice_memos:ABC-123")
-        XCTAssertEqual(HistoryFormatter.displayKind(oldVoice), "imported voice")
+        XCTAssertEqual(HistoryFormatter.displayKind(oldVoice), "voice")
 
         let oldFile = makeRecord(kind: .importedBaseline, sourceID: "file:/tmp/x.m4a")
-        XCTAssertEqual(HistoryFormatter.displayKind(oldFile), "imported")
+        XCTAssertEqual(HistoryFormatter.displayKind(oldFile), "import")
 
         let oldDir = makeRecord(kind: .importedBaseline, sourceID: "directory_session:/tmp/dir")
-        XCTAssertEqual(HistoryFormatter.displayKind(oldDir), "imported")
+        XCTAssertEqual(HistoryFormatter.displayKind(oldDir), "import")
+    }
+
+    func testReasonDisplayCoversEveryCase() {
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(reason: .firstRun)), "first run")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(reason: .skipDuplicate)), "skip dup")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(reason: .settingsChanged)), "settings")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(reason: .missingOutputs)), "missing out")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(reason: .redo)), "redo")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(reason: .imported)), "imported")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(reason: .changedFile)), "changed file")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(reason: .legacy)), "legacy")
+    }
+
+    func testMissingReasonInfersImportedForLegacyBaselineOnly() {
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(kind: .voiceMemosBaseline)), "imported")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(kind: .importedBaseline)), "imported")
+        XCTAssertEqual(HistoryFormatter.displayReason(makeRecord(kind: .voiceMemos)), "legacy")
     }
 
     func testLabelPrefersFilenameFromFingerprint() {
@@ -98,15 +115,15 @@ final class HistoryFormatterTests: XCTestCase {
         XCTAssertEqual(HistoryFormatter.displayLabel(onlySourceID), "file:/tmp/x.m4a")
     }
 
-    func testRecordedAtShowsDateOrEmDash() {
+    func testRecordedAtShowsDateOrDash() {
         let withDate = makeRecord(recorded_at: "2014-05-13T00:30:35Z")
         XCTAssertEqual(HistoryFormatter.displayRecordedAt(withDate), "2014-05-13")
 
         let withoutDate = makeRecord(recorded_at: nil)
-        XCTAssertEqual(HistoryFormatter.displayRecordedAt(withoutDate), "—")
+        XCTAssertEqual(HistoryFormatter.displayRecordedAt(withoutDate), "-")
 
         let malformed = makeRecord(recorded_at: "garbage")
-        XCTAssertEqual(HistoryFormatter.displayRecordedAt(malformed), "—")
+        XCTAssertEqual(HistoryFormatter.displayRecordedAt(malformed), "-")
     }
 
     func testHeaderRowAlignsWithDataColumns() {
@@ -122,12 +139,22 @@ final class HistoryFormatterTests: XCTestCase {
         XCTAssertEqual(lines.count, 2)
         XCTAssertEqual(lines[0], HistoryFormatter.header())
         XCTAssertTrue(lines[0].hasPrefix("WHEN              "))
-        XCTAssertTrue(lines[0].contains("KIND              "))
+        XCTAssertTrue(lines[0].contains("WHY        "))
+        XCTAssertTrue(lines[0].contains("KIND  "))
         XCTAssertTrue(lines[0].contains("RECORDED    "))
         XCTAssertTrue(lines[0].hasSuffix("FILE"))
         // Header positions should match the data row's column starts.
+        guard let headerWhy = lines[0].range(of: "WHY"),
+              let dataWhy = lines[1].range(of: "legacy") else {
+            XCTFail("could not locate why columns")
+            return
+        }
+        XCTAssertEqual(
+            lines[0].distance(from: lines[0].startIndex, to: headerWhy.lowerBound),
+            lines[1].distance(from: lines[1].startIndex, to: dataWhy.lowerBound)
+        )
         guard let headerKind = lines[0].range(of: "KIND"),
-              let dataKind = lines[1].range(of: "transcribed voice") else {
+              let dataKind = lines[1].range(of: "voice") else {
             XCTFail("could not locate kind columns")
             return
         }
@@ -146,7 +173,8 @@ final class HistoryFormatterTests: XCTestCase {
         )
         let line = HistoryFormatter.line(for: record, now: now)
         XCTAssertTrue(line.hasPrefix("5 mins ago        "), "line: \(line)")
-        XCTAssertTrue(line.contains("transcribed voice "), "line: \(line)")
+        XCTAssertTrue(line.contains("legacy       "), "line: \(line)")
+        XCTAssertTrue(line.contains("voice   "), "line: \(line)")
         XCTAssertTrue(line.contains("2014-05-13  "), "line: \(line)")
         XCTAssertTrue(line.hasSuffix("Memo5.m4a"), "line: \(line)")
     }
@@ -168,6 +196,7 @@ final class HistoryFormatterTests: XCTestCase {
         completed_at: String = "2026-05-09T18:00:00Z",
         kind: ProcessingSourceKind = .voiceMemos,
         sourceID: String = "file:/tmp/x.m4a",
+        reason: ProcessingHistoryReason? = nil,
         recording_title: String? = nil,
         basename: String? = nil,
         recorded_at: String? = nil,
@@ -175,6 +204,7 @@ final class HistoryFormatterTests: XCTestCase {
     ) -> ProcessingRecord {
         ProcessingRecord(
             completed_at: completed_at,
+            history_reason: reason,
             source_kind: kind,
             source_id: sourceID,
             source_fingerprint: SourceFingerprint(files: files),

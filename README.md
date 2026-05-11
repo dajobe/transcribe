@@ -268,10 +268,16 @@ Successful transcription sessions are recorded in a processing history file so
 rerunning the same command can skip work that is already complete. The history
 tracks the input source, SHA-256 audio fingerprint, important transcription
 settings, requested output files, and completion metadata.
+`transcribe history` includes a compact `WHY` column (`first run`, `skip dup`,
+`settings`, `missing out`, `redo`, `imported`, `changed file`, or `legacy`) so
+recent rows explain whether they were processed, skipped, imported, or
+reprocessed.
 
 - **Default behavior:** if the source audio, important settings, and requested
   output files match a previous completed run, and all requested outputs still
   exist, the session is skipped before audio preflight or model loading.
+  Duplicate skips are written back to history unless `--stateless` or
+  `--dry-run` is active.
 - **Changed input/settings:** changed audio bytes, model, language, diarization
   settings, speaker options, formats, or transcribe version cause a new run.
 - **Missing outputs:** if history says a session completed but the requested
