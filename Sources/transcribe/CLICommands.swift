@@ -65,7 +65,7 @@ struct VoiceMemosSourceArguments: ParsableCommand {
         name: .long,
         help: """
             Split Voice Memos into separate transcripts at gaps larger than N minutes between recordings \
-            (0 disables; default: \(TranscriptionDefaults.voiceMemosSessionGapMinutes)).
+            (0 = one transcript per recording; default: \(TranscriptionDefaults.voiceMemosSessionGapMinutes)).
             """
     )
     var sessionGap: Int?
@@ -421,7 +421,7 @@ struct DirectoryInputOptions: ParsableArguments {
         name: .long,
         help: """
             Split a directory input into separate transcripts at gaps larger than N minutes between consecutive recordings \
-            (0 disables; default: \(TranscriptionDefaults.dirSessionGapMinutes)).
+            (0 = one transcript per recording; default: \(TranscriptionDefaults.dirSessionGapMinutes)).
             """
     )
     var sessionGap: Int?

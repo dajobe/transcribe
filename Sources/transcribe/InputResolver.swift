@@ -29,7 +29,7 @@ enum InputResolver {
     static func resolve(
         _ rawArg: String,
         sort: InputSortOrder = .recorded,
-        sessionGapSeconds: Double = 0,
+        sessionGapSeconds: Double = -1,
         filenameTimeRecovery: Bool = true,
         logger: VerboseLogger? = nil
     ) async throws -> ResolvedInput {
@@ -125,9 +125,11 @@ enum InputResolver {
         }
 
         // If we couldn't trust the recorded dates for ordering, the same dates
-        // can't be trusted for gap-based session splitting either — disable.
-        let effectiveGap = (sort == .recorded && effectiveSort != .recorded) ? 0.0 : sessionGapSeconds
-        if effectiveGap == 0 && sessionGapSeconds > 0 && sort == .recorded && effectiveSort != .recorded {
+        // can't be trusted for gap-based session splitting either — disable
+        // via the internal negative sentinel that `SessionGrouper` understands.
+        let trustDisabled = (sort == .recorded && effectiveSort != .recorded)
+        let effectiveGap = trustDisabled ? -1.0 : sessionGapSeconds
+        if trustDisabled && sessionGapSeconds >= 0 {
             logger?.log("Session splitting disabled: same untrusted recorded-date metadata.")
         }
         let sortedClips = sortClips(

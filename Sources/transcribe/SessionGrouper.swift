@@ -24,7 +24,9 @@ enum SessionGrouper {
     /// Groups `clips` (in input order) into sessions, splitting at gaps
     /// greater than `maxGapSeconds` between (clip i end, clip i+1 start)
     /// where both `recordedAt` values and clip i's `durationSeconds` are
-    /// available. Set `maxGapSeconds <= 0` to disable splitting.
+    /// available. With `maxGapSeconds == 0` any positive gap starts a new
+    /// session — i.e. each recording becomes its own transcript. Pass a
+    /// negative value to disable splitting entirely (single session).
     /// - Parameter logger: when supplied (verbose), emits one line per
     ///   adjacent pair with the gap and split decision.
     static func groupIntoSessions(
@@ -36,7 +38,7 @@ enum SessionGrouper {
 
         var sessions: [AudioSession] = []
         var current: [AudioClip] = [clips[0]]
-        let splitDisabled = maxGapSeconds <= 0
+        let splitDisabled = maxGapSeconds < 0
 
         for i in 1..<clips.count {
             let prev = clips[i - 1]

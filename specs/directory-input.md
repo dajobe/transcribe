@@ -134,7 +134,8 @@ Directory inputs are split into one or more sessions whenever adjacent clips
 have a recorded-at gap larger than the configured threshold:
 
 - `--session-gap N` (minutes, default `10`).
-- `--session-gap 0` disables splitting (single session per directory).
+- `--session-gap 0` produces one transcript per recording (any positive
+  recorded-at gap starts a new session).
 
 ### Gap calculation
 

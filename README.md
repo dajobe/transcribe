@@ -122,9 +122,10 @@ threshold, and runs the pipeline once per session.
   accepted as an alias.
 - **Session splitting:** if adjacent clips have a recorded-at gap larger than
   `--session-gap` minutes (default `10`), the directory is split into separate
-  transcripts — one per detected session. Set `--session-gap 0` to disable
-  splitting and concatenate everything into one transcript. Splitting is skipped
-  when adjacent clips lack the metadata needed to compute a gap.
+  transcripts — one per detected session. Set `--session-gap 0` to produce one
+  transcript per recording (any positive recorded-at gap starts a new session).
+  Splitting is skipped when adjacent clips lack the metadata needed to compute a
+  gap.
 - **Filtering:** files are filtered by extension (case-insensitive) against the
   supported formats. Hidden files (`.DS_Store`, `._*`) and subdirectories are
   skipped; subdirectories are not recursed into.
@@ -198,7 +199,7 @@ file/directory alias. Run `transcribe --help` to see these options.
 | Option                                  | Description                                                                                      |
 |:----------------------------------------|:-------------------------------------------------------------------------------------------------|
 | `-m, --model <name>`                    | Whisper model (default: `openai_whisper-large-v3_turbo`; ~1.5 GB on first run)                   |
-| `-l, --language <code>`                 | Language code; when omitted or `(auto)`, Whisper auto-detects (see `transcribe --help`)            |
+| `-l, --language <code>`                 | Language code; when omitted or `(auto)`, Whisper auto-detects (see `transcribe --help`)          |
 | `-o, --output-dir <path>`               | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                         |
 | `-f, --format <fmt>`                    | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `md`, `all` (default: `txt,json`)  |
 | `--stdout`                              | Write transcript text to stdout instead of a file                                                |
@@ -267,11 +268,10 @@ Full schema, paths, and ETA behavior:
 Successful transcription sessions are recorded in a processing history file so
 rerunning the same command can skip work that is already complete. The history
 tracks the input source, SHA-256 audio fingerprint, important transcription
-settings, requested output files, and completion metadata.
-`transcribe history` includes a compact `WHY` column (`first run`, `skip dup`,
-`settings`, `missing out`, `redo`, `imported`, `changed file`, or `legacy`) so
-recent rows explain whether they were processed, skipped, imported, or
-reprocessed.
+settings, requested output files, and completion metadata. `transcribe history`
+includes a compact `WHY` column (`first run`, `skip dup`, `settings`, `missing
+out`, `redo`, `imported`, `changed file`, or `legacy`) so recent rows explain
+whether they were processed, skipped, imported, or reprocessed.
 
 - **Default behavior:** if the source audio, important settings, and requested
   output files match a previous completed run, and all requested outputs still
@@ -317,7 +317,8 @@ files in place. There is no download, copy, or conversion step.
 - **Session grouping:** Voice Memos use the same `--session-gap` default as
   directory input. Adjacent memos recorded within the gap are processed as one
   transcript session; gaps larger than the threshold start a new transcript. Use
-  `--session-gap 0` to process all synced memos as one session.
+  `--session-gap 0` to produce one transcript per recording (any positive
+  recorded-at gap starts a new session).
 - **Baseline import:** `transcribe --mark-imported voice-memos` records the
   planned Voice Memo sessions as imported without writing transcript outputs.
   The same global `--mark-imported` option works for `file` and `dir` inputs.

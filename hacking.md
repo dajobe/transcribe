@@ -109,8 +109,8 @@ consistent after source planning.
 ## Batch Sources And Session Gaps
 
 Both `dir` and `voice-memos` are batch sources. They use gap-based session
-grouping by default with `--session-gap 10`. `--session-gap 0` disables
-splitting and treats the batch as one session.
+grouping by default with `--session-gap 10`. `--session-gap 0` produces one
+transcript per recording (any positive recorded-at gap starts a new session).
 
 Directory input goes through `InputResolver.resolve(...)`:
 

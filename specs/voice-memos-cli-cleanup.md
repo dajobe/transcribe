@@ -192,8 +192,8 @@ copy, or conversion step.
 Voice Memos are batch input. By default, adjacent memos are grouped with the
 same session-gap logic used by `transcribe dir`: gaps larger than
 `--session-gap` minutes (default `10`) start a new transcript session, while
-closer memos are concatenated into one session. `--session-gap 0` disables
-splitting and processes all usable memos as one session.
+closer memos are concatenated into one session. `--session-gap 0` produces one
+transcript per memo (any positive recorded-at gap starts a new session).
 
 Read `CloudRecordings.db` read-only and query `ZCLOUDRECORDING`:
 

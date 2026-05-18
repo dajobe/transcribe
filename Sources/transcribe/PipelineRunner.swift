@@ -494,10 +494,10 @@ struct PipelineRunner {
         }
 
         if case .directory(_, let directoryOptions) = request, directoryOptions.sessionGap < 0 {
-            throw TranscribeError(message: "--session-gap must be >= 0 (use 0 to disable session splitting).", exitCode: .invalidUsage)
+            throw TranscribeError(message: "--session-gap must be >= 0 (use 0 to produce one transcript per recording).", exitCode: .invalidUsage)
         }
         if case .voiceMemos(_, let sessionGap) = request, sessionGap < 0 {
-            throw TranscribeError(message: "--session-gap must be >= 0 (use 0 to disable session splitting).", exitCode: .invalidUsage)
+            throw TranscribeError(message: "--session-gap must be >= 0 (use 0 to produce one transcript per recording).", exitCode: .invalidUsage)
         }
     }
 

@@ -69,10 +69,21 @@ final class SessionGrouperTests: XCTestCase {
         XCTAssertEqual(sessions[0].files, ["/a.m4a", "/b.m4a"])
     }
 
-    func testZeroGapDisablesSplitting() {
+    func testZeroGapSplitsEveryRecording() {
+        let a = AudioClip(path: "/a.m4a", recordedAt: base, durationSeconds: 30)
+        let b = AudioClip(path: "/b.m4a", recordedAt: base.addingTimeInterval(60), durationSeconds: 30)
+        let c = AudioClip(path: "/c.m4a", recordedAt: base.addingTimeInterval(120), durationSeconds: 30)
+        let sessions = SessionGrouper.groupIntoSessions([a, b, c], maxGapSeconds: 0)
+        XCTAssertEqual(sessions.count, 3)
+        XCTAssertEqual(sessions[0].files, ["/a.m4a"])
+        XCTAssertEqual(sessions[1].files, ["/b.m4a"])
+        XCTAssertEqual(sessions[2].files, ["/c.m4a"])
+    }
+
+    func testNegativeGapDisablesSplitting() {
         let a = AudioClip(path: "/a.m4a", recordedAt: base, durationSeconds: 30)
         let b = AudioClip(path: "/b.m4a", recordedAt: base.addingTimeInterval(86_400), durationSeconds: 30)
-        let sessions = SessionGrouper.groupIntoSessions([a, b], maxGapSeconds: 0)
+        let sessions = SessionGrouper.groupIntoSessions([a, b], maxGapSeconds: -1)
         XCTAssertEqual(sessions.count, 1)
         XCTAssertEqual(sessions[0].files, ["/a.m4a", "/b.m4a"])
     }
