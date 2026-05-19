@@ -611,9 +611,6 @@ struct PipelineRunner {
         for item in workItems {
             lines.append(dryRunLine(status: "mark-imported", item: item))
         }
-        for item in skippedItems {
-            lines.append(dryRunLine(status: "skip", item: item))
-        }
         FileHandle.standardOutput.write((lines.joined(separator: "\n") + "\n").data(using: .utf8)!)
     }
 
@@ -624,9 +621,6 @@ struct PipelineRunner {
         ]
         for item in workItems {
             lines.append(dryRunLine(status: "process", item: item))
-        }
-        for item in skippedItems {
-            lines.append(dryRunLine(status: "skip", item: item))
         }
         FileHandle.standardOutput.write((lines.joined(separator: "\n") + "\n").data(using: .utf8)!)
     }
