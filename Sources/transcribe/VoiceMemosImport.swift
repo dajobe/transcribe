@@ -41,26 +41,26 @@ enum VoiceMemosImport {
             )
         }
 
-        func columnOrNull(_ name: String) -> String {
-            columns.contains(name) ? name : "NULL"
+        func quotedColumnOrNull(_ name: String) -> String {
+            Self.quotedColumnOrNull(name, columns: columns)
         }
 
         let sql = """
             SELECT
-              Z_PK,
-              \(columnOrNull("ZUNIQUEID")),
-              ZPATH,
-              ZDATE,
-              \(columnOrNull("ZDURATION")),
-              \(columnOrNull("ZLOCALDURATION")),
-              \(columnOrNull("ZCUSTOMLABEL")),
-              \(columnOrNull("ZENCRYPTEDTITLE")),
-              \(columnOrNull("ZAUDIODIGEST")),
-              \(columnOrNull("ZFLAGS")),
-              \(columnOrNull("ZFOLDER"))
+              "Z_PK",
+              \(quotedColumnOrNull("ZUNIQUEID")),
+              "ZPATH",
+              "ZDATE",
+              \(quotedColumnOrNull("ZDURATION")),
+              \(quotedColumnOrNull("ZLOCALDURATION")),
+              \(quotedColumnOrNull("ZCUSTOMLABEL")),
+              \(quotedColumnOrNull("ZENCRYPTEDTITLE")),
+              \(quotedColumnOrNull("ZAUDIODIGEST")),
+              \(quotedColumnOrNull("ZFLAGS")),
+              \(quotedColumnOrNull("ZFOLDER"))
             FROM ZCLOUDRECORDING
-            WHERE ZPATH IS NOT NULL AND ZPATH != '' AND ZDATE IS NOT NULL
-            ORDER BY ZDATE ASC, Z_PK ASC;
+            WHERE "ZPATH" IS NOT NULL AND "ZPATH" != '' AND "ZDATE" IS NOT NULL
+            ORDER BY "ZDATE" ASC, "Z_PK" ASC;
             """
         let rawRecordings: [VoiceMemoRecording?] = try database.query(sql) { row in
             guard let primaryKey = row.int(0).map(Int.init),
@@ -166,11 +166,34 @@ enum VoiceMemosImport {
         )
     }
 
+    private static func isSafeColumnName(_ name: String) -> Bool {
+        guard let first = name.first, first.isLetter, first.isUppercase else { return false }
+        for character in name.dropFirst() {
+            if character == "_" { continue }
+            guard character.isNumber || (character.isLetter && character.isUppercase) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func quotedColumnOrNull(_ name: String, columns: Set<String>) -> String {
+        guard columns.contains(name), isSafeColumnName(name) else { return "NULL" }
+        return "\"\(name)\""
+    }
+
     private static func loadColumnNames(database: ReadOnlyDatabase) throws -> Set<String> {
         let names = try database.query("PRAGMA table_info(ZCLOUDRECORDING);") { row in
             row.text(1) ?? ""
         }
-        return Set(names.filter { !$0.isEmpty })
+        let filtered = names.filter { !$0.isEmpty }
+        for name in filtered where !isSafeColumnName(name) {
+            throw TranscribeError(
+                message: "Voice Memos database has an unexpected column name in ZCLOUDRECORDING: \(name)",
+                exitCode: .inputFile
+            )
+        }
+        return Set(filtered)
     }
 
     private static func resolveRecordingPath(_ rawPath: String, recordingsDirectory: String) -> String {

@@ -186,6 +186,26 @@ final class VoiceMemosImportTests: XCTestCase {
         XCTAssertNil(recording.audioDigestHex)
     }
 
+    func testUnsafeColumnNameThrowsInputError() throws {
+        let dir = try makeTempDir()
+        try sqlite(dir, """
+            CREATE TABLE ZCLOUDRECORDING (
+                Z_PK INTEGER PRIMARY KEY,
+                ZDATE TIMESTAMP,
+                ZPATH VARCHAR,
+                "Z-BAD" VARCHAR
+            );
+            """)
+
+        do {
+            _ = try VoiceMemosImport.loadRecordings(recordingsDirectory: dir.path)
+            XCTFail("Expected unsafe column name failure")
+        } catch let error as TranscribeError {
+            XCTAssertEqual(error.exitCode, .inputFile)
+            XCTAssertTrue(error.message.contains("unexpected column name"))
+        }
+    }
+
     private func createVoiceMemosDB(in dir: URL) throws {
         try sqlite(dir, """
             CREATE TABLE ZCLOUDRECORDING (
