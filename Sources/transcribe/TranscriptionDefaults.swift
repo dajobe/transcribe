@@ -33,4 +33,7 @@ enum TranscriptionDefaults {
     /// Same path as [`VoiceMemosImport.defaultRecordingsDirectory`].
     static let voiceMemosRecordingsDir = VoiceMemosImport.defaultRecordingsDirectory
     static let voiceMemosSessionGapMinutes = 10
+
+    /// Maximum decoded audio size in megabytes (`0` disables the hard cap).
+    static let maxAudioMB = 2048
 }

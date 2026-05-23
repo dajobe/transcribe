@@ -727,6 +727,39 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(stderr.contains("--session-gap"), "stderr should mention the bad option")
     }
 
+    func testMaxAudioMBZeroParses() throws {
+        let help = try runCommand(["--help"]).stdout
+        XCTAssertTrue(help.contains("--max-audio-mb"))
+    }
+
+    func testNegativeMaxAudioMBExitTwo() throws {
+        let file = try makeTempAudioFile()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = ["--max-audio-mb=-1", file.path]
+        let pipe = Pipe()
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 2, "negative --max-audio-mb should exit 2, stderr: \(stderr)")
+        XCTAssertTrue(stderr.contains("--max-audio-mb"), "stderr should mention the bad option")
+    }
+
+    func testSymlinkInputEmitsWarning() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let real = dir.appendingPathComponent("real.m4a")
+        try Data("audio".utf8).write(to: real)
+        let link = dir.appendingPathComponent("link.m4a")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: real.path)
+
+        let result = try runCommand(["--dry-run", "file", link.path])
+        XCTAssertTrue(result.stderr.contains("symlink"), "stderr should warn about symlink input: \(result.stderr)")
+    }
+
     func testInvalidInputSortExitsNonZero() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)

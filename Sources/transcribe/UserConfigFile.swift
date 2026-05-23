@@ -59,6 +59,11 @@ struct UserConfigFile: Codable, Equatable {
         var sessionGap: Int?
     }
 
+    var input: InputSection?
+    struct InputSection: Codable, Equatable {
+        var maxAudioMB: Int?
+    }
+
     init() {}
 
     static func load(from url: URL) throws -> UserConfigFile {

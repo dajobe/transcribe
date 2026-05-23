@@ -296,7 +296,11 @@ struct PipelineRunner {
                 overwrite: options.overwrite
             )
         }
-        try preflightAudioDecoding(for: workItems.map(\.plan.session), logger: logger)
+        try preflightAudioDecoding(
+            for: workItems.map(\.plan.session),
+            limits: options.audioLoadLimits,
+            logger: logger
+        )
 
         let liveProgressMode: LiveProgressRenderMode? = {
             switch options.progressLogMode {
@@ -340,11 +344,19 @@ struct PipelineRunner {
             let (preparedAudio, loadMs): (PreparedAudio, Int64)
             if session.files.count == 1 {
                 (preparedAudio, loadMs) = try WallClock.measureMs {
-                    try loadPreparedAudio(audioPath: session.files[0], logger: logger)
+                    try loadPreparedAudio(
+                        audioPath: session.files[0],
+                        limits: options.audioLoadLimits,
+                        logger: logger
+                    )
                 }
             } else {
                 (preparedAudio, loadMs) = try WallClock.measureMs {
-                    try loadPreparedAudio(fromFiles: session.files, logger: logger)
+                    try loadPreparedAudio(
+                        fromFiles: session.files,
+                        limits: options.audioLoadLimits,
+                        logger: logger
+                    )
                 }
             }
 
@@ -501,6 +513,10 @@ struct PipelineRunner {
         }
         if options.markImported && options.stateless {
             throw TranscribeError(message: "--mark-imported cannot be combined with --stateless.", exitCode: .invalidUsage)
+        }
+
+        if options.maxAudioMB < 0 {
+            throw TranscribeError(message: "--max-audio-mb must be >= 0 (use 0 to disable the hard cap).", exitCode: .invalidUsage)
         }
 
         if case .directory(_, let directoryOptions) = request, directoryOptions.sessionGap < 0 {

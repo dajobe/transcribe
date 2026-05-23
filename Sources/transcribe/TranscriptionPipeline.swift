@@ -25,9 +25,13 @@ func segmentsFromTranscriptionResults(_ results: [TranscriptionResult]) -> [Tran
     }
 }
 
-func loadPreparedAudio(audioPath: String, logger: VerboseLogger? = nil) throws -> PreparedAudio {
+func loadPreparedAudio(
+    audioPath: String,
+    limits: AudioLoadLimits = .default,
+    logger: VerboseLogger? = nil
+) throws -> PreparedAudio {
     logger?.log("Loading audio: \((audioPath as NSString).lastPathComponent)")
-    let audioArray = try AudioLoader.loadAudio(fromPath: audioPath)
+    let audioArray = try AudioLoader.loadAudio(fromPath: audioPath, limits: limits)
     let durationSeconds = Double(audioArray.count) / Double(WhisperKit.sampleRate)
     logger?.log("Audio loaded (\(String(format: "%.1f", durationSeconds))s, 16kHz mono)")
     return PreparedAudio(samples: audioArray, durationSeconds: durationSeconds)
@@ -43,14 +47,18 @@ let interClipPaddingSamples: Int = 3200
 /// the last). Whisper segment and word timestamps will be relative to the
 /// start of this combined buffer; no per-file offset fixup is required by
 /// the caller.
-func loadPreparedAudio(fromFiles paths: [String], logger: VerboseLogger? = nil) throws -> PreparedAudio {
+func loadPreparedAudio(
+    fromFiles paths: [String],
+    limits: AudioLoadLimits = .default,
+    logger: VerboseLogger? = nil
+) throws -> PreparedAudio {
     precondition(!paths.isEmpty, "loadPreparedAudio(fromFiles:) requires at least one path")
     let total = paths.count
     var clips: [[Float]] = []
     clips.reserveCapacity(total)
     var totalSamples = 0
     for (idx, path) in paths.enumerated() {
-        let samples = try AudioLoader.loadAudio(fromPath: path)
+        let samples = try AudioLoader.loadAudio(fromPath: path, limits: limits)
         let secs = Double(samples.count) / Double(WhisperKit.sampleRate)
         logger?.log(
             "Loading clip \(idx + 1)/\(total): \((path as NSString).lastPathComponent) "
@@ -82,7 +90,11 @@ func loadPreparedAudio(fromFiles paths: [String], logger: VerboseLogger? = nil) 
 /// Decodes every input audio file once before model initialization. This keeps
 /// bad or corrupt inputs on the cheap input-error path instead of discovering
 /// them only after Whisper/SpeakerKit models have been downloaded or loaded.
-func preflightAudioDecoding(for sessions: [AudioSession], logger: VerboseLogger? = nil) throws {
+func preflightAudioDecoding(
+    for sessions: [AudioSession],
+    limits: AudioLoadLimits = .default,
+    logger: VerboseLogger? = nil
+) throws {
     var seen: Set<String> = []
     var paths: [String] = []
     for session in sessions {
@@ -100,7 +112,7 @@ func preflightAudioDecoding(for sessions: [AudioSession], logger: VerboseLogger?
     }
 
     for path in paths {
-        let samples = try AudioLoader.loadAudio(fromPath: path)
+        let samples = try AudioLoader.loadAudio(fromPath: path, limits: limits)
         _ = samples.count
     }
 }

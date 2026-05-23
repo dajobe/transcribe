@@ -121,13 +121,14 @@ enum ConfigCommand {
     /// Display order for `config show` (smaller runs first).
     private static func configShowGroup(for dottedKey: String) -> Int {
         if !dottedKey.contains(".") { return 0 }
-        if dottedKey.hasPrefix("output.") { return 1 }
-        if dottedKey.hasPrefix("cache.") { return 2 }
-        if dottedKey.hasPrefix("speakers.") { return 3 }
-        if dottedKey.hasPrefix("compute.") { return 4 }
-        if dottedKey.hasPrefix("logging.") { return 5 }
-        if dottedKey.hasPrefix("dir.") { return 6 }
-        if dottedKey.hasPrefix("voiceMemos.") { return 7 }
+        if dottedKey.hasPrefix("input.") { return 1 }
+        if dottedKey.hasPrefix("output.") { return 2 }
+        if dottedKey.hasPrefix("cache.") { return 3 }
+        if dottedKey.hasPrefix("speakers.") { return 4 }
+        if dottedKey.hasPrefix("compute.") { return 5 }
+        if dottedKey.hasPrefix("logging.") { return 6 }
+        if dottedKey.hasPrefix("dir.") { return 7 }
+        if dottedKey.hasPrefix("voiceMemos.") { return 8 }
         return 99
     }
 
@@ -209,6 +210,7 @@ enum ConfigCommand {
         )
 
         r("format", shared.format, fmtDef)
+        r("input.maxAudioMB", String(shared.maxAudioMB), String(TranscriptionDefaults.maxAudioMB))
         r("output.dir", shared.outputDir, outDef)
 
         let prefixEff = shared.outputPrefix ?? none
@@ -279,6 +281,10 @@ enum ConfigCommand {
         case "model": cfg.model = nil
         case "language": cfg.language = nil
         case "format": cfg.format = nil
+        case "input.maxAudioMB":
+            guard var input = cfg.input else { return true }
+            input.maxAudioMB = nil
+            cfg.input = pruneInputSection(input)
         case "output.dir":
             guard var o = cfg.output else { return true }
             o.dir = nil
@@ -381,6 +387,11 @@ enum ConfigCommand {
         return o
     }
 
+    private static func pruneInputSection(_ input: UserConfigFile.InputSection) -> UserConfigFile.InputSection? {
+        if input.maxAudioMB == nil { return nil }
+        return input
+    }
+
     private static func pruneSpeakersSection(_ s: UserConfigFile.SpeakersSection) -> UserConfigFile.SpeakersSection? {
         if s.enabled == nil && s.merge == nil && s.min == nil && s.max == nil { return nil }
         return s
@@ -405,6 +416,14 @@ enum ConfigCommand {
             cfg.language = v.isEmpty ? nil : v
         case "format":
             cfg.format = v
+        case "input.maxAudioMB":
+            var input = cfg.input ?? UserConfigFile.InputSection()
+            let value = try parseIntNonNil(v)
+            guard value >= 0 else {
+                throw TranscribeError(message: "input.maxAudioMB must be >= 0.", exitCode: .invalidUsage)
+            }
+            input.maxAudioMB = value
+            cfg.input = input
         case "output.dir":
             var o = cfg.output ?? UserConfigFile.OutputSection()
             o.dir = v

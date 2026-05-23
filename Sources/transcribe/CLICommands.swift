@@ -405,6 +405,15 @@ struct SharedTranscriptionOptions: ParsableArguments {
         help: "SpeakerKit embedder compute units; default \(TranscriptionDefaults.embedderCompute.rawValue)"
     )
     var embedderCompute: ComputeUnitsOption?
+
+    @Option(
+        name: .long,
+        help: """
+            Maximum decoded audio size in megabytes before failing (default: \(TranscriptionDefaults.maxAudioMB); \
+            0 disables the hard cap). Files larger than 500 MB on disk emit a warning before decoding.
+            """
+    )
+    var maxAudioMB: Int?
 }
 
 struct DirectoryInputOptions: ParsableArguments {

@@ -35,6 +35,11 @@ struct ResolvedSharedOptions {
     let stateless: Bool
     let markImported: Bool
     let dryRun: Bool
+    let maxAudioMB: Int
+
+    var audioLoadLimits: AudioLoadLimits {
+        AudioLoadLimits(maxAudioMB: maxAudioMB)
+    }
 
     var resolvedFormats: [String] {
         parseOutputFormats(format)
@@ -133,6 +138,8 @@ enum ConfigMerge {
 
         let progressLogMode = try mergeProgressLog(cli: cli.progressLog, file: file.logging?.progressLog)
 
+        let maxAudioMB = cli.maxAudioMB ?? file.input?.maxAudioMB ?? TranscriptionDefaults.maxAudioMB
+
         return ResolvedSharedOptions(
             model: model,
             modelSource: modelSource,
@@ -157,7 +164,8 @@ enum ConfigMerge {
             redo: cli.redo,
             stateless: cli.stateless,
             markImported: cli.markImported,
-            dryRun: cli.dryRun
+            dryRun: cli.dryRun,
+            maxAudioMB: maxAudioMB
         )
     }
 
