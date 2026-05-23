@@ -62,6 +62,7 @@ struct UserConfigFile: Codable, Equatable {
     init() {}
 
     static func load(from url: URL) throws -> UserConfigFile {
+        warnIfWorldReadable(at: url)
         let data = try Data(contentsOf: url)
         let decoder = JSONDecoder()
         return try decoder.decode(UserConfigFile.self, from: data)
@@ -87,5 +88,17 @@ struct UserConfigFile: Codable, Equatable {
             try FileManager.default.removeItem(at: url)
         }
         try FileManager.default.moveItem(at: tmp, to: url)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int(0o600))],
+            ofItemAtPath: url.path
+        )
+    }
+
+    static func warnIfWorldReadable(at url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let mode = fileModeBits(atPath: url.path) else { return }
+        if mode & 0o004 != 0 {
+            emitWarning("Config file is world-readable: \(url.path)")
+        }
     }
 }
