@@ -71,19 +71,15 @@ that path to redirect the write.
 **Fix:** Use a UUID or `mkstemp`-equivalent for temp file names. (Fixed
 2026-03-22)
 
-### Timing history file permissions (Informational)
+### [FIXED] Timing history file permissions (Informational)
 
-`TimingStore.swift:67` creates the timing history file with mode `0644`
-(world-readable). The file contains input filenames and timing metadata, which
-leaks what audio files were transcribed and when.
+`TimingStore.swift` and `ProcessingStore.swift` now create and tighten history
+files to mode `0600` (owner-only) via `LockedAppendWriter`.
 
-**Fix:** Use `0600` instead.
+### [FIXED] No input size limit (Informational)
 
-### No input size limit (Informational)
-
-`AudioLoader.swift` loads the entire audio file into memory as `[Float]` with no
-size check. An extremely large file could cause excessive memory use. Low
-priority since the user chooses the input file.
+`AudioLoader.swift` warns before decoding files larger than 500 MB on disk and
+enforces a configurable `--max-audio-mb` hard cap (default 2048; `0` disables).
 
 ### Positive findings
 
