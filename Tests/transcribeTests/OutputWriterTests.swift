@@ -64,6 +64,21 @@ final class OutputWriterTests: XCTestCase {
         XCTAssertEqual(words.count, 1)
     }
 
+    func testResolvedOutputDirFollowsSymlinkComponent() throws {
+        let tempDir = try makeTemporaryDirectory()
+        let targetDir = tempDir.appendingPathComponent("target")
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let linkDir = tempDir.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(atPath: linkDir.path, withDestinationPath: targetDir.path)
+
+        let resolved = resolvedOutputDir(linkDir.path)
+        XCTAssertEqual(resolved, targetDir.resolvingSymlinksInPath().path)
+        XCTAssertEqual(
+            outputPaths(outputDir: linkDir.path, basename: "clip", formats: ["txt"], writeTxtFile: true),
+            [(targetDir.path as NSString).appendingPathComponent("clip.txt")]
+        )
+    }
+
     func testCheckOverwriteFailsOnPathTraversal() throws {
         XCTAssertThrowsError(
             try checkOverwrite(

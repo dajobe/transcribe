@@ -42,6 +42,7 @@ enum SourcePlanner {
     /// `dir` subcommands if you need to disambiguate or restrict the kind.
     static func modeForAliasPath(_ rawPath: String) throws -> SourceMode {
         let expanded = (rawPath as NSString).expandingTildeInPath
+        warnIfSymlink(expanded)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else {
             throw TranscribeError(message: "Input does not exist: \(rawPath)", exitCode: .inputFile)
@@ -51,6 +52,7 @@ enum SourcePlanner {
 
     static func validateFilePath(_ rawPath: String) throws {
         let expanded = (rawPath as NSString).expandingTildeInPath
+        warnIfSymlink(expanded)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else {
             throw TranscribeError(message: "Input does not exist: \(rawPath)", exitCode: .inputFile)
@@ -62,12 +64,20 @@ enum SourcePlanner {
 
     static func validateDirectoryPath(_ rawPath: String) throws {
         let expanded = (rawPath as NSString).expandingTildeInPath
+        warnIfSymlink(expanded)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else {
             throw TranscribeError(message: "Input does not exist: \(rawPath)", exitCode: .inputFile)
         }
         if !isDir.boolValue {
             throw TranscribeError(message: "`transcribe dir` requires a directory, got file: \(rawPath)", exitCode: .invalidUsage)
+        }
+    }
+
+    private static func warnIfSymlink(_ path: String) {
+        let url = URL(fileURLWithPath: path)
+        if (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+            emitWarning("Input path is a symlink: \(path)")
         }
     }
 

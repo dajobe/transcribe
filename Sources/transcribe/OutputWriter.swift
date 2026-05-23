@@ -29,9 +29,10 @@ func outputBasename(directoryPath: String) -> String {
     return last
 }
 
-/// Resolved output directory path (expanded tilde).
+/// Resolved output directory path (expanded tilde, canonicalized).
 func resolvedOutputDir(_ outputDir: String) -> String {
-    (outputDir as NSString).expandingTildeInPath
+    let expanded = (outputDir as NSString).expandingTildeInPath
+    return URL(fileURLWithPath: expanded).standardizedFileURL.resolvingSymlinksInPath().path
 }
 
 /// Throws TranscribeError(.outputWrite) if any of the requested output files exist and overwrite is false.
