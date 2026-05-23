@@ -1,8 +1,5 @@
 import CryptoKit
 import Foundation
-#if canImport(Darwin)
-import Darwin
-#endif
 
 enum ProcessingSourceKind: String, Codable, Equatable {
     case file
@@ -101,7 +98,7 @@ enum ProcessingStore {
             throw TranscribeError(message: "Failed to encode processing record.", exitCode: .outputWrite)
         }
         line.append("\n")
-        try appendProcessingLine(Data(line.utf8), to: url)
+        try LockedAppendWriter.append(Data(line.utf8), to: url)
     }
 
     static func loadRecords() throws -> [ProcessingRecord] {
@@ -301,32 +298,3 @@ func sourceIDForFiles(kind: ProcessingSourceKind, files: [String]) -> String {
     return "\(kind.rawValue):" + paths.joined(separator: "\u{1f}")
 }
 
-private func appendProcessingLine(_ data: Data, to url: URL) throws {
-    // macOS-only (Package.swift pins platforms: [.macOS(.v14)]). Uses an
-    // O_APPEND fd plus an advisory flock(LOCK_EX) so concurrent transcribe
-    // invocations serialize their ledger appends.
-    let fd = open(url.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o644))
-    guard fd >= 0 else {
-        throw POSIXError(.init(rawValue: errno) ?? .EIO)
-    }
-    defer { close(fd) }
-
-    guard flock(fd, LOCK_EX) == 0 else {
-        throw POSIXError(.init(rawValue: errno) ?? .EIO)
-    }
-    defer { flock(fd, LOCK_UN) }
-
-    try data.withUnsafeBytes { buffer in
-        guard let baseAddress = buffer.baseAddress else { return }
-        var bytesRemaining = buffer.count
-        var offset = 0
-        while bytesRemaining > 0 {
-            let bytesWritten = write(fd, baseAddress.advanced(by: offset), bytesRemaining)
-            if bytesWritten < 0 {
-                throw POSIXError(.init(rawValue: errno) ?? .EIO)
-            }
-            bytesRemaining -= bytesWritten
-            offset += bytesWritten
-        }
-    }
-}
