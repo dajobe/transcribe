@@ -146,7 +146,9 @@ Important mapping:
 - audio path: `ZPATH`, relative to the recordings directory when needed
 - recorded time: `ZDATE`, converted from Apple reference date
 - duration: `ZDURATION`, then `ZLOCALDURATION`, then later audio probing
-- title: `ZCUSTOMLABEL`, then `ZENCRYPTEDTITLE`, then `New Recording`
+- title: `ZCUSTOMLABEL`, then `ZCUSTOMLABELFORSORTING`, then
+  `ZENCRYPTEDTITLE`, then `New Recording`; timestamp-shaped placeholder labels
+  yield to a non-timestamp sorting or encrypted title
 
 If macOS denies the folder or database, surface a Full Disk Access hint. Missing
 audio files are warnings and skipped rows, not fatal by themselves.
@@ -164,8 +166,9 @@ The ledger records completed source sessions and imported baselines. It stores:
 - source kind and stable source id
 - per-file SHA-256 fingerprint, byte size, and mtime for the source files
 - settings signature (model, language, diarization on/off, speaker strategy,
-  min/max speakers, formats, write-txt-to-stdout, transcribe version) for
-  completed transcription runs; `null` for `--mark-imported` baselines
+  min/max speakers, formats, write-txt-to-stdout) for completed transcription
+  runs; `null` for `--mark-imported` baselines. The recorded transcribe version
+  is audit metadata and does not force re-transcription by itself.
 - output paths and `output_dir` / `basename`
 - Voice Memos audit metadata when present (title, recorded-at, unique id, path)
 

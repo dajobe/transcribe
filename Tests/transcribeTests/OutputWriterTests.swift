@@ -138,7 +138,9 @@ final class OutputWriterTests: XCTestCase {
             version: "9.9.9"
         )
 
-        XCTAssertTrue(md.hasPrefix("# my meeting"))
+        XCTAssertTrue(md.hasPrefix("---\n"))
+        XCTAssertTrue(md.contains("# my meeting"))
+        XCTAssertTrue(md.contains("audio_file: \"my meeting.wav\""))
         XCTAssertTrue(md.contains("## Metadata"))
         XCTAssertTrue(md.contains("`my meeting.wav`"))
         XCTAssertTrue(md.contains("- **Diarization:** on"))
@@ -296,7 +298,33 @@ final class OutputWriterTests: XCTestCase {
                 recordedAt: "2026-05-08T10:00:00Z",
                 recordingTitle: "Meeting",
                 voiceMemosUniqueID: "abc",
-                voiceMemosPath: "/Recordings/memo.m4a"
+                voiceMemosPath: "/Recordings/memo.m4a",
+                voiceMemos: VoiceMemosOutputMetadata(
+                    sessionTitle: "Meeting",
+                    recordingCount: 1,
+                    recordings: [
+                        VoiceMemoOutputRecording(
+                            title: "Meeting",
+                            titleSource: .customLabel,
+                            titleForSorting: "meeting",
+                            recordedAt: "2026-05-08T10:00:00Z",
+                            durationSeconds: 12.5,
+                            uniqueID: "abc",
+                            path: "/Recordings/memo.m4a",
+                            folderID: 3,
+                            flags: 7,
+                            audioDigestHex: "DEADBEEF",
+                            enhancements: VoiceMemoEnhancements(
+                                audioFutureFlags: 11,
+                                sharedFlags: 13,
+                                silenceRemoverEnabled: true,
+                                skipSilenceEnabled: false,
+                                studioMixEnabled: true,
+                                studioMixLevel: 0.75
+                            )
+                        ),
+                    ]
+                )
             ),
             model: "large-v3",
             version: "1.2.3"
@@ -308,6 +336,18 @@ final class OutputWriterTests: XCTestCase {
         XCTAssertEqual(metadata["recording_title"] as? String, "Meeting")
         XCTAssertEqual(metadata["voice_memos_unique_id"] as? String, "abc")
         XCTAssertEqual(metadata["voice_memos_path"] as? String, "/Recordings/memo.m4a")
+        let voiceMemos = try XCTUnwrap(metadata["voice_memos"] as? [String: Any])
+        XCTAssertEqual(voiceMemos["session_title"] as? String, "Meeting")
+        XCTAssertEqual(voiceMemos["recording_count"] as? Int, 1)
+        let recordings = try XCTUnwrap(voiceMemos["recordings"] as? [[String: Any]])
+        let recording = try XCTUnwrap(recordings.first)
+        XCTAssertEqual(recording["title"] as? String, "Meeting")
+        XCTAssertEqual(recording["title_source"] as? String, "custom_label")
+        XCTAssertEqual(recording["title_for_sorting"] as? String, "meeting")
+        XCTAssertEqual(recording["audio_digest"] as? String, "DEADBEEF")
+        let enhancements = try XCTUnwrap(recording["enhancements"] as? [String: Any])
+        XCTAssertEqual(enhancements["silence_remover_enabled"] as? Bool, true)
+        XCTAssertEqual(enhancements["skip_silence_enabled"] as? Bool, false)
     }
 
     func testRenderMarkdownIncludesSourcesBlockForDirectory() {
@@ -366,11 +406,36 @@ final class OutputWriterTests: XCTestCase {
                 recordedAt: "2026-05-08T10:00:00Z",
                 recordingTitle: "Meeting",
                 voiceMemosUniqueID: "abc",
-                voiceMemosPath: "/Recordings/memo.m4a"
+                voiceMemosPath: "/Recordings/memo.m4a",
+                voiceMemos: VoiceMemosOutputMetadata(
+                    sessionTitle: "Meeting",
+                    recordingCount: 1,
+                    recordings: [
+                        VoiceMemoOutputRecording(
+                            title: "Meeting",
+                            titleSource: .customLabel,
+                            titleForSorting: "meeting",
+                            recordedAt: "2026-05-08T10:00:00Z",
+                            durationSeconds: 1,
+                            uniqueID: "abc",
+                            path: "/Recordings/memo.m4a",
+                            folderID: nil,
+                            flags: nil,
+                            audioDigestHex: nil,
+                            enhancements: nil
+                        ),
+                    ]
+                )
             ),
             model: "large-v3",
             version: "1.2.3"
         )
+        XCTAssertTrue(md.hasPrefix("---\n"))
+        XCTAssertTrue(md.contains("voice_memos:"))
+        XCTAssertTrue(md.contains("  session_title: \"Meeting\""))
+        XCTAssertTrue(md.contains("  recording_count: 1"))
+        XCTAssertTrue(md.contains("    - title: \"Meeting\""))
+        XCTAssertTrue(md.contains("      title_source: \"custom_label\""))
         XCTAssertTrue(md.contains("- **Input source:** `voice_memos`"))
         XCTAssertTrue(md.contains("- **Recorded:** 2026-05-08T10:00:00Z"))
         XCTAssertTrue(md.contains("- **Recording title:** `Meeting`"))

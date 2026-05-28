@@ -1,24 +1,5 @@
 import Foundation
 
-struct VoiceMemoRecording: Equatable {
-    let primaryKey: Int
-    let uniqueID: String?
-    let path: String
-    let recordedAt: Date
-    let durationSeconds: Double?
-    let title: String
-    let audioDigestHex: String?
-    let flags: Int?
-    let folderID: Int?
-
-    var sourceID: String {
-        if let uniqueID, !uniqueID.isEmpty {
-            return "voice_memos:\(uniqueID)"
-        }
-        return "voice_memos:\(URL(fileURLWithPath: path).standardizedFileURL.path)"
-    }
-}
-
 enum VoiceMemosImport {
     static let defaultRecordingsDirectory = "~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings"
 
@@ -57,7 +38,14 @@ enum VoiceMemosImport {
               \(quotedColumnOrNull("ZENCRYPTEDTITLE")),
               \(quotedColumnOrNull("ZAUDIODIGEST")),
               \(quotedColumnOrNull("ZFLAGS")),
-              \(quotedColumnOrNull("ZFOLDER"))
+              \(quotedColumnOrNull("ZFOLDER")),
+              \(quotedColumnOrNull("ZCUSTOMLABELFORSORTING")),
+              \(quotedColumnOrNull("ZAUDIOFUTUREFLAGS")),
+              \(quotedColumnOrNull("ZSHAREDFLAGS")),
+              \(quotedColumnOrNull("ZSILENCEREMOVERENABLED")),
+              \(quotedColumnOrNull("ZSKIPSILENCEENABLED")),
+              \(quotedColumnOrNull("ZSTUDIOMIXENABLED")),
+              \(quotedColumnOrNull("ZSTUDIOMIXLEVEL"))
             FROM ZCLOUDRECORDING
             WHERE "ZPATH" IS NOT NULL AND "ZPATH" != '' AND "ZDATE" IS NOT NULL
             ORDER BY "ZDATE" ASC, "Z_PK" ASC;
@@ -74,11 +62,21 @@ enum VoiceMemosImport {
                 return nil
             }
 
-            let customTitle = nilIfEmpty(row.text(6))
-            let encryptedTitle = nilIfEmpty(row.text(7))
-            let title = customTitle ?? encryptedTitle ?? "New Recording"
+            let (title, titleSource) = resolveTitle(
+                customLabel: nilIfEmpty(row.text(6)),
+                sortingLabel: nilIfEmpty(row.text(11)),
+                encryptedTitle: nilIfEmpty(row.text(7))
+            )
             let duration = row.double(4) ?? row.double(5)
             let digestHex = nilIfEmpty(row.blob(8).map { $0.hexEncodedString })
+            let enhancements = optionalEnhancements(
+                audioFutureFlags: row.int(12).map(Int.init),
+                sharedFlags: row.int(13).map(Int.init),
+                silenceRemoverEnabled: optionalBool(row.int(14)),
+                skipSilenceEnabled: optionalBool(row.int(15)),
+                studioMixEnabled: optionalBool(row.int(16)),
+                studioMixLevel: row.double(17)
+            )
             return VoiceMemoRecording(
                 primaryKey: primaryKey,
                 uniqueID: nilIfEmpty(row.text(1)),
@@ -88,7 +86,10 @@ enum VoiceMemosImport {
                 title: title,
                 audioDigestHex: digestHex,
                 flags: row.int(9).map(Int.init),
-                folderID: row.int(10).map(Int.init)
+                folderID: row.int(10).map(Int.init),
+                titleSource: titleSource,
+                titleForSorting: nilIfEmpty(row.text(11)),
+                enhancements: enhancements
             )
         }
         let recordings = rawRecordings.compactMap { $0 }
@@ -137,33 +138,63 @@ enum VoiceMemosImport {
                 return basenames(for: [recording])[0]
             }
             let recordedAt = group.first?.recordedAt ?? Date(timeIntervalSince1970: 0)
-            return "\(voiceMemoBasenameDate(recordedAt)) Voice Memos Session \(index + 1)"
+            let title = sanitizeVoiceMemoTitle(sessionTitle(for: group, sessionIndex: index + 1))
+            return "\(voiceMemoBasenameDate(recordedAt)) \(title)"
         }
         return uniqued(raw)
     }
 
     static func outputMetadata(for recording: VoiceMemoRecording) -> OutputSourceMetadata {
-        OutputSourceMetadata(
+        let sessionTitle = sessionTitle(for: [recording], sessionIndex: 1)
+        return OutputSourceMetadata(
             source: "voice_memos",
             recordedAt: iso8601String(recording.recordedAt),
-            recordingTitle: recording.title,
+            recordingTitle: sessionTitle,
             voiceMemosUniqueID: recording.uniqueID,
-            voiceMemosPath: recording.path
+            voiceMemosPath: recording.path,
+            voiceMemos: VoiceMemosOutputMetadata(
+                sessionTitle: sessionTitle,
+                recordingCount: 1,
+                recordings: [recording.outputRecording()]
+            )
         )
     }
 
-    static func outputMetadata(for recordings: [VoiceMemoRecording]) -> OutputSourceMetadata? {
+    static func outputMetadata(for recordings: [VoiceMemoRecording], sessionIndex: Int = 1) -> OutputSourceMetadata? {
         guard let first = recordings.first else { return nil }
         if recordings.count == 1 {
             return outputMetadata(for: first)
         }
+        let sessionTitle = sessionTitle(for: recordings, sessionIndex: sessionIndex)
         return OutputSourceMetadata(
             source: "voice_memos",
             recordedAt: iso8601String(first.recordedAt),
-            recordingTitle: "Voice Memos session",
+            recordingTitle: sessionTitle,
             voiceMemosUniqueID: nil,
-            voiceMemosPath: nil
+            voiceMemosPath: nil,
+            voiceMemos: VoiceMemosOutputMetadata(
+                sessionTitle: sessionTitle,
+                recordingCount: recordings.count,
+                recordings: recordings.map { $0.outputRecording() }
+            )
         )
+    }
+
+    static func sessionTitle(for recordings: [VoiceMemoRecording], sessionIndex: Int) -> String {
+        guard !recordings.isEmpty else { return "Voice Memos Session \(sessionIndex)" }
+        if recordings.count == 1, let first = recordings.first {
+            return first.title
+        }
+
+        let usefulTitles = recordings
+            .filter(\.hasUserTitle)
+            .map(\.title)
+            .map(sanitizeVoiceMemoTitle)
+            .filter { !$0.isEmpty }
+        let base = commonTitlePrefix(usefulTitles)
+            ?? usefulTitles.first
+            ?? "Voice Memos Session \(sessionIndex)"
+        return "\(base) +\(recordings.count) memos"
     }
 
     private static func isSafeColumnName(_ name: String) -> Bool {
@@ -241,5 +272,93 @@ enum VoiceMemosImport {
     private static func nilIfEmpty(_ value: String?) -> String? {
         guard let value, !value.isEmpty else { return nil }
         return value
+    }
+
+    private static func resolveTitle(
+        customLabel: String?,
+        sortingLabel: String?,
+        encryptedTitle: String?
+    ) -> (String, VoiceMemoTitleSource) {
+        if let customLabel, !isTimestampFallbackTitle(customLabel) {
+            return (customLabel, .customLabel)
+        }
+        if let sortingLabel, !isTimestampFallbackTitle(sortingLabel) {
+            return (sortingLabel, .sortingLabel)
+        }
+        if let encryptedTitle, !isTimestampFallbackTitle(encryptedTitle) {
+            return (encryptedTitle, .encryptedTitle)
+        }
+        if let customLabel {
+            return (customLabel, .customLabel)
+        }
+        if let sortingLabel {
+            return (sortingLabel, .sortingLabel)
+        }
+        if let encryptedTitle {
+            return (encryptedTitle, .encryptedTitle)
+        }
+        return ("New Recording", .fallback)
+    }
+
+    private static func isTimestampFallbackTitle(_ value: String) -> Bool {
+        let pattern = #"^\d{4}-\d{2}-\d{2}T\d{2}[: ]\d{2}[: ]\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$"#
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private static func optionalBool(_ value: Int64?) -> Bool? {
+        value.map { $0 != 0 }
+    }
+
+    private static func optionalEnhancements(
+        audioFutureFlags: Int?,
+        sharedFlags: Int?,
+        silenceRemoverEnabled: Bool?,
+        skipSilenceEnabled: Bool?,
+        studioMixEnabled: Bool?,
+        studioMixLevel: Double?
+    ) -> VoiceMemoEnhancements? {
+        let enhancements = VoiceMemoEnhancements(
+            audioFutureFlags: audioFutureFlags,
+            sharedFlags: sharedFlags,
+            silenceRemoverEnabled: silenceRemoverEnabled,
+            skipSilenceEnabled: skipSilenceEnabled,
+            studioMixEnabled: studioMixEnabled,
+            studioMixLevel: studioMixLevel
+        )
+        return enhancements.isEmpty ? nil : enhancements
+    }
+
+    private static func commonTitlePrefix(_ titles: [String]) -> String? {
+        guard titles.count >= 2 else { return nil }
+        var prefix = titles[0]
+        for title in titles.dropFirst() {
+            prefix = prefix.commonPrefix(with: title)
+            if prefix.isEmpty { return nil }
+        }
+        let trimmed = stripTrailingSequenceMarkers(prefix)
+        guard !trimmed.isEmpty else { return nil }
+        let shortestLen = titles.map(\.count).min() ?? 0
+        guard trimmed.count >= 8 else { return nil }
+        guard Double(trimmed.count) >= 0.3 * Double(shortestLen) else { return nil }
+        return trimmed
+    }
+
+    private static func stripTrailingSequenceMarkers(_ value: String) -> String {
+        var result = value
+        let trailingChars: Set<Character> = [" ", "\t", "-", "_", "(", "0"]
+        var changed = true
+        while changed {
+            changed = false
+            while let last = result.last, trailingChars.contains(last) || last.isWhitespace {
+                result.removeLast()
+                changed = true
+            }
+            if result.lowercased().hasSuffix("part") {
+                result.removeLast(4)
+                changed = true
+            }
+        }
+        return result
     }
 }

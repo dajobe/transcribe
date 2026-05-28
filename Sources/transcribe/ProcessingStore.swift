@@ -64,6 +64,17 @@ struct ProcessingSettingsSignature: Codable, Equatable {
     let formats: [String]
     let write_txt_to_stdout: Bool
     let transcribe_version: String
+
+    func isCompatibleForSkip(with other: ProcessingSettingsSignature) -> Bool {
+        model == other.model
+            && language == other.language
+            && diarization_enabled == other.diarization_enabled
+            && speaker_strategy == other.speaker_strategy
+            && min_speakers == other.min_speakers
+            && max_speakers == other.max_speakers
+            && formats == other.formats
+            && write_txt_to_stdout == other.write_txt_to_stdout
+    }
 }
 
 struct ProcessingRecord: Codable, Equatable {
@@ -150,7 +161,8 @@ enum ProcessingStore {
             guard record.source_fingerprint == fingerprint else {
                 return ProcessingDecision(action: .process, reason: .changedFile)
             }
-            guard record.settings_signature == settings,
+            guard let prior = record.settings_signature,
+                  prior.isCompatibleForSkip(with: settings),
                   record.output_paths == outputPaths else {
                 return ProcessingDecision(action: .process, reason: .settingsChanged)
             }
@@ -191,8 +203,8 @@ enum ProcessingStore {
     /// SHA-256 was already present in some prior record's fingerprint.
     ///
     /// - Completed records (`file`, `directory_session`, `voice_memos`) only
-    ///   match when their `settings_signature` equals `settings` AND their
-    ///   recorded `output_paths` still exist on disk; otherwise the prior
+    ///   match when their `settings_signature` is compatible with `settings`
+    ///   AND their recorded `output_paths` still exist on disk; otherwise the prior
     ///   transcript is gone or stale and we re-run.
     /// - Baseline records (`imported_baseline`, `voice_memos_baseline`) match
     ///   on content alone — they exist precisely to say "treat as done"
@@ -228,7 +240,8 @@ enum ProcessingStore {
             case .importedBaseline, .voiceMemosBaseline:
                 return ProcessingDecision(action: .skip, reason: .skipDuplicate, recordsSkipHistory: false)
             case .file, .directorySession, .voiceMemos:
-                guard let prior = record.settings_signature, prior == settings else {
+                guard let prior = record.settings_signature,
+                      prior.isCompatibleForSkip(with: settings) else {
                     pendingReason = pendingReason ?? .settingsChanged
                     continue
                 }
@@ -297,4 +310,3 @@ func sourceIDForFiles(kind: ProcessingSourceKind, files: [String]) -> String {
     let paths = files.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL.path }
     return "\(kind.rawValue):" + paths.joined(separator: "\u{1f}")
 }
-

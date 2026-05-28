@@ -99,6 +99,44 @@ final class ProcessingStoreTests: XCTestCase {
         }
     }
 
+    func testCompletedRecordIgnoresTranscribeVersionForSkip() throws {
+        let state = try makeTempDir()
+        let output = try makeTempDir()
+        try withXDGStateHome(state.path) {
+            let audio = output.appendingPathComponent("clip.m4a")
+            try Data("audio".utf8).write(to: audio)
+            let transcript = output.appendingPathComponent("clip.json")
+            try Data("{}".utf8).write(to: transcript)
+            let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+            let sourceID = sourceIDForFiles(kind: .file, files: [audio.path])
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
+                source_kind: .file,
+                source_id: sourceID,
+                source_fingerprint: fingerprint,
+                settings_signature: sampleSettings(version: "2.4.0"),
+                output_dir: output.path,
+                basename: "clip",
+                output_paths: [transcript.path],
+                audio_duration_s: 1,
+                warning_count: 0,
+                recording_title: nil,
+                recorded_at: nil,
+                voice_memos_unique_id: nil,
+                voice_memos_path: nil
+            ))
+
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file,
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                settings: sampleSettings(version: "2.4.3"),
+                outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
+        }
+    }
+
     func testChangedSettingsDoNotSkip() throws {
         let state = try makeTempDir()
         let output = try makeTempDir()
@@ -395,6 +433,41 @@ final class ProcessingStoreTests: XCTestCase {
         }
     }
 
+    func testContentMatchIgnoresTranscribeVersionForCompletedRecords() throws {
+        let state = try makeTempDir()
+        let dir = try makeTempDir()
+        try withXDGStateHome(state.path) {
+            let audio = dir.appendingPathComponent("clip.m4a")
+            try Data("clip".utf8).write(to: audio)
+            let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+            let priorOutput = dir.appendingPathComponent("clip.json")
+            try Data("{}".utf8).write(to: priorOutput)
+
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
+                source_kind: .voiceMemos,
+                source_id: "voice_memos:abc",
+                source_fingerprint: fingerprint,
+                settings_signature: sampleSettings(version: "2.4.0"),
+                output_dir: dir.path,
+                basename: "clip",
+                output_paths: [priorOutput.path],
+                audio_duration_s: 1,
+                warning_count: 0,
+                recording_title: "clip",
+                recorded_at: nil,
+                voice_memos_unique_id: "abc",
+                voice_memos_path: audio.path
+            ))
+
+            XCTAssertEqual(try ProcessingStore.contentDecision(
+                fingerprint: fingerprint,
+                settings: sampleSettings(version: "2.4.3")
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
+        }
+    }
+
     func testImportedBaselineSkipsWithoutOutputs() throws {
         let state = try makeTempDir()
         let dir = try makeTempDir()
@@ -431,7 +504,7 @@ final class ProcessingStoreTests: XCTestCase {
         }
     }
 
-    private func sampleSettings(model: String = "model") -> ProcessingSettingsSignature {
+    private func sampleSettings(model: String = "model", version: String = "1.0.0") -> ProcessingSettingsSignature {
         ProcessingSettingsSignature(
             model: model,
             language: "en",
@@ -441,7 +514,7 @@ final class ProcessingStoreTests: XCTestCase {
             max_speakers: nil,
             formats: ["json"],
             write_txt_to_stdout: false,
-            transcribe_version: "1.0.0"
+            transcribe_version: version
         )
     }
 

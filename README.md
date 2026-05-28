@@ -280,7 +280,9 @@ whether they were processed, skipped, imported, or reprocessed.
   history unless `--stateless` or `--dry-run` is active; skips against
   `--mark-imported` baselines are not re-recorded.
 - **Changed input/settings:** changed audio bytes, model, language, diarization
-  settings, speaker options, formats, or transcribe version cause a new run.
+  settings, speaker options, or formats cause a new run. The transcribe version
+  is recorded for audit/debugging, but a patch upgrade alone does not force
+  re-transcription.
 - **Missing outputs:** if history says a session completed but the requested
   output files are missing, the session is processed again.
 - **Redo:** pass `--redo` to ignore processing history and process matching
@@ -307,13 +309,20 @@ The importer reads `CloudRecordings.db` read-only and transcribes the `.m4a`
 files in place. There is no download, copy, or conversion step.
 
 - **Metadata:** recording date comes from `ZDATE`; title comes from
-  `ZCUSTOMLABEL`, then `ZENCRYPTEDTITLE`, then `New Recording`. The stable
-  identity prefers `ZUNIQUEID` and falls back to the audio path.
-- **Output names:** Voice Memos use `YYYY-MM-DD HHMM <title>`, with unsafe
-  filename characters stripped and numeric suffixes added for collisions.
-- **Output metadata:** JSON and Markdown include `source: voice_memos`, recorded
-  time, recording title, Voice Memos unique ID when present, and the source
-  path.
+  `ZCUSTOMLABEL`, then `ZCUSTOMLABELFORSORTING`, then `ZENCRYPTEDTITLE`, then
+  `New Recording`. Timestamp-shaped placeholder labels yield to a non-timestamp
+  sorting or encrypted title. The stable identity prefers `ZUNIQUEID` and falls
+  back to the audio path.
+- **Output names:** Voice Memos use edited titles from iOS/macOS:
+  `YYYY-MM-DD HHMM <title>` for one memo, or a title-derived
+  `YYYY-MM-DD HHMM <title> +N memos` for grouped sessions. Unsafe filename
+  characters are stripped and numeric suffixes are added for collisions.
+- **Output metadata:** JSON and Markdown include the existing flat
+  `source: voice_memos`, recorded time, recording title, Voice Memos unique ID,
+  and source path fields. They also include structured Voice Memos metadata with
+  the session title, recording count, and curated per-recording fields such as
+  title source, sort title, duration, folder id, audio digest, and enhancement
+  flags when present.
 - **Session grouping:** Voice Memos use the same `--session-gap` default as
   directory input. Adjacent memos recorded within the gap are processed as one
   transcript session; gaps larger than the threshold start a new transcript. Use
@@ -412,7 +421,8 @@ Given `meeting.mp3`, the tool writes:
 - `meeting.json` — machine-readable transcript preserving segment boundaries
 - `meeting.srt` — SubRip subtitle format
 - `meeting.vtt` — WebVTT subtitle format
-- `meeting.md` — Markdown transcript with metadata and headings
+- `meeting.md` — Markdown transcript with YAML frontmatter, metadata, and
+  headings
 
 Which files are written depends on `--format`. Markdown details:
 **[specs/folder-action-markdown.md](specs/folder-action-markdown.md)**.

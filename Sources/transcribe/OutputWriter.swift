@@ -150,12 +150,13 @@ struct JSONMetadata: Encodable {
     let recording_title: String?
     let voice_memos_unique_id: String?
     let voice_memos_path: String?
+    let voice_memos: VoiceMemosOutputMetadata?
 
     private enum CodingKeys: String, CodingKey {
         case audio_file, audio_files, duration_seconds, model, language
         case diarization_enabled, speaker_strategy, speakers_detected
         case transcribe_version, created_at
-        case source, recorded_at, recording_title, voice_memos_unique_id, voice_memos_path
+        case source, recorded_at, recording_title, voice_memos_unique_id, voice_memos_path, voice_memos
     }
 
     func encode(to encoder: Encoder) throws {
@@ -178,6 +179,7 @@ struct JSONMetadata: Encodable {
         try c.encodeIfPresent(recording_title, forKey: .recording_title)
         try c.encodeIfPresent(voice_memos_unique_id, forKey: .voice_memos_unique_id)
         try c.encodeIfPresent(voice_memos_path, forKey: .voice_memos_path)
+        try c.encodeIfPresent(voice_memos, forKey: .voice_memos)
     }
 }
 
@@ -187,6 +189,23 @@ struct OutputSourceMetadata: Codable, Equatable {
     let recordingTitle: String?
     let voiceMemosUniqueID: String?
     let voiceMemosPath: String?
+    let voiceMemos: VoiceMemosOutputMetadata?
+
+    init(
+        source: String,
+        recordedAt: String?,
+        recordingTitle: String?,
+        voiceMemosUniqueID: String?,
+        voiceMemosPath: String?,
+        voiceMemos: VoiceMemosOutputMetadata? = nil
+    ) {
+        self.source = source
+        self.recordedAt = recordedAt
+        self.recordingTitle = recordingTitle
+        self.voiceMemosUniqueID = voiceMemosUniqueID
+        self.voiceMemosPath = voiceMemosPath
+        self.voiceMemos = voiceMemos
+    }
 }
 
 struct JSONSegmentWord: Encodable {
@@ -236,7 +255,8 @@ func renderJSON(
         recorded_at: sourceMetadata?.recordedAt,
         recording_title: sourceMetadata?.recordingTitle,
         voice_memos_unique_id: sourceMetadata?.voiceMemosUniqueID,
-        voice_memos_path: sourceMetadata?.voiceMemosPath
+        voice_memos_path: sourceMetadata?.voiceMemosPath,
+        voice_memos: sourceMetadata?.voiceMemos
     )
 
     let segments = output.segments.map { seg in
@@ -319,6 +339,15 @@ func renderMarkdown(
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
     let createdAt = formatter.string(from: Date())
+    let frontmatter = renderMarkdownFrontmatter(
+        output: output,
+        audioFile: audioFile,
+        audioFiles: audioFiles,
+        sourceMetadata: sourceMetadata,
+        model: model,
+        version: version,
+        createdAt: createdAt
+    )
 
     var metaLines: [String] = [
         "## Metadata",
@@ -406,9 +435,119 @@ func renderMarkdown(
     let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     let meta = metaLines.joined(separator: "\n")
     if body.isEmpty {
-        return "\(titleLine)\n\n\(meta)\n"
+        return "\(frontmatter)\n\(titleLine)\n\n\(meta)\n"
     }
-    return "\(titleLine)\n\n\(meta)\n\(body)\n"
+    return "\(frontmatter)\n\(titleLine)\n\n\(meta)\n\(body)\n"
+}
+
+private func renderMarkdownFrontmatter(
+    output: TranscriptionOutput,
+    audioFile: String,
+    audioFiles: [String]?,
+    sourceMetadata: OutputSourceMetadata?,
+    model: String,
+    version: String,
+    createdAt: String
+) -> String {
+    let basename = (audioFile as NSString).lastPathComponent
+    var lines: [String] = [
+        "---",
+        "audio_file: \(yamlQuoted(basename))",
+    ]
+    if let audioFiles, !audioFiles.isEmpty {
+        lines.append("audio_files:")
+        for file in audioFiles {
+            lines.append("  - \(yamlQuoted(file))")
+        }
+    }
+    lines.append("duration_seconds: \(yamlNumber(output.durationSeconds))")
+    lines.append("model: \(yamlQuoted(model))")
+    if let language = output.language {
+        lines.append("language: \(yamlQuoted(language))")
+    }
+    lines.append("diarization_enabled: \(output.diarizationEnabled ? "true" : "false")")
+    lines.append("speaker_strategy: \(yamlQuoted(output.speakerStrategy))")
+    if let speakersDetected = output.speakersDetected {
+        lines.append("speakers_detected: \(speakersDetected)")
+    }
+    lines.append("transcribe_version: \(yamlQuoted(version))")
+    lines.append("created_at: \(yamlQuoted(createdAt))")
+
+    if let sourceMetadata {
+        lines.append("source: \(yamlQuoted(sourceMetadata.source))")
+        appendOptionalString(sourceMetadata.recordedAt, key: "recorded_at", indent: "", to: &lines)
+        appendOptionalString(sourceMetadata.recordingTitle, key: "recording_title", indent: "", to: &lines)
+        appendOptionalString(sourceMetadata.voiceMemosUniqueID, key: "voice_memos_unique_id", indent: "", to: &lines)
+        appendOptionalString(sourceMetadata.voiceMemosPath, key: "voice_memos_path", indent: "", to: &lines)
+        if let voiceMemos = sourceMetadata.voiceMemos {
+            appendVoiceMemosYAML(voiceMemos, to: &lines)
+        }
+    }
+
+    lines.append("---")
+    lines.append("")
+    return lines.joined(separator: "\n")
+}
+
+private func appendVoiceMemosYAML(_ metadata: VoiceMemosOutputMetadata, to lines: inout [String]) {
+    lines.append("voice_memos:")
+    lines.append("  session_title: \(yamlQuoted(metadata.sessionTitle))")
+    lines.append("  recording_count: \(metadata.recordingCount)")
+    lines.append("  recordings:")
+    for recording in metadata.recordings {
+        lines.append("    - title: \(yamlQuoted(recording.title))")
+        lines.append("      title_source: \(yamlQuoted(recording.titleSource.rawValue))")
+        appendOptionalString(recording.titleForSorting, key: "title_for_sorting", indent: "      ", to: &lines)
+        lines.append("      recorded_at: \(yamlQuoted(recording.recordedAt))")
+        appendOptionalNumber(recording.durationSeconds, key: "duration_seconds", indent: "      ", to: &lines)
+        appendOptionalString(recording.uniqueID, key: "unique_id", indent: "      ", to: &lines)
+        appendOptionalString(recording.path, key: "path", indent: "      ", to: &lines)
+        appendOptionalInt(recording.folderID, key: "folder_id", indent: "      ", to: &lines)
+        appendOptionalInt(recording.flags, key: "flags", indent: "      ", to: &lines)
+        appendOptionalString(recording.audioDigestHex, key: "audio_digest", indent: "      ", to: &lines)
+        if let enhancements = recording.enhancements {
+            lines.append("      enhancements:")
+            appendOptionalInt(enhancements.audioFutureFlags, key: "audio_future_flags", indent: "        ", to: &lines)
+            appendOptionalInt(enhancements.sharedFlags, key: "shared_flags", indent: "        ", to: &lines)
+            appendOptionalBool(enhancements.silenceRemoverEnabled, key: "silence_remover_enabled", indent: "        ", to: &lines)
+            appendOptionalBool(enhancements.skipSilenceEnabled, key: "skip_silence_enabled", indent: "        ", to: &lines)
+            appendOptionalBool(enhancements.studioMixEnabled, key: "studio_mix_enabled", indent: "        ", to: &lines)
+            appendOptionalNumber(enhancements.studioMixLevel, key: "studio_mix_level", indent: "        ", to: &lines)
+        }
+    }
+}
+
+private func appendOptionalString(_ value: String?, key: String, indent: String, to lines: inout [String]) {
+    guard let value else { return }
+    lines.append("\(indent)\(key): \(yamlQuoted(value))")
+}
+
+private func appendOptionalInt(_ value: Int?, key: String, indent: String, to lines: inout [String]) {
+    guard let value else { return }
+    lines.append("\(indent)\(key): \(value)")
+}
+
+private func appendOptionalBool(_ value: Bool?, key: String, indent: String, to lines: inout [String]) {
+    guard let value else { return }
+    lines.append("\(indent)\(key): \(value ? "true" : "false")")
+}
+
+private func appendOptionalNumber(_ value: Double?, key: String, indent: String, to lines: inout [String]) {
+    guard let value else { return }
+    lines.append("\(indent)\(key): \(yamlNumber(value))")
+}
+
+private func yamlQuoted(_ value: String) -> String {
+    let escaped = value
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+        .replacingOccurrences(of: "\n", with: "\\n")
+        .replacingOccurrences(of: "\r", with: "\\r")
+    return "\"\(escaped)\""
+}
+
+private func yamlNumber(_ value: Double) -> String {
+    String(format: "%.6g", value)
 }
 
 // MARK: - SRT

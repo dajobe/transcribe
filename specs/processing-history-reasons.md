@@ -29,7 +29,7 @@ Reason labels:
 |:---------------|:-------------------|:-------------------------------------------------------------------------------------------------------------|
 | `first run`    | `first_run`        | No prior matching history entry caused this run.                                                             |
 | `skip dup`     | `skip_duplicate`   | Skipped because the input matched prior completed or imported history.                                       |
-| `settings`     | `settings_changed` | Reprocessed because model, language, speaker settings, output formats, version, or similar settings changed. |
+| `settings`     | `settings_changed` | Reprocessed because model, language, speaker settings, output formats, or similar transcription settings changed. |
 | `missing out`  | `missing_outputs`  | Reprocessed because matching prior output files were missing.                                                |
 | `redo`         | `redo`             | Reprocessed because `--redo` ignored processing history.                                                     |
 | `imported`     | `imported`         | Entered history through `--mark-imported`.                                                                   |
@@ -60,7 +60,8 @@ Reason selection is based on the first decisive history match:
   append a skip audit row.
 - Exact source with different fingerprint: `changed file`.
 - Exact source and fingerprint with changed settings or requested output paths:
-  `settings`.
+  `settings`. Transcribe version is recorded in the settings signature for
+  audit/debugging, but a version-only change still matches for skip decisions.
 - Exact source and fingerprint with matching settings but missing outputs:
   `missing out`.
 - Path-agnostic content matches with compatible settings and existing outputs:

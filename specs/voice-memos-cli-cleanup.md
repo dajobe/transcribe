@@ -166,8 +166,9 @@ Store:
 - source fingerprint: SHA-256 of file bytes, or ordered per-file SHA-256s for
   directory sessions
 - important settings signature: model, language, diarization, speaker strategy,
-  speaker bounds, requested formats, stdout text behavior, and transcribe
-  version
+  speaker bounds, requested formats, and stdout text behavior
+- transcribe version for audit/debugging; a version-only change does not force
+  re-transcription
 - output dir, basename, output paths, completion time, duration, warning count
 - Voice Memos audit metadata when available
 
@@ -202,12 +203,16 @@ Read `CloudRecordings.db` read-only and query `ZCLOUDRECORDING`:
 - recorded time: `ZDATE`, converted from Apple reference date
 - duration: prefer `ZDURATION`, fallback to `ZLOCALDURATION`, fallback to
   AVFoundation duration
-- title: prefer `ZCUSTOMLABEL`, then `ZENCRYPTEDTITLE`, then `New Recording`
+- title: prefer `ZCUSTOMLABEL`, then `ZCUSTOMLABELFORSORTING`, then
+  `ZENCRYPTEDTITLE`, then `New Recording`; timestamp-shaped placeholder labels
+  yield to a non-timestamp sorting or encrypted title
 - optional diagnostics: audio digest, flags, folder id
 
 Output basename:
 
-- `YYYY-MM-DD HHMM <sanitized title>`
+- `YYYY-MM-DD HHMM <sanitized title>` for a single memo
+- `YYYY-MM-DD HHMM <sanitized title> +N memos` for grouped sessions, using a
+  common edited-title prefix when present or the first edited title otherwise
 - deterministic numeric suffixes for collisions
 
 Output metadata for Voice Memos:
@@ -217,6 +222,8 @@ Output metadata for Voice Memos:
 - `recording_title`
 - `voice_memos_unique_id`
 - `voice_memos_path`
+- nested `voice_memos` metadata with session title, recording count, and
+  curated per-recording fields
 
 If macOS denies the recordings directory or database, report that Full Disk
 Access may be required.
@@ -246,6 +253,8 @@ output directory, following the same overwrite rules as other output formats.
 
 Markdown structure:
 
+- Frontmatter: YAML metadata with the same structured source metadata exposed
+  by JSON.
 - Title: a single `#` heading derived from the input basename, with `#`
   characters stripped. If nothing remains, use `# Transcript`.
 - Metadata: a `## Metadata` section with source filename, duration, model,

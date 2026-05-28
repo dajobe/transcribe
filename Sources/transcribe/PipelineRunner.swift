@@ -167,7 +167,8 @@ enum SourcePlanner {
             + "(session-gap=\(sessionGap)m)"
         )
 
-        return zip(zip(sessions, groupedRecordings), basenames).map { combined in
+        return Array(zip(zip(sessions, groupedRecordings), basenames)).enumerated().map { indexed in
+            let (index, combined) = indexed
             let ((session, group), basename) = combined
             let single = group.count == 1 ? group[0] : nil
             return PipelineSessionPlan(
@@ -177,7 +178,7 @@ enum SourcePlanner {
                 audioFilesForOutput: group.count > 1 ? group.map { ($0.path as NSString).lastPathComponent } : nil,
                 sourceKind: .voiceMemos,
                 sourceID: single?.sourceID ?? sourceIDForFiles(kind: .voiceMemos, files: session.files),
-                sourceMetadata: VoiceMemosImport.outputMetadata(for: group)
+                sourceMetadata: VoiceMemosImport.outputMetadata(for: group, sessionIndex: index + 1)
             )
         }
     }
@@ -540,7 +541,7 @@ struct PipelineRunner {
             return ProcessingDecision(action: .process, reason: .redo)
         }
         let imported = try ProcessingStore.importedBaselineDecision(sourceID: plan.sourceID, fingerprint: fingerprint)
-        if imported.shouldSkip || imported.reason != .firstRun {
+        if imported.shouldSkip {
             return imported
         }
         let completed = try ProcessingStore.completionDecision(
@@ -550,13 +551,23 @@ struct PipelineRunner {
             settings: settings,
             outputPaths: outputPaths
         )
-        if completed.shouldSkip || completed.reason != .firstRun {
+        if completed.shouldSkip {
             return completed
         }
         // Path-agnostic content match: catch the same audio under a new path
         // (file moved between directories) or extracted from a prior dir/voice
         // memos session into a single-file run.
-        return try ProcessingStore.contentDecision(fingerprint: fingerprint, settings: settings)
+        let content = try ProcessingStore.contentDecision(fingerprint: fingerprint, settings: settings)
+        if content.shouldSkip {
+            return content
+        }
+        if imported.reason != .firstRun {
+            return imported
+        }
+        if completed.reason != .firstRun {
+            return completed
+        }
+        return content
     }
 
     private func resolveModel() async throws -> String {

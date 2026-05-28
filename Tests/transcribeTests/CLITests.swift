@@ -617,6 +617,155 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(err.contains("Using model cache"), "dry run should not load models; stderr: \(err)")
     }
 
+    func testVoiceMemosDryRunUsesGroupedTitleBasename() throws {
+        let dir = try makeTempDir()
+        try createVoiceMemosDB(in: dir, uniqueID: "dry-run-title-a", path: "A.m4a", title: "Design Review part 1")
+        SQLiteTestHelpers.executeScript(
+            at: dir.appendingPathComponent("CloudRecordings.db"),
+            """
+            INSERT INTO ZCLOUDRECORDING (Z_PK, ZDATE, ZDURATION, ZCUSTOMLABEL, ZPATH, ZUNIQUEID)
+            VALUES (2, 789000020, 12.5, 'Design Review part 2', 'B.m4a', 'dry-run-title-b');
+            """
+        )
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("A.m4a"))
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("B.m4a"))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = [
+            "--dry-run",
+            "--transcript-only",
+            "voice-memos",
+            "--recordings-dir", dir.path,
+        ]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "stderr: \(err)")
+        XCTAssertTrue(out.contains("Dry run: 1 session scanned"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("Design Review +2 memos"), "stdout: \(out)")
+        XCTAssertFalse(out.contains("Voice Memos Session"), "stdout: \(out)")
+    }
+
+    func testVoiceMemosDryRunUsesSortedTitleWhenCustomLabelIsTimestamp() throws {
+        let dir = try makeTempDir()
+        SQLiteTestHelpers.executeScript(
+            at: dir.appendingPathComponent("CloudRecordings.db"),
+            """
+            CREATE TABLE ZCLOUDRECORDING (
+                Z_PK INTEGER PRIMARY KEY,
+                ZDATE TIMESTAMP,
+                ZDURATION FLOAT,
+                ZCUSTOMLABEL VARCHAR,
+                ZCUSTOMLABELFORSORTING VARCHAR,
+                ZENCRYPTEDTITLE VARCHAR,
+                ZPATH VARCHAR,
+                ZUNIQUEID VARCHAR
+            );
+            INSERT INTO ZCLOUDRECORDING
+              (Z_PK, ZDATE, ZDURATION, ZCUSTOMLABEL, ZCUSTOMLABELFORSORTING, ZENCRYPTEDTITLE, ZPATH, ZUNIQUEID)
+            VALUES
+              (1, 789000000, 12.5, '2026-05-27T18:27:58Z', 'Crusoe Cody hill reliability capacity 2026-05-27', 'Crusoe Cody hill reliability capacity 2026-05-27', 'A.m4a', 'dry-run-sorted-title-a');
+            """
+        )
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("A.m4a"))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = [
+            "--dry-run",
+            "--transcript-only",
+            "voice-memos",
+            "--recordings-dir", dir.path,
+        ]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "stderr: \(err)")
+        XCTAssertTrue(out.contains("Crusoe Cody hill reliability capacity 2026-05-27"), "stdout: \(out)")
+        XCTAssertFalse(out.contains("2026-05-27T18 27 58Z"), "stdout: \(out)")
+    }
+
+    func testVoiceMemosDryRunSkipsContentCompletedUnderOldBasenameAndVersion() throws {
+        let dir = try makeTempDir()
+        let state = try makeTempDir()
+        let output = try makeTempDir()
+        try createVoiceMemosDB(in: dir, uniqueID: "skip-old-name-a", path: "A.m4a", title: "New Title")
+        let audio = dir.appendingPathComponent("A.m4a")
+        try Data("audio".utf8).write(to: audio)
+        let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+        let oldOutput = output.appendingPathComponent("Old Title.json")
+        try Data("{}".utf8).write(to: oldOutput)
+
+        try withXDGStateHome(state.path) {
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
+                source_kind: .voiceMemos,
+                source_id: "voice_memos:skip-old-name-a",
+                source_fingerprint: fingerprint,
+                settings_signature: ProcessingSettingsSignature(
+                    model: Transcribe.defaultModel,
+                    language: nil,
+                    diarization_enabled: false,
+                    speaker_strategy: "subsegment",
+                    min_speakers: nil,
+                    max_speakers: nil,
+                    formats: ["json"],
+                    write_txt_to_stdout: false,
+                    transcribe_version: "2.4.0"
+                ),
+                output_dir: output.path,
+                basename: "Old Title",
+                output_paths: [oldOutput.path],
+                audio_duration_s: 12.5,
+                warning_count: 0,
+                recording_title: "Old Title",
+                recorded_at: "2026-01-01T00:00:00Z",
+                voice_memos_unique_id: "skip-old-name-a",
+                voice_memos_path: audio.path
+            ))
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+            process.arguments = [
+                "--dry-run",
+                "--transcript-only",
+                "--format", "json",
+                "--output-dir", output.path,
+                "voice-memos",
+                "--recordings-dir", dir.path,
+            ]
+            process.environment = ProcessInfo.processInfo.environment.merging(
+                ["XDG_STATE_HOME": state.path]
+            ) { _, new in new }
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+            try process.run()
+            process.waitUntilExit()
+
+            let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            XCTAssertEqual(process.terminationStatus, 0, "stderr: \(err)")
+            XCTAssertTrue(out.contains("0 would process, 1 would skip"), "stdout: \(out)")
+            XCTAssertFalse(out.contains("process\tvoice_memos"), "stdout: \(out)")
+        }
+    }
+
     func testVoiceMemosMarkImportedDryRunDoesNotWriteLedger() throws {
         let dir = try makeTempDir()
         let state = try makeTempDir()
@@ -842,6 +991,19 @@ final class CLITests: XCTestCase {
             VALUES (1, 789000000, 12.5, '\(title)', '\(path)', '\(uniqueID)');
             """
         )
+    }
+
+    private func withXDGStateHome(_ path: String, _ body: () throws -> Void) throws {
+        let previous = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+        setenv("XDG_STATE_HOME", path, 1)
+        defer {
+            if let previous {
+                setenv("XDG_STATE_HOME", previous, 1)
+            } else {
+                unsetenv("XDG_STATE_HOME")
+            }
+        }
+        try body()
     }
 
     func testNegativeMaxSpeakersExitTwo() throws {

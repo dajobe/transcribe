@@ -11,12 +11,13 @@ final class VoiceMemosImportTests: XCTestCase {
         let dateSeconds = 789_000_000.0
         try sqlite(dir, """
             INSERT INTO ZCLOUDRECORDING
-              (Z_PK, ZDATE, ZDURATION, ZLOCALDURATION, ZCUSTOMLABEL, ZENCRYPTEDTITLE, ZPATH, ZUNIQUEID, ZFLAGS, ZFOLDER)
+              (Z_PK, ZDATE, ZDURATION, ZLOCALDURATION, ZCUSTOMLABEL, ZCUSTOMLABELFORSORTING, ZENCRYPTEDTITLE, ZPATH, ZUNIQUEID, ZFLAGS, ZFOLDER, ZAUDIOFUTUREFLAGS, ZSHAREDFLAGS, ZSILENCEREMOVERENABLED, ZSKIPSILENCEENABLED, ZSTUDIOMIXENABLED, ZSTUDIOMIXLEVEL)
             VALUES
-              (1, \(dateSeconds), 12.5, 10.0, 'Custom Title', 'Encrypted Title', 'A.m4a', 'unique-a', 7, 3);
+              (1, \(dateSeconds), 12.5, 10.0, 'Custom Title', 'custom title', 'Encrypted Title', 'A.m4a', 'unique-a', 7, 3, 11, 13, 1, 0, 1, 0.75);
             """)
 
         let recordings = try VoiceMemosImport.loadRecordings(recordingsDirectory: dir.path)
+        let enhancements = try XCTUnwrap(recordings[0].enhancements)
 
         XCTAssertEqual(recordings.count, 1)
         XCTAssertEqual(recordings[0].primaryKey, 1)
@@ -24,8 +25,16 @@ final class VoiceMemosImportTests: XCTestCase {
         XCTAssertEqual(recordings[0].path, audio.path)
         XCTAssertEqual(recordings[0].durationSeconds, 12.5)
         XCTAssertEqual(recordings[0].title, "Custom Title")
+        XCTAssertEqual(recordings[0].titleSource, .customLabel)
+        XCTAssertEqual(recordings[0].titleForSorting, "custom title")
         XCTAssertEqual(recordings[0].flags, 7)
         XCTAssertEqual(recordings[0].folderID, 3)
+        XCTAssertEqual(enhancements.audioFutureFlags, 11)
+        XCTAssertEqual(enhancements.sharedFlags, 13)
+        XCTAssertEqual(enhancements.silenceRemoverEnabled, true)
+        XCTAssertEqual(enhancements.skipSilenceEnabled, false)
+        XCTAssertEqual(enhancements.studioMixEnabled, true)
+        XCTAssertEqual(enhancements.studioMixLevel, 0.75)
         XCTAssertEqual(recordings[0].recordedAt, Date(timeIntervalSinceReferenceDate: dateSeconds))
     }
 
@@ -45,9 +54,48 @@ final class VoiceMemosImportTests: XCTestCase {
 
         XCTAssertNil(recording.uniqueID)
         XCTAssertEqual(recording.title, "Fallback Title")
+        XCTAssertEqual(recording.titleSource, .encryptedTitle)
         XCTAssertEqual(recording.durationSeconds, 5.0)
         XCTAssertTrue(recording.sourceID.hasPrefix("voice_memos:"))
         XCTAssertTrue(recording.sourceID.contains("B.m4a"))
+    }
+
+    func testSortingTitleBeatsEncryptedTimestampFallback() throws {
+        let dir = try makeTempDir()
+        try createVoiceMemosDB(in: dir)
+        let audio = dir.appendingPathComponent("F.m4a")
+        try Data("audio".utf8).write(to: audio)
+        try sqlite(dir, """
+            INSERT INTO ZCLOUDRECORDING
+              (Z_PK, ZDATE, ZLOCALDURATION, ZCUSTOMLABELFORSORTING, ZENCRYPTEDTITLE, ZPATH)
+            VALUES
+              (12, 789000012, 5.0, 'Project Update', '2026-05-27T15:29:31Z', 'F.m4a');
+            """)
+
+        let recording = try XCTUnwrap(VoiceMemosImport.loadRecordings(recordingsDirectory: dir.path).first)
+
+        XCTAssertEqual(recording.title, "Project Update")
+        XCTAssertEqual(recording.titleSource, .sortingLabel)
+        XCTAssertEqual(recording.titleForSorting, "Project Update")
+    }
+
+    func testTimestampCustomLabelYieldsToSortedTitle() throws {
+        let dir = try makeTempDir()
+        try createVoiceMemosDB(in: dir)
+        let audio = dir.appendingPathComponent("G.m4a")
+        try Data("audio".utf8).write(to: audio)
+        try sqlite(dir, """
+            INSERT INTO ZCLOUDRECORDING
+              (Z_PK, ZDATE, ZLOCALDURATION, ZCUSTOMLABEL, ZCUSTOMLABELFORSORTING, ZENCRYPTEDTITLE, ZPATH)
+            VALUES
+              (13, 789000013, 5.0, '2026-05-27T18:27:58Z', 'Crusoe Cody hill reliability capacity 2026-05-27', 'Crusoe Cody hill reliability capacity 2026-05-27', 'G.m4a');
+            """)
+
+        let recording = try XCTUnwrap(VoiceMemosImport.loadRecordings(recordingsDirectory: dir.path).first)
+
+        XCTAssertEqual(recording.title, "Crusoe Cody hill reliability capacity 2026-05-27")
+        XCTAssertEqual(recording.titleSource, .sortingLabel)
+        XCTAssertEqual(recording.titleForSorting, "Crusoe Cody hill reliability capacity 2026-05-27")
     }
 
     func testMissingOptionalColumnsStillLoadsRecording() throws {
@@ -67,8 +115,10 @@ final class VoiceMemosImportTests: XCTestCase {
         let recording = try XCTUnwrap(VoiceMemosImport.loadRecordings(recordingsDirectory: dir.path).first)
 
         XCTAssertEqual(recording.title, "New Recording")
+        XCTAssertEqual(recording.titleSource, .fallback)
         XCTAssertNil(recording.uniqueID)
         XCTAssertNil(recording.durationSeconds)
+        XCTAssertNil(recording.enhancements)
         XCTAssertEqual(recording.path, audio.path)
     }
 
@@ -141,6 +191,39 @@ final class VoiceMemosImportTests: XCTestCase {
         XCTAssertEqual(basenames[1], "\(basenames[0]) - 2")
         XCTAssertFalse(basenames[0].contains("/"))
         XCTAssertFalse(basenames[0].contains(":"))
+    }
+
+    func testVoiceMemoSessionBasenamesUseCommonTitlePrefixForGroupedRecordings() {
+        let date = Date(timeIntervalSinceReferenceDate: 789_000_000)
+        let first = makeRecording(id: "a", title: "Design Review part 1", recordedAt: date)
+        let second = makeRecording(
+            id: "b",
+            title: "Design Review part 2",
+            recordedAt: date.addingTimeInterval(60)
+        )
+
+        let basenames = VoiceMemosImport.sessionBasenames(for: [[first, second]])
+
+        XCTAssertEqual(basenames.count, 1)
+        XCTAssertTrue(basenames[0].contains("Design Review +2 memos"), "basename: \(basenames[0])")
+        XCTAssertFalse(basenames[0].contains("Voice Memos Session"))
+    }
+
+    func testVoiceMemoSessionBasenamesUseFirstEditedTitleForDistinctGroupedRecordings() {
+        let date = Date(timeIntervalSinceReferenceDate: 789_000_000)
+        let first = makeRecording(id: "a", title: "Coffee Shop Notes", recordedAt: date)
+        let second = makeRecording(
+            id: "b",
+            title: "New Recording",
+            recordedAt: date.addingTimeInterval(60),
+            titleSource: .fallback
+        )
+
+        let basenames = VoiceMemosImport.sessionBasenames(for: [[first, second]])
+
+        XCTAssertEqual(basenames.count, 1)
+        XCTAssertTrue(basenames[0].contains("Coffee Shop Notes +2 memos"), "basename: \(basenames[0])")
+        XCTAssertFalse(basenames[0].contains("New Recording"))
     }
 
     func testDefaultRecordingsDirectoryUsesTildeForLaterExpansion() {
@@ -258,5 +341,25 @@ final class VoiceMemosImportTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
         return url
+    }
+
+    private func makeRecording(
+        id: String,
+        title: String,
+        recordedAt: Date,
+        titleSource: VoiceMemoTitleSource = .customLabel
+    ) -> VoiceMemoRecording {
+        VoiceMemoRecording(
+            primaryKey: 1,
+            uniqueID: id,
+            path: "/tmp/\(id).m4a",
+            recordedAt: recordedAt,
+            durationSeconds: nil,
+            title: title,
+            audioDigestHex: nil,
+            flags: nil,
+            folderID: nil,
+            titleSource: titleSource
+        )
     }
 }
