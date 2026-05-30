@@ -42,6 +42,150 @@ final class TimingStoreTests: XCTestCase {
         XCTAssertNil(TimingStore.medianWallSecondsPerAudioSecond(records: []))
     }
 
+    func testV1DecodeDefaultsPhaseFieldsToZero() throws {
+        let json = """
+        {
+          "schema_version": 1,
+          "ended_at": "2026-05-28T12:00:00.000Z",
+          "transcribe_version": "1.8.0",
+          "model": "model-a",
+          "diarization_enabled": false,
+          "input_basename": "a.wav",
+          "file_bytes": 1000,
+          "audio_duration_s": 10,
+          "segment_count": 5,
+          "speakers_detected": null,
+          "audio_load_ms": 100,
+          "whisper_init_ms": 200,
+          "speaker_init_ms": 0,
+          "parallel_ms": 0,
+          "transcribe_only_ms": 3000,
+          "merge_ms": 0,
+          "write_outputs_ms": 10,
+          "total_ms": 3310,
+          "decoding_windows": 2
+        }
+        """
+        let record = try JSONDecoder().decode(RunTimingRecord.self, from: Data(json.utf8))
+        XCTAssertEqual(record.schema_version, 1)
+        XCTAssertEqual(record.whisper_audio_processing_ms, 0)
+        XCTAssertEqual(record.whisper_logmels_ms, 0)
+        XCTAssertEqual(record.whisper_encoding_ms, 0)
+        XCTAssertEqual(record.whisper_decoding_loop_ms, 0)
+        XCTAssertEqual(record.whisper_total_encoding_runs, 0)
+        XCTAssertEqual(record.speaker_diarization_ms, 0)
+        XCTAssertEqual(record.speaker_total_chunks, 0)
+    }
+
+    func testMedianEncodingSecondsPerAudioSecondIgnoresZeroAndMissingValues() throws {
+        let v1JSON = """
+        {
+          "schema_version": 1,
+          "ended_at": "2026-05-28T12:00:00.000Z",
+          "transcribe_version": "1.8.0",
+          "model": "model-a",
+          "diarization_enabled": false,
+          "input_basename": "old.wav",
+          "file_bytes": 1000,
+          "audio_duration_s": 10,
+          "segment_count": 1,
+          "speakers_detected": null,
+          "audio_load_ms": 100,
+          "whisper_init_ms": 100,
+          "speaker_init_ms": 0,
+          "parallel_ms": 0,
+          "transcribe_only_ms": 1000,
+          "merge_ms": 0,
+          "write_outputs_ms": 10,
+          "total_ms": 1210,
+          "decoding_windows": 1
+        }
+        """
+        let migratedV1 = try JSONDecoder().decode(RunTimingRecord.self, from: Data(v1JSON.utf8))
+
+        var p1 = PhaseTimings()
+        p1.whisperEncodingMs = 1000
+        let r1 = RunTimingRecord(
+            endedAt: Date(),
+            transcribeVersion: "1.8.0",
+            model: "model-a",
+            diarizationEnabled: false,
+            inputBasename: "a.wav",
+            fileBytes: 100,
+            audioDurationS: 10,
+            segmentCount: 1,
+            speakersDetected: nil,
+            phases: p1,
+            writeOutputsMs: 1,
+            totalMs: 1000
+        )
+
+        var p2 = PhaseTimings()
+        p2.whisperEncodingMs = 3000
+        let r2 = RunTimingRecord(
+            endedAt: Date(),
+            transcribeVersion: "1.8.0",
+            model: "model-a",
+            diarizationEnabled: false,
+            inputBasename: "b.wav",
+            fileBytes: 100,
+            audioDurationS: 10,
+            segmentCount: 1,
+            speakersDetected: nil,
+            phases: p2,
+            writeOutputsMs: 1,
+            totalMs: 3000
+        )
+
+        let median = TimingStore.medianEncodingSecondsPerAudioSecond(records: [migratedV1, r1, r2])
+        XCTAssertEqual(try XCTUnwrap(median), 0.2, accuracy: 0.0001)
+    }
+
+    func testHistoricalRatiosUsesPhaseRecordsAcrossDiarizationModes() throws {
+        var transcriptOnlyPhases = PhaseTimings()
+        transcriptOnlyPhases.whisperEncodingMs = 2000
+        let transcriptOnly = RunTimingRecord(
+            endedAt: Date(),
+            transcribeVersion: "1.8.0",
+            model: "model-a",
+            diarizationEnabled: false,
+            inputBasename: "a.wav",
+            fileBytes: 100,
+            audioDurationS: 10,
+            segmentCount: 1,
+            speakersDetected: nil,
+            phases: transcriptOnlyPhases,
+            writeOutputsMs: 1,
+            totalMs: 2000
+        )
+
+        var diarizedPhases = PhaseTimings()
+        diarizedPhases.whisperEncodingMs = 4000
+        diarizedPhases.speakerDiarizationMs = 8000
+        let diarized = RunTimingRecord(
+            endedAt: Date(),
+            transcribeVersion: "1.8.0",
+            model: "model-a",
+            diarizationEnabled: true,
+            inputBasename: "b.wav",
+            fileBytes: 100,
+            audioDurationS: 10,
+            segmentCount: 1,
+            speakersDetected: 2,
+            phases: diarizedPhases,
+            writeOutputsMs: 1,
+            totalMs: 9000
+        )
+
+        let ratios = TimingStore.historicalRatios(
+            totalRecords: [diarized],
+            phaseRecords: [transcriptOnly, diarized]
+        )
+        XCTAssertEqual(try XCTUnwrap(ratios.totalSecondsPerAudioSecond), 0.9, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(ratios.encodingSecondsPerAudioSecond), 0.3, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(ratios.diarizationSecondsPerAudioSecond), 0.8, accuracy: 0.0001)
+    }
+
     func testStateDirectoryUnderXDGStateHome() throws {
         let temp = FileManager.default.temporaryDirectory
             .appendingPathComponent("transcribe-test-\(UUID().uuidString)", isDirectory: true)

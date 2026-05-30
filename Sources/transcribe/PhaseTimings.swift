@@ -11,6 +11,21 @@ struct PhaseTimings: Equatable {
     var transcribeOnlyMs: Int64 = 0
     var mergeMs: Int64 = 0
     var decodingWindows: Int? = nil
+    var whisperAudioProcessingMs: Int64 = 0
+    var whisperLogmelsMs: Int64 = 0
+    var whisperEncodingMs: Int64 = 0
+    var whisperDecodingLoopMs: Int64 = 0
+    var whisperTotalAudioProcessingRuns: Double = 0
+    var whisperTotalLogmelRuns: Double = 0
+    var whisperTotalEncodingRuns: Double = 0
+    var whisperTotalDecodingWindows: Double = 0
+    var whisperFirstProgressMs: Int64 = 0
+    var speakerDiarizationMs: Int64 = 0
+    var speakerSegmenterMs: Int64 = 0
+    var speakerEmbedderMs: Int64 = 0
+    var speakerClusteringMs: Int64 = 0
+    var speakerTotalChunks: Int = 0
+    var speakerTotalEmbeddings: Int = 0
 }
 
 extension RunTimingRecord {
@@ -49,5 +64,20 @@ extension RunTimingRecord {
         self.write_outputs_ms = writeOutputsMs
         self.total_ms = totalMs
         self.decoding_windows = phases.decodingWindows
+        self.whisper_audio_processing_ms = phases.whisperAudioProcessingMs
+        self.whisper_logmels_ms = phases.whisperLogmelsMs
+        self.whisper_encoding_ms = phases.whisperEncodingMs
+        self.whisper_decoding_loop_ms = phases.whisperDecodingLoopMs
+        self.whisper_total_audio_processing_runs = phases.whisperTotalAudioProcessingRuns
+        self.whisper_total_logmel_runs = phases.whisperTotalLogmelRuns
+        self.whisper_total_encoding_runs = phases.whisperTotalEncodingRuns
+        self.whisper_total_decoding_windows = phases.whisperTotalDecodingWindows
+        self.whisper_first_progress_ms = phases.whisperFirstProgressMs
+        self.speaker_diarization_ms = phases.speakerDiarizationMs
+        self.speaker_segmenter_ms = phases.speakerSegmenterMs
+        self.speaker_embedder_ms = phases.speakerEmbedderMs
+        self.speaker_clustering_ms = phases.speakerClusteringMs
+        self.speaker_total_chunks = phases.speakerTotalChunks
+        self.speaker_total_embeddings = phases.speakerTotalEmbeddings
     }
 }

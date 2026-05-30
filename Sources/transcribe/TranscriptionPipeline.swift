@@ -25,6 +25,50 @@ func segmentsFromTranscriptionResults(_ results: [TranscriptionResult]) -> [Tran
     }
 }
 
+private func secondsToMilliseconds(_ seconds: TimeInterval) -> Int64 {
+    Int64((seconds * 1000.0).rounded())
+}
+
+private func millisecondsValue(_ milliseconds: CFAbsoluteTime) -> Int64 {
+    Int64(milliseconds.rounded())
+}
+
+func applyWhisperPhaseTimings(
+    from results: [TranscriptionResult],
+    firstProgressMs: Int64?,
+    to phases: inout PhaseTimings
+) {
+    guard !results.isEmpty else { return }
+    let timings = results.map(\.timings)
+    let totalAudioProcessingRuns = timings.reduce(0.0) { $0 + $1.totalAudioProcessingRuns }
+    let totalLogmelRuns = timings.reduce(0.0) { $0 + $1.totalLogmelRuns }
+    let totalEncodingRuns = timings.reduce(0.0) { $0 + $1.totalEncodingRuns }
+    let totalDecodingWindows = timings.reduce(0.0) { $0 + $1.totalDecodingWindows }
+
+    phases.whisperAudioProcessingMs = secondsToMilliseconds(timings.reduce(0.0) { $0 + $1.audioProcessing })
+    phases.whisperLogmelsMs = secondsToMilliseconds(timings.reduce(0.0) { $0 + $1.logmels })
+    phases.whisperEncodingMs = secondsToMilliseconds(timings.reduce(0.0) { $0 + $1.encoding })
+    phases.whisperDecodingLoopMs = secondsToMilliseconds(timings.reduce(0.0) { $0 + $1.decodingLoop })
+    phases.whisperTotalAudioProcessingRuns = totalAudioProcessingRuns
+    phases.whisperTotalLogmelRuns = totalLogmelRuns
+    phases.whisperTotalEncodingRuns = totalEncodingRuns
+    phases.whisperTotalDecodingWindows = totalDecodingWindows
+    phases.whisperFirstProgressMs = firstProgressMs ?? 0
+    if phases.decodingWindows == nil, totalDecodingWindows > 0 {
+        phases.decodingWindows = Int(totalDecodingWindows)
+    }
+}
+
+func applySpeakerPhaseTimings(from result: DiarizationResult, to phases: inout PhaseTimings) {
+    guard let timings = result.timings as? PyannoteDiarizationTimings else { return }
+    phases.speakerDiarizationMs = millisecondsValue(timings.fullPipeline)
+    phases.speakerSegmenterMs = millisecondsValue(timings.segmenterTime)
+    phases.speakerEmbedderMs = millisecondsValue(timings.embedderTime)
+    phases.speakerClusteringMs = millisecondsValue(timings.clusteringTime)
+    phases.speakerTotalChunks = timings.numberOfChunks
+    phases.speakerTotalEmbeddings = timings.numberOfEmbeddings
+}
+
 func loadPreparedAudio(
     audioPath: String,
     limits: AudioLoadLimits = .default,
@@ -318,6 +362,7 @@ func runTranscriptionOnly(
         }
         phases.transcribeOnlyMs = tMs
         phases.decodingWindows = display.finish()
+        applyWhisperPhaseTimings(from: res, firstProgressMs: nil, to: &phases)
         results = res
     } else {
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
@@ -327,6 +372,7 @@ func runTranscriptionOnly(
             )
         }
         phases.transcribeOnlyMs = tMs
+        applyWhisperPhaseTimings(from: res, firstProgressMs: nil, to: &phases)
         results = res
     }
 
@@ -654,6 +700,8 @@ private func runTranscriptionWithDiarization(
         phases.decodingWindows = display.finish()
         results = pair.0
         diarizationResult = pair.1
+        applyWhisperPhaseTimings(from: results, firstProgressMs: nil, to: &phases)
+        applySpeakerPhaseTimings(from: diarizationResult, to: &phases)
     } else {
         let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
             async let transTask: [TranscriptionResult] = whisperKit.transcribe(
@@ -671,6 +719,8 @@ private func runTranscriptionWithDiarization(
         phases.parallelMs = pMs
         results = pair.0
         diarizationResult = pair.1
+        applyWhisperPhaseTimings(from: results, firstProgressMs: nil, to: &phases)
+        applySpeakerPhaseTimings(from: diarizationResult, to: &phases)
     }
 
     let whisperSegmentCount = results.flatMap(\.segments).count
@@ -886,6 +936,8 @@ func runSession(
         phases.decodingWindows = display.finish()
         results = pair.0
         diarizationResult = pair.1
+        applyWhisperPhaseTimings(from: results, firstProgressMs: nil, to: &phases)
+        applySpeakerPhaseTimings(from: diarizationResult, to: &phases)
     } else {
         let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
             async let transTask: [TranscriptionResult] = models.whisperKit.transcribe(
@@ -901,6 +953,8 @@ func runSession(
         phases.parallelMs = pMs
         results = pair.0
         diarizationResult = pair.1
+        applyWhisperPhaseTimings(from: results, firstProgressMs: nil, to: &phases)
+        applySpeakerPhaseTimings(from: diarizationResult, to: &phases)
     }
 
     let whisperSegmentCount = results.flatMap(\.segments).count
@@ -993,12 +1047,14 @@ private func runTranscriptOnlyOnLoadedWhisper(
         }
         phases.transcribeOnlyMs = tMs
         phases.decodingWindows = display.finish()
+        applyWhisperPhaseTimings(from: res, firstProgressMs: nil, to: &phases)
         results = res
     } else {
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
             try await whisperKit.transcribe(audioArray: audioArray, decodeOptions: decodeOptions)
         }
         phases.transcribeOnlyMs = tMs
+        applyWhisperPhaseTimings(from: res, firstProgressMs: nil, to: &phases)
         results = res
     }
 
