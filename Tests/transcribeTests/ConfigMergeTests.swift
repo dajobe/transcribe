@@ -25,6 +25,55 @@ final class ConfigMergeTests: XCTestCase {
         let cli = try SharedTranscriptionOptions.parse([])
         let merged = try ConfigMerge.mergeShared(cli: cli, file: file)
         XCTAssertTrue(merged.verbose)
+        XCTAssertEqual(merged.logLevel, .debug)
+    }
+
+    func testLogLevelFromCliAndShorthands() throws {
+        var merged = try ConfigMerge.mergeShared(
+            cli: try SharedTranscriptionOptions.parse(["--log-level", "error"]),
+            file: UserConfigFile()
+        )
+        XCTAssertEqual(merged.logLevel, .error)
+        XCTAssertFalse(merged.verbose)
+
+        merged = try ConfigMerge.mergeShared(
+            cli: try SharedTranscriptionOptions.parse(["--verbose"]),
+            file: UserConfigFile()
+        )
+        XCTAssertEqual(merged.logLevel, .debug)
+        XCTAssertTrue(merged.verbose)
+
+        merged = try ConfigMerge.mergeShared(
+            cli: try SharedTranscriptionOptions.parse(["--quiet"]),
+            file: UserConfigFile()
+        )
+        XCTAssertEqual(merged.logLevel, .warn)
+        XCTAssertFalse(merged.verbose)
+    }
+
+    func testLoggingLevelOverridesLegacyVerbose() throws {
+        var file = UserConfigFile()
+        file.logging = UserConfigFile.LoggingSection(verbose: true, level: "warn")
+
+        let merged = try ConfigMerge.mergeShared(cli: try SharedTranscriptionOptions.parse([]), file: file)
+
+        XCTAssertEqual(merged.logLevel, .warn)
+        XCTAssertFalse(merged.verbose)
+    }
+
+    func testConflictingCliLogLevelSelectorsThrow() throws {
+        XCTAssertThrowsError(
+            try ConfigMerge.mergeShared(
+                cli: try SharedTranscriptionOptions.parse(["--verbose", "--log-level", "info"]),
+                file: UserConfigFile()
+            )
+        )
+        XCTAssertThrowsError(
+            try ConfigMerge.mergeShared(
+                cli: try SharedTranscriptionOptions.parse(["--quiet", "--log-level", "error"]),
+                file: UserConfigFile()
+            )
+        )
     }
 
     func testMergeDirectoryUsesDefaultsWhenEmpty() throws {

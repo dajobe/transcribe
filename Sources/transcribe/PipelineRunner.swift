@@ -29,10 +29,29 @@ struct PipelineSessionPlan {
 
 struct PipelineWorkItem {
     let plan: PipelineSessionPlan
+    let sessionIndex: Int
+    let sessionTotal: Int
     let fingerprint: SourceFingerprint
     let outputPaths: [String]
     let historyReason: ProcessingHistoryReason
     let recordsSkipHistory: Bool
+}
+
+private enum PipelineOutputMode {
+    case tui
+    case eventLog
+    case off
+
+    static func resolve(_ progressLogMode: ProgressLogMode) -> PipelineOutputMode {
+        switch progressLogMode {
+        case .plain:
+            return .eventLog
+        case .off:
+            return .off
+        case .auto:
+            return isStdoutTTY() ? .tui : .eventLog
+        }
+    }
 }
 
 enum SourcePlanner {
@@ -191,18 +210,29 @@ struct PipelineRunner {
     func run() async throws {
         try validateSharedUsage()
         let startDate = Date()
-        let logger = VerboseLogger(verbose: options.verbose, startDate: startDate)
+        let outputMode = PipelineOutputMode.resolve(options.progressLogMode)
+        var activeReporter: TranscribeEventReporter? = nil
+        if !options.dryRun, outputMode != .tui {
+            activeReporter = TranscribeEventReporter(
+                statusEnabled: outputMode == .eventLog,
+                minimumLevel: options.logLevel
+            )
+        }
+        TranscribeEventReporter.setCurrent(activeReporter)
+        var logger = VerboseLogger(verbose: options.verbose, startDate: startDate, reporter: activeReporter)
 
         let sessionPlans = try await buildSessionPlans(logger: logger)
         if options.markImported {
             var workItems: [PipelineWorkItem] = []
             var skippedItems: [PipelineWorkItem] = []
-            for plan in sessionPlans {
+            for (idx, plan) in sessionPlans.enumerated() {
                 let fingerprint = try ProcessingStore.fingerprint(files: plan.session.files)
                 let decision = try ProcessingStore.importedBaselineDecision(sourceID: plan.sourceID, fingerprint: fingerprint)
                 if decision.shouldSkip {
                     let item = PipelineWorkItem(
                         plan: plan,
+                        sessionIndex: idx,
+                        sessionTotal: sessionPlans.count,
                         fingerprint: fingerprint,
                         outputPaths: [],
                         historyReason: decision.reason,
@@ -212,6 +242,8 @@ struct PipelineRunner {
                 } else {
                     let item = PipelineWorkItem(
                         plan: plan,
+                        sessionIndex: idx,
+                        sessionTotal: sessionPlans.count,
                         fingerprint: fingerprint,
                         outputPaths: [],
                         historyReason: .imported,
@@ -224,12 +256,22 @@ struct PipelineRunner {
                 emitDryRunMarkImported(workItems: workItems, skippedItems: skippedItems)
             } else {
                 try appendSkipRecords(workItems: skippedItems, settings: nil)
-                try markPlannedInputsImported(workItems: workItems)
+                emitSkippedSessions(skippedItems, reporter: activeReporter)
+                try markPlannedInputsImported(workItems: workItems, reporter: activeReporter)
+                activeReporter?.info(
+                    "run_done",
+                    fields: [
+                        TranscribeEventField("processed", .int(workItems.count)),
+                        TranscribeEventField("skipped", .int(skippedItems.count)),
+                        TranscribeEventField("elapsed_s", .double(Date().timeIntervalSince(startDate))),
+                    ],
+                    message: "mark imported complete"
+                )
             }
             return
         }
 
-        let resolvedModel = try await resolveModel()
+        let (resolvedModel, modelSelectionSource) = resolvedModelSelection()
         let settingsSignature = ProcessingSettingsSignature(
             model: resolvedModel,
             language: options.language,
@@ -238,34 +280,24 @@ struct PipelineRunner {
             min_speakers: options.minSpeakers,
             max_speakers: options.maxSpeakers,
             formats: options.resolvedFormats,
-            write_txt_to_stdout: options.wantsTxt && options.stdout,
             transcribe_version: Transcribe.version
         )
 
-        let historicalRatios: HistoricalTimingRatios = {
-            guard options.timingStatsEnabled else { return HistoricalTimingRatios() }
-            let totalRecords = (try? TimingStore.loadRecent(
-                model: resolvedModel,
-                diarizationEnabled: options.speakersEnabled
-            )) ?? []
-            let phaseRecords = (try? TimingStore.loadRecent(model: resolvedModel)) ?? []
-            return TimingStore.historicalRatios(totalRecords: totalRecords, phaseRecords: phaseRecords)
-        }()
-        let historicalRatio = historicalRatios.totalSecondsPerAudioSecond
-
         var workItems: [PipelineWorkItem] = []
         var skippedItems: [PipelineWorkItem] = []
-        for plan in sessionPlans {
+        for (idx, plan) in sessionPlans.enumerated() {
             let fingerprint = try ProcessingStore.fingerprint(files: plan.session.files)
             let paths = outputPaths(
                 outputDir: options.outputDir,
                 basename: plan.basename,
                 formats: options.resolvedFormats,
-                writeTxtFile: options.wantsTxt && !options.stdout
+                writeTxtFile: options.wantsTxt
             )
             let decision = try processingDecision(plan: plan, fingerprint: fingerprint, settings: settingsSignature, outputPaths: paths)
             let item = PipelineWorkItem(
                 plan: plan,
+                sessionIndex: idx,
+                sessionTotal: sessionPlans.count,
                 fingerprint: fingerprint,
                 outputPaths: paths,
                 historyReason: decision.reason,
@@ -285,30 +317,48 @@ struct PipelineRunner {
         }
 
         try appendSkipRecords(workItems: skippedItems, settings: settingsSignature)
+        emitSkippedSessions(skippedItems, reporter: activeReporter)
 
         if workItems.isEmpty {
             logger.log("No new work to process.")
+            activeReporter?.info(
+                "run_done",
+                fields: [
+                    TranscribeEventField("processed", .int(0)),
+                    TranscribeEventField("skipped", .int(skippedItems.count)),
+                    TranscribeEventField("elapsed_s", .double(Date().timeIntervalSince(startDate))),
+                ],
+                message: "no new work"
+            )
             return
         }
 
+        let historicalRatios: HistoricalTimingRatios = {
+            guard options.timingStatsEnabled else { return HistoricalTimingRatios() }
+            let totalRecords = (try? TimingStore.loadRecent(
+                model: resolvedModel,
+                diarizationEnabled: options.speakersEnabled
+            )) ?? []
+            let phaseRecords = (try? TimingStore.loadRecent(model: resolvedModel)) ?? []
+            return TimingStore.historicalRatios(totalRecords: totalRecords, phaseRecords: phaseRecords)
+        }()
+        let historicalRatio = historicalRatios.totalSecondsPerAudioSecond
+
         let liveProgressMode: LiveProgressRenderMode? = {
-            switch options.progressLogMode {
-            case .plain:
-                return .lineLog(minInterval: 1.0)
-            case .off:
-                return nil
-            case .auto:
-                if isStderrTTY() { return .tty }
-                return nil
-            }
+            outputMode == .tui ? .tty : nil
         }()
 
         let sharedLiveDisplay: LiveProgressDisplay? = {
             guard workItems.count == 1, let mode = liveProgressMode else { return nil }
             return LiveProgressDisplay(
                 startDate: startDate,
-                stderr: .standardError,
+                stderr: .standardOutput,
                 showDiarizationLine: options.speakersEnabled,
+                contextLines: progressContextLines(
+                    item: workItems[0],
+                    model: resolvedModel,
+                    outputDir: resolvedOutputDir(options.outputDir)
+                ),
                 audioDurationSeconds: estimatedAudioDurationSeconds(for: workItems[0].plan) ?? 0,
                 historicalRatios: historicalRatios,
                 historicalWallSecondsPerAudioSecond: historicalRatio,
@@ -316,24 +366,53 @@ struct PipelineRunner {
             )
         }()
 
+        if outputMode == .tui, let display = sharedLiveDisplay {
+            let tuiReporter = TranscribeEventReporter(
+                statusEnabled: false,
+                minimumLevel: options.logLevel,
+                textOutputEnabled: false,
+                diagnosticsSink: { event in
+                    display.appendDiagnostic(event)
+                },
+                failureSink: { _ in
+                    display.fail()
+                }
+            )
+            activeReporter = tuiReporter
+            TranscribeEventReporter.setCurrent(tuiReporter)
+            logger = VerboseLogger(verbose: options.verbose, startDate: startDate, reporter: tuiReporter)
+        }
+
+        emitModelSelection(model: resolvedModel, source: modelSelectionSource, reporter: activeReporter)
+
         for item in workItems {
             try checkOverwrite(
                 outputDir: options.outputDir,
                 basename: item.plan.basename,
                 formats: options.resolvedFormats,
-                writeTxtFile: options.wantsTxt && !options.stdout,
+                writeTxtFile: options.wantsTxt,
                 overwrite: options.overwrite
             )
         }
         sharedLiveDisplay?.beginAudioChecking()
+        let inputCheckStart = Date()
         try preflightAudioDecoding(
             for: workItems.map(\.plan.session),
             limits: options.audioLoadLimits,
             logger: logger
         )
         sharedLiveDisplay?.finishAudioChecking()
+        activeReporter?.info(
+            "phase_done",
+            fields: [
+                TranscribeEventField("phase", .string("input_check")),
+                TranscribeEventField("elapsed_s", .double(Date().timeIntervalSince(inputCheckStart))),
+            ],
+            message: "input checked"
+        )
 
         sharedLiveDisplay?.beginModelLoading()
+        let modelLoadStart = Date()
         let computeOptions = RuntimeComputeOptions.resolve(
             audioEncoder: options.audioEncoderCompute,
             textDecoder: options.textDecoderCompute,
@@ -350,16 +429,33 @@ struct PipelineRunner {
             logger: logger
         )
         sharedLiveDisplay?.finishModelLoading()
+        activeReporter?.info(
+            "phase_done",
+            fields: [
+                TranscribeEventField("phase", .string("model_loading")),
+                TranscribeEventField("elapsed_s", .double(Date().timeIntervalSince(modelLoadStart))),
+                TranscribeEventField("model", .string(resolvedModel)),
+            ],
+            message: "model loaded"
+        )
 
         let resolvedDir = resolvedOutputDir(options.outputDir)
 
-        for (idx, item) in workItems.enumerated() {
+        for (processedIndex, item) in workItems.enumerated() {
             let plan = item.plan
             let session = plan.session
             let sessionStartDate = Date()
             let basename = plan.basename
+            activeReporter?.info(
+                "session_start",
+                fields: sessionFields(
+                    item: item,
+                    outputDir: resolvedDir
+                ),
+                message: "session started"
+            )
             if workItems.count > 1 {
-                logger.log("--- Session \(idx + 1)/\(workItems.count): \(basename) (\(session.files.count) clip\(session.files.count == 1 ? "" : "s")) ---")
+                logger.log("--- Session \(item.sessionIndex + 1)/\(max(item.sessionTotal, 1)): \(basename) (\(session.files.count) clip\(session.files.count == 1 ? "" : "s")) ---")
             }
 
             let (preparedAudio, loadMs): (PreparedAudio, Int64)
@@ -382,6 +478,19 @@ struct PipelineRunner {
                 }
             }
             sharedLiveDisplay?.finishAudioLoading(durationSeconds: preparedAudio.durationSeconds)
+            activeReporter?.info(
+                "phase_done",
+                fields: sessionFields(
+                    item: item,
+                    outputDir: resolvedDir,
+                    extra: [
+                        TranscribeEventField("phase", .string("audio")),
+                        TranscribeEventField("elapsed_s", .double(Double(loadMs) / 1000.0)),
+                        TranscribeEventField("audio_duration_s", .double(preparedAudio.durationSeconds)),
+                    ]
+                ),
+                message: "audio loaded"
+            )
 
             let (sessionOutput, sessionPhases) = try await runSession(
                 preparedAudio: preparedAudio,
@@ -396,8 +505,19 @@ struct PipelineRunner {
                 pipelineStartDate: startDate,
                 historicalWallSecondsPerAudioSecond: historicalRatio,
                 historicalRatios: historicalRatios,
+                liveProgressContextLines: progressContextLines(
+                    item: item,
+                    model: resolvedModel,
+                    outputDir: resolvedDir
+                ),
                 liveProgressDisplay: sharedLiveDisplay,
                 logger: logger
+            )
+            emitProcessingPhaseEvents(
+                phases: sessionPhases,
+                item: item,
+                outputDir: resolvedDir,
+                reporter: activeReporter
             )
 
             var out = sessionOutput
@@ -406,7 +526,7 @@ struct PipelineRunner {
                 emitWarning(warning)
             }
 
-            let outputFiles = options.resolvedFormats.filter { fmt in fmt != "txt" || !options.stdout }.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
+            let outputFiles = options.resolvedFormats.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
             logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
 
             sharedLiveDisplay?.beginOutput()
@@ -419,13 +539,24 @@ struct PipelineRunner {
                     outputDir: options.outputDir,
                     basename: basename,
                     formats: options.resolvedFormats,
-                    writeTxtToStdout: options.wantsTxt && options.stdout,
                     overwrite: options.overwrite,
                     model: resolvedModel,
                     version: Transcribe.version
                 )
             }
             sharedLiveDisplay?.finishOutput()
+            activeReporter?.info(
+                "phase_done",
+                fields: sessionFields(
+                    item: item,
+                    outputDir: resolvedDir,
+                    extra: [
+                        TranscribeEventField("phase", .string("output")),
+                        TranscribeEventField("elapsed_s", .double(Double(writeMs) / 1000.0)),
+                    ]
+                ),
+                message: "outputs written"
+            )
             _ = sharedLiveDisplay?.finish()
 
             if !options.stateless {
@@ -454,12 +585,12 @@ struct PipelineRunner {
                     total += n
                 }
                 var phasesForRecord = sessionPhases
-                if idx == 0 {
+                if processedIndex == 0 {
                     phasesForRecord.whisperInitMs = whisperInitMs
                     phasesForRecord.speakerInitMs = speakerInitMs
                 }
                 let endedAt = Date()
-                let timingStartDate = (idx == 0) ? startDate : sessionStartDate
+                let timingStartDate = (processedIndex == 0) ? startDate : sessionStartDate
                 let totalMs = Int64(endedAt.timeIntervalSince(timingStartDate) * 1000.0)
                 let record = RunTimingRecord(
                     endedAt: endedAt,
@@ -477,11 +608,34 @@ struct PipelineRunner {
                 )
                 try? TimingStore.append(record)
             }
+
+            activeReporter?.info(
+                "session_done",
+                fields: sessionFields(
+                    item: item,
+                    outputDir: resolvedDir,
+                    extra: [
+                        TranscribeEventField("elapsed_s", .double(Date().timeIntervalSince(sessionStartDate))),
+                        TranscribeEventField("audio_duration_s", .double(out.durationSeconds)),
+                        TranscribeEventField("segments", .int(out.segments.count)),
+                    ]
+                ),
+                message: "session complete"
+            )
         }
 
         let endedAt = Date()
         let totalSec = Int(endedAt.timeIntervalSince(startDate))
         logger.log("Done. Total: \(totalSec / 60)m \(totalSec % 60)s")
+        activeReporter?.info(
+            "run_done",
+            fields: [
+                TranscribeEventField("processed", .int(workItems.count)),
+                TranscribeEventField("skipped", .int(skippedItems.count)),
+                TranscribeEventField("elapsed_s", .double(endedAt.timeIntervalSince(startDate))),
+            ],
+            message: "run complete"
+        )
     }
 
     private func buildSessionPlans(logger: VerboseLogger) async throws -> [PipelineSessionPlan] {
@@ -525,10 +679,6 @@ struct PipelineRunner {
         let strategy = options.speakerMerge.lowercased()
         if strategy != "subsegment" && strategy != "segment" {
             throw TranscribeError(message: "--speaker-merge must be 'subsegment' or 'segment'.", exitCode: .invalidUsage)
-        }
-
-        if options.stdout && !options.wantsTxt {
-            throw TranscribeError(message: "--stdout is only valid when txt is requested (e.g. --format txt,json or --format all).", exitCode: .invalidUsage)
         }
 
         if !options.speakersEnabled && (options.minSpeakers != nil || options.maxSpeakers != nil) {
@@ -605,20 +755,31 @@ struct PipelineRunner {
         return content
     }
 
-    private func resolveModel() async throws -> String {
+    private func resolvedModelSelection() -> (model: String, source: String) {
         let chosen = options.model
-        let label: String
+        let source: String
         switch options.modelSource {
         case .cli, .userFile:
-            label = "Using model"
+            source = options.modelSource == .cli ? "cli" : "config"
         case .builtin:
-            label = "Auto-selected model"
+            source = "builtin"
         }
-        FileHandle.standardError.write("\(label): \(chosen)\n".data(using: .utf8)!)
-        return chosen
+        return (chosen, source)
     }
 
-    private func markPlannedInputsImported(workItems: [PipelineWorkItem]) throws {
+    private func emitModelSelection(model: String, source: String, reporter: TranscribeEventReporter?) {
+        reporter?.info(
+            "phase_done",
+            fields: [
+                TranscribeEventField("phase", .string("model_selection")),
+                TranscribeEventField("model", .string(model)),
+                TranscribeEventField("model_source", .string(source)),
+            ],
+            message: source == "builtin" ? "model auto-selected" : "model selected"
+        )
+    }
+
+    private func markPlannedInputsImported(workItems: [PipelineWorkItem], reporter: TranscribeEventReporter?) throws {
         var marked = 0
         for item in workItems {
             let plan = item.plan
@@ -646,8 +807,24 @@ struct PipelineRunner {
                 voice_memos_path: plan.sourceMetadata?.voiceMemosPath
             ))
             marked += 1
+            reporter?.info(
+                "session_done",
+                fields: sessionFields(
+                    item: item,
+                    outputDir: nil,
+                    extra: [TranscribeEventField("history_reason", .string(item.historyReason.rawValue))]
+                ),
+                message: "input marked imported"
+            )
         }
-        FileHandle.standardError.write("Marked \(marked) input session\(marked == 1 ? "" : "s") as imported.\n".data(using: .utf8)!)
+        reporter?.info(
+            "phase_done",
+            fields: [
+                TranscribeEventField("phase", .string("mark_imported")),
+                TranscribeEventField("marked", .int(marked)),
+            ],
+            message: "inputs marked imported"
+        )
     }
 
     private func appendSkipRecords(workItems: [PipelineWorkItem], settings: ProcessingSettingsSignature?) throws {
@@ -673,6 +850,117 @@ struct PipelineRunner {
                 voice_memos_path: plan.sourceMetadata?.voiceMemosPath
             ))
         }
+    }
+
+    private func emitSkippedSessions(_ items: [PipelineWorkItem], reporter: TranscribeEventReporter?) {
+        for item in items {
+            reporter?.debug(
+                "session_skipped",
+                fields: sessionFields(
+                    item: item,
+                    outputDir: item.outputPaths.isEmpty ? nil : resolvedOutputDir(options.outputDir),
+                    extra: [TranscribeEventField("history_reason", .string(item.historyReason.rawValue))]
+                ),
+                message: "session skipped"
+            )
+        }
+    }
+
+    private func emitProcessingPhaseEvents(
+        phases: PhaseTimings,
+        item: PipelineWorkItem,
+        outputDir: String,
+        reporter: TranscribeEventReporter?
+    ) {
+        let encodingMs = phases.whisperAudioProcessingMs
+            + phases.whisperLogmelsMs
+            + phases.whisperEncodingMs
+        emitPhaseDone(
+            "encoding",
+            milliseconds: encodingMs,
+            item: item,
+            outputDir: outputDir,
+            reporter: reporter,
+            message: "audio encoded"
+        )
+        emitPhaseDone(
+            "transcription",
+            milliseconds: phases.whisperDecodingLoopMs > 0 ? phases.whisperDecodingLoopMs : phases.transcribeOnlyMs,
+            item: item,
+            outputDir: outputDir,
+            reporter: reporter,
+            message: "transcription complete"
+        )
+        emitPhaseDone(
+            "diarization",
+            milliseconds: phases.speakerDiarizationMs,
+            item: item,
+            outputDir: outputDir,
+            reporter: reporter,
+            message: "diarization complete"
+        )
+    }
+
+    private func emitPhaseDone(
+        _ phase: String,
+        milliseconds: Int64,
+        item: PipelineWorkItem,
+        outputDir: String,
+        reporter: TranscribeEventReporter?,
+        message: String
+    ) {
+        guard milliseconds > 0 else { return }
+        reporter?.info(
+            "phase_done",
+            fields: sessionFields(
+                item: item,
+                outputDir: outputDir,
+                extra: [
+                    TranscribeEventField("phase", .string(phase)),
+                    TranscribeEventField("elapsed_s", .double(Double(milliseconds) / 1000.0)),
+                ]
+            ),
+            message: message
+        )
+    }
+
+    private func sessionFields(
+        item: PipelineWorkItem,
+        outputDir: String?,
+        extra: [TranscribeEventField] = []
+    ) -> [TranscribeEventField] {
+        let plan = item.plan
+        let source = plan.sourceMetadata?.source ?? plan.sourceKind.rawValue
+        let inputNames = plan.session.files.map { ($0 as NSString).lastPathComponent }
+        let outputNames = item.outputPaths.map { ($0 as NSString).lastPathComponent }
+        var fields: [TranscribeEventField] = [
+            TranscribeEventField("source", .string(source)),
+            TranscribeEventField("session", .string("\(item.sessionIndex + 1)/\(max(item.sessionTotal, 1))")),
+            TranscribeEventField("input", .strings(inputNames)),
+            TranscribeEventField("output_basename", .string(plan.basename)),
+            TranscribeEventField("outputs", .strings(outputNames)),
+        ]
+        if let outputDir {
+            fields.append(TranscribeEventField("output_dir", .string(outputDir)))
+        }
+        fields.append(contentsOf: extra)
+        return fields
+    }
+
+    private func progressContextLines(
+        item: PipelineWorkItem,
+        model: String,
+        outputDir: String
+    ) -> [String] {
+        let inputNames = item.plan.session.files.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+        let outputNames = item.outputPaths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+        return [
+            "Session: \(item.sessionIndex + 1)/\(max(item.sessionTotal, 1))",
+            "Input: \(inputNames)",
+            "Output: \(item.plan.basename) (\(options.resolvedFormats.joined(separator: ","))) -> \(outputDir)"
+                + (outputNames.isEmpty ? "" : " [\(outputNames)]"),
+            "Model: \(model)",
+        ]
     }
 
     private func emitDryRunMarkImported(workItems: [PipelineWorkItem], skippedItems: [PipelineWorkItem]) {
@@ -706,16 +994,23 @@ struct PipelineRunner {
 }
 
 func runAndExitOnError(_ body: () async throws -> Void) async {
+    defer { TranscribeEventReporter.setCurrent(nil) }
     do {
         try await body()
     } catch let e as TranscribeError {
-        FileHandle.standardError.write((e.message + "\n").data(using: .utf8)!)
+        if !TranscribeEventReporter.emitError(e.message, exitCode: e.exitCode.rawValue) {
+            FileHandle.standardError.write((e.message + "\n").data(using: .utf8)!)
+        }
         Darwin.exit(e.exitCode.rawValue)
     } catch let e as WhisperError {
-        FileHandle.standardError.write((e.localizedDescription + "\n").data(using: .utf8)!)
+        if !TranscribeEventReporter.emitError(e.localizedDescription, exitCode: ExitCode.modelFailure.rawValue) {
+            FileHandle.standardError.write((e.localizedDescription + "\n").data(using: .utf8)!)
+        }
         Darwin.exit(ExitCode.modelFailure.rawValue)
     } catch {
-        FileHandle.standardError.write((error.localizedDescription + "\n").data(using: .utf8)!)
+        if !TranscribeEventReporter.emitError(error.localizedDescription, exitCode: ExitCode.runtimeFailure.rawValue) {
+            FileHandle.standardError.write((error.localizedDescription + "\n").data(using: .utf8)!)
+        }
         Darwin.exit(ExitCode.runtimeFailure.rawValue)
     }
 }

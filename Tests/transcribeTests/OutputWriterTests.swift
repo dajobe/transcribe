@@ -211,7 +211,6 @@ final class OutputWriterTests: XCTestCase {
             outputDir: tempDir.path,
             basename: "meeting",
             formats: ["md"],
-            writeTxtToStdout: false,
             overwrite: false,
             model: "large-v3",
             version: "1.2.3"

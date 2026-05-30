@@ -5,18 +5,18 @@ import WhisperKit
 import Darwin
 #endif
 
-/// How live transcription/diarization progress is rendered to stderr.
+/// How live transcription/diarization progress is rendered to the user.
 enum LiveProgressRenderMode: Sendable, Equatable {
     /// In-place redraw with ANSI cursor control (for an interactive terminal).
     case tty
-    /// Append one snapshot per throttle window as plain lines (works when stderr is a pipe or file).
+    /// Append one snapshot per throttle window as plain lines.
     case lineLog(minInterval: TimeInterval)
 }
 
-/// Returns true if stderr is a TTY (terminal). When false, use plain log lines instead of live progress.
-func isStderrTTY() -> Bool {
+/// Returns true if stdout is a TTY (terminal).
+func isStdoutTTY() -> Bool {
 #if canImport(Darwin)
-    return isatty(FileHandle.standardError.fileDescriptor) != 0
+    return isatty(FileHandle.standardOutput.fileDescriptor) != 0
 #else
     return false
 #endif
@@ -28,7 +28,9 @@ private let clearToEndOfLine = "\(esc)[K"
 private let cursorUp = "\(esc)[A"
 private let runningIcon = "▶"
 private let doneIcon = "✓"
+private let failedIcon = "✕"
 private let inactiveIcon = " "
+private let maxDiagnosticLines = 5
 
 private enum LivePhaseState: Equatable {
     case waiting
@@ -51,6 +53,7 @@ final class LiveProgressDisplay {
     private let stderr: FileHandle
     private let queue = DispatchQueue(label: "transcribe.live-progress")
     private let showDiarizationLine: Bool
+    private let contextLines: [String]
     private var audioDurationSeconds: Double
     private let historicalRatios: HistoricalTimingRatios
     private let renderMode: LiveProgressRenderMode
@@ -73,11 +76,14 @@ final class LiveProgressDisplay {
     private var diarizationUnitCount: Int64?
     private var isFinished: Bool = false
     private var finishedAt: Date?
+    private var failedAt: Date?
     private var workCompletedAt: Date?
     private var redrawTimer: DispatchSourceTimer?
     private var drawnLineCount: Int = 0
     private var lastLineLogEmit: Date?
     private var lastLineLogSignature: String?
+    private var diagnosticLines: [String] = []
+    private var diagnosticCount: Int = 0
 
     /// - Parameters:
     ///   - startDate: Session or pipeline start for the overall elapsed line.
@@ -86,8 +92,9 @@ final class LiveProgressDisplay {
     ///   - renderMode: `.tty` for cursor updates; `.lineLog` for newline-separated snapshots.
     init(
         startDate: Date = Date(),
-        stderr: FileHandle = .standardError,
+        stderr: FileHandle = .standardOutput,
         showDiarizationLine: Bool = true,
+        contextLines: [String] = [],
         audioDurationSeconds: Double = 0,
         historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
         historicalWallSecondsPerAudioSecond: Double? = nil,
@@ -97,6 +104,7 @@ final class LiveProgressDisplay {
         self.startDate = startDate
         self.stderr = stderr
         self.showDiarizationLine = showDiarizationLine
+        self.contextLines = contextLines
         self.audioDurationSeconds = audioDurationSeconds
         var resolvedRatios = historicalRatios
         if resolvedRatios.totalSecondsPerAudioSecond == nil {
@@ -112,6 +120,18 @@ final class LiveProgressDisplay {
     /// Emit an immediate encoding snapshot and keep elapsed/ETA moving while waiting for model callbacks.
     func start() {
         beginEncoding()
+    }
+
+    func appendDiagnostic(_ event: TranscribeEvent) {
+        guard event.level != .info else { return }
+        queue.sync {
+            self.diagnosticCount += 1
+            self.diagnosticLines.append(Self.compactDiagnosticLine(event))
+            if self.diagnosticLines.count > maxDiagnosticLines {
+                self.diagnosticLines.removeFirst(self.diagnosticLines.count - maxDiagnosticLines)
+            }
+            self.redraw()
+        }
     }
 
     func beginModelLoading() {
@@ -304,6 +324,26 @@ final class LiveProgressDisplay {
 
             let windows = transcriptionWindows
             return windows > 0 ? windows : nil
+        }
+    }
+
+    func fail() {
+        queue.sync {
+            guard !isFinished else { return }
+
+            failedAt = Date()
+            isFinished = true
+            redrawTimer?.cancel()
+            redrawTimer = nil
+
+            switch renderMode {
+            case .lineLog:
+                emitLineLogSnapshot(throttled: false)
+                stderr.write("\n".data(using: .utf8)!)
+            case .tty:
+                redrawTTY(clearOnly: false)
+                stderr.write("\n".data(using: .utf8)!)
+            }
         }
     }
 
@@ -501,6 +541,29 @@ final class LiveProgressDisplay {
         audioDurationSeconds > 0 ? ", audio duration \(formatDuration(audioDurationSeconds))" : ""
     }
 
+    private static func compactDiagnosticLine(_ event: TranscribeEvent) -> String {
+        var parts = [
+            event.level.rendered,
+            "event=\(event.name)",
+        ]
+        parts.append(contentsOf: event.fields.map { "\($0.name)=\($0.value.rendered)" })
+        if let message = event.message, !message.isEmpty {
+            parts.append("message=\(TranscribeEventValue.string(message).rendered)")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func diagnosticDisplayLines() -> [String] {
+        guard !diagnosticLines.isEmpty else { return [] }
+        let header: String
+        if diagnosticCount > diagnosticLines.count {
+            header = "Diagnostics (last \(diagnosticLines.count) of \(diagnosticCount)):"
+        } else {
+            header = "Diagnostics:"
+        }
+        return [header] + diagnosticLines.map { "  \($0)" }
+    }
+
     private func statusLine(label: String, icon: String, detail: String = "", indented: Bool = true) -> String {
         let labelWithColon = "\(label):"
         let labelWidth = 16
@@ -660,7 +723,14 @@ final class LiveProgressDisplay {
     private func progressLines() -> [String] {
         let elapsedSeconds = Date().timeIntervalSince(startDate)
         let totalLine: String
-        if let completedAt = finishedAt ?? workCompletedAt {
+        if let failedAt {
+            totalLine = statusLine(
+                label: "Total",
+                icon: failedIcon,
+                detail: "failed after \(formatDuration(failedAt.timeIntervalSince(startDate)))\(audioDurationSuffix())",
+                indented: false
+            )
+        } else if let completedAt = finishedAt ?? workCompletedAt {
             totalLine = statusLine(
                 label: "Total",
                 icon: doneIcon,
@@ -675,9 +745,8 @@ final class LiveProgressDisplay {
                 indented: false
             )
         }
-        var lines = [
-            totalLine,
-        ]
+        var lines = contextLines
+        lines.append(totalLine)
         if let inputCheckLine = inputCheckLine() {
             lines.append(inputCheckLine)
         }
@@ -695,6 +764,7 @@ final class LiveProgressDisplay {
         if let outputLine = outputLine() {
             lines.append(outputLine)
         }
+        lines.append(contentsOf: diagnosticDisplayLines())
         return lines
     }
 

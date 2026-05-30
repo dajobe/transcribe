@@ -24,7 +24,9 @@ final class CLITests: XCTestCase {
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(process.terminationStatus, 0, "transcribe --help should exit 0")
         XCTAssertTrue(output.contains("--model"), "root help should include global options")
+        XCTAssertTrue(output.contains("--log-level"), "root help should include event log level option")
         XCTAssertTrue(output.contains("--mark-imported"), "root help should include global mark-imported option")
+        XCTAssertFalse(output.contains("--stdout"), "root help should not list removed --stdout option")
         XCTAssertTrue(output.contains("Source commands:"), "root help should list source commands")
         // ArgumentHelp wraps long lines; compare against whitespace-collapsed text.
         let collapsedHelp = output.split { $0.isNewline || $0.isWhitespace }.joined(separator: " ")
@@ -82,7 +84,7 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(stderr.contains("does not exist") || stderr.contains("nonexistent"), "stderr should mention missing file")
     }
 
-    func testInvalidUsageStdoutWithoutTxtExitTwo() throws {
+    func testStdoutOptionIsRemoved() throws {
         let file = try makeTempAudioFile()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
@@ -91,7 +93,17 @@ final class CLITests: XCTestCase {
         process.standardError = pipe
         try process.run()
         process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 2, "--stdout without txt should exit 2")
+        let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 2, "--stdout should exit 2")
+        XCTAssertTrue(stderr.contains("Unknown global option") || stderr.contains("--stdout"), "stderr: \(stderr)")
+    }
+
+    func testConflictingLogLevelSelectorsExitTwo() throws {
+        let file = try makeTempAudioFile()
+        let result = try runCommand(["--verbose", "--log-level", "info", "file", file.path])
+
+        XCTAssertEqual(result.status, 2, "stdout: \(result.stdout), stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("log-level selector"), "stderr: \(result.stderr)")
     }
 
     func testMinMaxSpeakersInvalidExitTwo() throws {
@@ -154,13 +166,18 @@ final class CLITests: XCTestCase {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
         process.arguments = [dir.path]
-        let pipe = Pipe()
-        process.standardError = pipe
+        let stdout = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderrPipe
         try process.run()
         process.waitUntilExit()
-        let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertEqual(process.terminationStatus, 3, "empty directory should exit 3, stderr: \(stderr)")
-        XCTAssertTrue(stderr.contains("No candidate audio files"), "stderr should mention no candidate audio files; got: \(stderr)")
+        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 3, "empty directory should exit 3, stdout: \(out), stderr: \(stderr)")
+        XCTAssertTrue(out.contains("ERROR event=run_failed"), "stdout should contain event error; got: \(out)")
+        XCTAssertTrue(out.contains("No candidate audio files"), "stdout should mention no candidate audio files; got: \(out)")
+        XCTAssertEqual(stderr, "")
     }
 
     func testNoFilenameTimeRecoveryFlagAccepted() throws {
@@ -173,6 +190,54 @@ final class CLITests: XCTestCase {
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 3, "flag should be accepted; exit 3 is from missing input, not arg parsing")
+    }
+
+    func testPlainLogSuppressesSkippedSessionDetails() throws {
+        let fixture = try makeSkippedFileFixture()
+        let result = try runSkippedFileCommand(fixture: fixture, extraArgs: ["--progress-log", "plain"])
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr), stdout: \(result.stdout)")
+        XCTAssertFalse(result.stdout.contains("event=session_skipped"), result.stdout)
+        XCTAssertFalse(result.stdout.contains("phase=model_selection"), result.stdout)
+        XCTAssertTrue(result.stdout.contains("INFO event=run_done"), result.stdout)
+        XCTAssertTrue(result.stdout.contains("processed=0"), result.stdout)
+        XCTAssertTrue(result.stdout.contains("skipped=1"), result.stdout)
+        XCTAssertEqual(result.stderr, "")
+    }
+
+    func testVerbosePlainLogEmitsSkippedSessionAtDebug() throws {
+        let fixture = try makeSkippedFileFixture()
+        let result = try runSkippedFileCommand(
+            fixture: fixture,
+            extraArgs: ["--verbose", "--progress-log", "plain"]
+        )
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr), stdout: \(result.stdout)")
+        XCTAssertTrue(result.stdout.contains("DEBUG event=session_skipped"), result.stdout)
+        XCTAssertTrue(result.stdout.contains("history_reason=skip_duplicate"), result.stdout)
+        XCTAssertTrue(result.stdout.contains("INFO event=run_done"), result.stdout)
+    }
+
+    func testQuietPlainLogSuppressesRoutineInfoEvents() throws {
+        let fixture = try makeSkippedFileFixture()
+        let result = try runSkippedFileCommand(
+            fixture: fixture,
+            extraArgs: ["--quiet", "--progress-log", "plain"]
+        )
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr), stdout: \(result.stdout)")
+        XCTAssertEqual(result.stdout, "")
+        XCTAssertEqual(result.stderr, "")
+    }
+
+    func testLogLevelErrorStillEmitsHandledErrors() throws {
+        let dir = try makeTempDir()
+        let result = try runCommand(["--log-level", "error", "--progress-log", "plain", dir.path])
+
+        XCTAssertEqual(result.status, 3, "stdout: \(result.stdout), stderr: \(result.stderr)")
+        XCTAssertTrue(result.stdout.contains("ERROR event=run_failed"), result.stdout)
+        XCTAssertFalse(result.stdout.contains("INFO "), result.stdout)
+        XCTAssertEqual(result.stderr, "")
     }
 
     func testNoAutoSessionBasenameFlagAccepted() throws {
@@ -772,7 +837,6 @@ final class CLITests: XCTestCase {
                     min_speakers: nil,
                     max_speakers: nil,
                     formats: ["json"],
-                    write_txt_to_stdout: false,
                     transcribe_version: "2.4.0"
                 ),
                 output_dir: output.path,
@@ -981,19 +1045,30 @@ final class CLITests: XCTestCase {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
         process.arguments = [dir.path]
-        let pipe = Pipe()
-        process.standardError = pipe
+        let stdout = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderrPipe
         try process.run()
         process.waitUntilExit()
-        let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertEqual(process.terminationStatus, 3, "directory with only non-audio should exit 3, stderr: \(stderr)")
-        XCTAssertTrue(stderr.contains("No candidate audio files"), "stderr should mention no candidate audio files; got: \(stderr)")
+        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 3, "directory with only non-audio should exit 3, stdout: \(out), stderr: \(stderr)")
+        XCTAssertTrue(out.contains("ERROR event=run_failed"), "stdout should contain event error; got: \(out)")
+        XCTAssertTrue(out.contains("No candidate audio files"), "stdout should mention no candidate audio files; got: \(out)")
+        XCTAssertEqual(stderr, "")
     }
 
-    private func runCommand(_ arguments: [String]) throws -> (status: Int32, stdout: String, stderr: String) {
+    private func runCommand(
+        _ arguments: [String],
+        environment: [String: String] = [:]
+    ) throws -> (status: Int32, stdout: String, stderr: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
         process.arguments = arguments
+        if !environment.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+        }
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -1004,6 +1079,67 @@ final class CLITests: XCTestCase {
             process.terminationStatus,
             String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
             String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        )
+    }
+
+    private func makeSkippedFileFixture() throws -> (state: URL, config: URL, output: URL, audio: URL) {
+        let state = try makeTempDir()
+        let config = try makeTempDir().appendingPathComponent("config.json")
+        let input = try makeTempDir()
+        let output = try makeTempDir()
+        let audio = input.appendingPathComponent("clip.m4a")
+        let transcript = output.appendingPathComponent("clip.txt")
+        try Data("audio".utf8).write(to: audio)
+        try Data("text".utf8).write(to: transcript)
+
+        let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+        let sourceID = sourceIDForFiles(kind: .file, files: [audio.path])
+        try withXDGStateHome(state.path) {
+            try ProcessingStore.append(ProcessingRecord(
+                completed_at: iso8601String(Date()),
+                history_reason: .firstRun,
+                source_kind: .file,
+                source_id: sourceID,
+                source_fingerprint: fingerprint,
+                settings_signature: ProcessingSettingsSignature(
+                    model: Transcribe.defaultModel,
+                    language: nil,
+                    diarization_enabled: false,
+                    speaker_strategy: TranscriptionDefaults.speakerMerge,
+                    min_speakers: nil,
+                    max_speakers: nil,
+                    formats: ["txt"],
+                    transcribe_version: Transcribe.version
+                ),
+                output_dir: output.path,
+                basename: "clip",
+                output_paths: [transcript.path],
+                audio_duration_s: 1.0,
+                warning_count: 0,
+                recording_title: nil,
+                recorded_at: nil,
+                voice_memos_unique_id: nil,
+                voice_memos_path: nil
+            ))
+        }
+        return (state, config, output, audio)
+    }
+
+    private func runSkippedFileCommand(
+        fixture: (state: URL, config: URL, output: URL, audio: URL),
+        extraArgs: [String]
+    ) throws -> (status: Int32, stdout: String, stderr: String) {
+        try runCommand(
+            extraArgs + [
+                "--transcript-only",
+                "--format", "txt",
+                "--output-dir", fixture.output.path,
+                "file", fixture.audio.path,
+            ],
+            environment: [
+                "XDG_STATE_HOME": fixture.state.path,
+                "TRANSCRIBE_CONFIG": fixture.config.path,
+            ]
         )
     }
 

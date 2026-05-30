@@ -21,14 +21,18 @@ struct AudioLoadLimits: Equatable {
 }
 
 enum AudioLoader {
-    /// File extensions considered audio candidates during directory discovery.
+    /// Ordered source of truth for audio extensions the CLI treats as loadable
+    /// audio formats in directory discovery, fixture smoke tests, and docs.
     ///
     /// Actual decoding support depends on WhisperKit's AVFoundation loading
     /// path for the specific file, codec, and container.
-    static let candidateExtensions: Set<String> = ["mp3", "wav", "m4a", "flac", "aiff", "caf"]
+    static let audioFormatExtensions = ["wav", "mp3", "m4a", "flac", "aiff", "caf", "aac"]
+
+    /// File extensions considered audio candidates during directory discovery.
+    static let candidateExtensions = Set(audioFormatExtensions)
 
     /// Human-readable list of candidate audio extensions.
-    static let candidateExtensionsDescription = "mp3, wav, m4a, flac, aiff, caf"
+    static let candidateExtensionsDescription = audioFormatExtensions.joined(separator: ", ")
 
     /// Cheaply validates that a path is an audio container without decoding it.
     ///

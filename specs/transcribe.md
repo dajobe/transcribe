@@ -74,8 +74,8 @@ services.
 - As a user, I can disable diarization when I only want transcription.
 - As a user, I can constrain diarization with minimum and maximum speaker
   counts.
-- As a user, I can script the tool in shell pipelines without log noise
-  contaminating stdout.
+- As a user, I can script the tool in shell pipelines with one predictable
+  stdout format for batch progress events.
 - As a user, I can re-run the tool without re-downloading models on every
   invocation.
 
@@ -98,7 +98,6 @@ GLOBAL OPTIONS:
   -o, --output-dir <path>   Directory for output files (default: current directory)
   -f, --format <fmt>        Output formats, comma-separated (default: txt,json)
                             Supported: txt, json, srt, vtt, md, all
-  --stdout                  Write the primary transcript to stdout instead of a text file
   --speakers-min <n>        Minimum speaker count hint for diarization
   --speakers-max <n>        Maximum speaker count hint for diarization
   --transcript-only         Skip speaker labels (transcript only)
@@ -112,10 +111,12 @@ GLOBAL OPTIONS:
   --stateless               Do not read or write processing history
   --mark-imported           Mark planned inputs as imported without transcribing
   --dry-run, --dryrun       Show planned work without loading models or writing outputs
-  --verbose                 Print progress, timing, and cache details to stderr
-  --quiet                   Reduce stderr logging for this run
+  --verbose                 Include debug-level progress, timing, and cache details
+  --quiet                   Show only warning/error event logs or TUI diagnostics
+  --log-level debug|info|warn|error
+                            Minimum event log/TUI diagnostic level (default: info)
   --eta-hints on|off        Record timing for ETA hints from prior runs (default: on)
-  --progress-log auto|plain|off   Progress rendering on stderr (default: auto)
+  --progress-log auto|plain|off   Processing output: stdout TUI, stdout events, or off
   --version                 Print version and exit
   -h, --help                Show help
 
@@ -146,6 +147,7 @@ extensions as audio candidates:
 - `flac`
 - `aiff`
 - `caf`
+- `aac`
 
 Single-file inputs are not rejected by extension. Actual support is determined
 by WhisperKit's AVFoundation audio loading path for the specific file, codec,
@@ -154,10 +156,9 @@ and container, and undecodable files must fail with a clear input-file error.
 ### Argument Semantics
 
 - `--format all` expands to `txt,json,srt,vtt`.
-- `--stdout` is only valid when `txt` is requested, either explicitly or through
-  `all`.
-- `--stdout` writes transcript text to stdout and suppresses the `.txt` file.
-- Logs and diagnostics must always go to stderr.
+- Transcript content is always written to output files selected by `--format`.
+- Processing status uses the stdout TUI or stdout text events described in
+  [cli-output-and-batch-logs.md](cli-output-and-batch-logs.md).
 - `--speakers-min` and `--speakers-max` are only valid when speaker labels are
   enabled.
 - If both `--speakers-min` and `--speakers-max` are provided, `min <= max` is
@@ -194,8 +195,8 @@ transcribe --language en --speakers-min 2 --speakers-max 2 --format all file mee
 # Transcript only, smaller model
 transcribe --transcript-only --model medium file lecture.m4a
 
-# Emit human-readable transcript to stdout and JSON to disk
-transcribe --stdout --format txt,json -o ./transcripts file interview.wav
+# Markdown transcript for notes/publishing plus JSON metadata
+transcribe --format md,json -o ./notes file meeting.m4a
 ```
 
 ## Output Contract
@@ -332,11 +333,11 @@ still be delivered.
 
 | Condition                                                                                     | Required behavior                                                             |
 |:----------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------|
-| Audio too short for diarization                                                               | Warn to stderr, skip diarization, continue with transcription-only output     |
+| Audio too short for diarization                                                               | Record warning, skip diarization, continue with transcription-only output     |
 | Diarization returns no speakers                                                               | Continue with transcript-only output, set `speaker` to `null`, record warning |
-| Diarization returns fewer than `--speakers-min`                                               | Continue with detected count, warn to stderr, record warning                  |
-| Diarization returns more than `--speakers-max` when no fixed speaker-count hint was available | Continue with detected count, warn to stderr, record warning                  |
-| No speech detected                                                                            | Produce valid empty output files and warn to stderr                           |
+| Diarization returns fewer than `--speakers-min`                                               | Continue with detected count and record warning                               |
+| Diarization returns more than `--speakers-max` when no fixed speaker-count hint was available | Continue with detected count and record warning                               |
+| No speech detected                                                                            | Produce valid empty output files and record warning                           |
 | Requested diarization but SpeakerKit unavailable after init failure                           | Fail with exit code `4`                                                       |
 
 ### Failure Behavior
@@ -377,21 +378,16 @@ enough timing data to measure real-world performance.
 
 ## Logging and Diagnostics
 
-When `--verbose` is set, the tool should emit progress messages to stderr only.
-
-Example:
-
-```text
-[00:00] Loading audio: meeting.mp3 (30:47, 16kHz mono)
-[00:01] Using model cache: ~/.cache/transcribe
-[00:01] Starting transcription...
-[00:01] Starting diarization...
-[03:42] Transcription complete (213 segments, 4847 words)
-[03:48] Diarization complete (2 speakers detected)
-[03:48] Merging speaker labels with strategy=subsegment
-[03:48] Writing outputs: meeting.txt, meeting.json
-[03:48] Done. Total: 3m 48s
-```
+Processing output is specified in
+[cli-output-and-batch-logs.md](cli-output-and-batch-logs.md). In short:
+`--progress-log auto` uses a stdout TUI when stdout is a terminal and stdout
+text events otherwise; `plain` always uses stdout text events; `off` suppresses
+processing/status events. Event logs default to `INFO+`; `--log-level debug`
+(or `--verbose`) adds extra timing/cache detail and duplicate-skip diagnostics,
+while `--quiet` is shorthand for `--log-level warn`. In interactive TUI mode,
+`--verbose` / `--log-level debug` shows `DEBUG` diagnostics in the TUI
+diagnostics block, and warnings/errors appear there instead of being lost behind
+the live redraw.
 
 Suggested diagnostics to include when available:
 
@@ -577,8 +573,6 @@ into the repository and larger manual benchmark files kept out of git.
 
 ## Open Questions
 
-- Should `--stdout` emit text only, or should a future version support `json` to
-  stdout as well?
 - Should `Transcribe.defaultModel` remain the long-term default, or should a
   smaller model be used for startup latency and disk footprint?
 - Does WhisperKit expose enough control over model cache location for both

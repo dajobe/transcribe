@@ -314,6 +314,7 @@ func runTranscriptionOnly(
     historicalWallSecondsPerAudioSecond: Double?,
     historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
     liveProgressDisplay: LiveProgressDisplay? = nil,
+    liveProgressContextLines: [String] = [],
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     var phases = PhaseTimings()
@@ -340,8 +341,9 @@ func runTranscriptionOnly(
         guard let mode = liveProgressMode else { return nil }
         return LiveProgressDisplay(
             startDate: pipelineStartDate,
-            stderr: .standardError,
+            stderr: .standardOutput,
             showDiarizationLine: false,
+            contextLines: liveProgressContextLines,
             audioDurationSeconds: durationSeconds,
             historicalRatios: historicalRatios,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
@@ -678,7 +680,7 @@ private func runTranscriptionWithDiarization(
         guard let mode = liveProgressMode else { return nil }
         return LiveProgressDisplay(
             startDate: pipelineStartDate,
-            stderr: .standardError,
+            stderr: .standardOutput,
             showDiarizationLine: true,
             audioDurationSeconds: durationSeconds,
             historicalRatios: historicalRatios,
@@ -858,6 +860,7 @@ func runSession(
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
     historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
+    liveProgressContextLines: [String] = [],
     liveProgressDisplay: LiveProgressDisplay? = nil,
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
@@ -879,6 +882,7 @@ func runSession(
             pipelineStartDate: pipelineStartDate,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
             historicalRatios: historicalRatios,
+            liveProgressContextLines: liveProgressContextLines,
             liveProgressDisplay: liveProgressDisplay,
             phases: &phases,
             logger: logger
@@ -902,6 +906,7 @@ func runSession(
             pipelineStartDate: pipelineStartDate,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
             historicalRatios: historicalRatios,
+            liveProgressContextLines: liveProgressContextLines,
             liveProgressDisplay: liveProgressDisplay,
             phases: &phases,
             logger: logger
@@ -925,8 +930,9 @@ func runSession(
         guard let mode = liveProgressMode else { return nil }
         return LiveProgressDisplay(
             startDate: pipelineStartDate,
-            stderr: .standardError,
+            stderr: .standardOutput,
             showDiarizationLine: true,
+            contextLines: liveProgressContextLines,
             audioDurationSeconds: durationSeconds,
             historicalRatios: historicalRatios,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
@@ -1050,6 +1056,7 @@ private func runTranscriptOnlyOnLoadedWhisper(
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
     historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
+    liveProgressContextLines: [String] = [],
     liveProgressDisplay: LiveProgressDisplay? = nil,
     phases: inout PhaseTimings,
     logger: VerboseLogger?
@@ -1061,8 +1068,9 @@ private func runTranscriptOnlyOnLoadedWhisper(
         guard let mode = liveProgressMode else { return nil }
         return LiveProgressDisplay(
             startDate: pipelineStartDate,
-            stderr: .standardError,
+            stderr: .standardOutput,
             showDiarizationLine: false,
+            contextLines: liveProgressContextLines,
             audioDurationSeconds: durationSeconds,
             historicalRatios: historicalRatios,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,

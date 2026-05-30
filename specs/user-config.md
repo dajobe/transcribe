@@ -42,7 +42,7 @@ For each setting:
 
 Flags that affect safety or one-shot behavior are **not** stored in the config
 file: `--overwrite`, `--redo`, `--dry-run` / `--dryrun`, `--mark-imported`,
-`--stateless`, `--stdout`. They remain CLI-only.
+`--stateless`. They remain CLI-only.
 
 ## JSON shape
 
@@ -76,6 +76,7 @@ objects whose structure matches the **dotted** names used by `config get` /
     "embedder": "auto"
   },
   "logging": {
+    "level": "info",
     "verbose": false,
     "etaHints": null,
     "progressLog": "auto"
@@ -102,9 +103,10 @@ For boolean preferences exposed in the file:
 
 For booleans in the file, **omitted** / **`null`** still mean “fall through
 after CLI.” On the CLI, overlapping preferences use positive pairs where needed
-(e.g. `--verbose` / `--quiet`, `--with-speakers` / `--transcript-only`); other
-settings use explicit values such as `--eta-hints on|off` or `--progress-log
-auto|plain|off`.
+(e.g. `--with-speakers` / `--transcript-only`); logging accepts
+`--log-level debug|info|warn|error`, with `--verbose` as debug shorthand and
+`--quiet` as warn shorthand. Other settings use explicit values such as
+`--eta-hints on|off` or `--progress-log auto|plain|off`.
 
 ## Key catalog (dotted names for CLI; JSON nesting)
 
@@ -153,7 +155,8 @@ auto|plain|off`.
 
 | Key                   | JSON field            | Semantics                                                                                                                        |
 |:----------------------|:----------------------|:---------------------------------------------------------------------------------------------------------------------------------|
-| `logging.verbose`     | `logging.verbose`     | Tri-state                                                                                                                        |
+| `logging.level`       | `logging.level`       | String: `debug`, `info`, `warn`, or `error`; overrides legacy `logging.verbose`                                                  |
+| `logging.verbose`     | `logging.verbose`     | Legacy tri-state shorthand: `true` = `debug`, `false` = `info`                                                                   |
 | `logging.etaHints`    | `logging.etaHints`    | Tri-state; env `TRANSCRIBE_ETA_HINTS=0` (or legacy `TRANSCRIBE_TIMING_STATS=0`) still disables when merged effective would be on |
 | `logging.progressLog` | `logging.progressLog` | String: `auto`, `plain`, or `off`                                                                                                |
 
@@ -223,6 +226,7 @@ compute.segmenter auto
 compute.textDecoder auto
 
 logging.etaHints true
+logging.level info
 logging.progressLog auto
 logging.verbose false
 

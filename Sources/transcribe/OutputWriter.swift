@@ -579,7 +579,7 @@ func renderVTT(output: TranscriptionOutput) -> String {
 
 // MARK: - Write all outputs
 
-/// Writes requested output formats. Uses atomic writes. For txt with --stdout, writes to stdout and does not create .txt file.
+/// Writes requested output formats. Uses atomic writes.
 /// - Parameter audioFiles: When the input was a directory of clips, the source filenames in concat order; nil for single-file input.
 func writeOutputs(
     output: TranscriptionOutput,
@@ -589,7 +589,6 @@ func writeOutputs(
     outputDir: String,
     basename: String,
     formats: [String],
-    writeTxtToStdout: Bool,
     overwrite: Bool,
     model: String,
     version: String
@@ -611,7 +610,7 @@ func writeOutputs(
         outputDir: outputDir,
         basename: basename,
         formats: formats,
-        writeTxtFile: formats.contains("txt") && !writeTxtToStdout,
+        writeTxtFile: formats.contains("txt"),
         overwrite: overwrite
     )
 
@@ -630,12 +629,8 @@ func writeOutputs(
             try writeAtomically(content: data, to: path)
         case "txt":
             let text = renderTxt(output: output)
-            if writeTxtToStdout {
-                FileHandle.standardOutput.write((text + "\n").data(using: .utf8)!)
-            } else {
-                let path = (dir as NSString).appendingPathComponent("\(basename).txt")
-                try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
-            }
+            let path = (dir as NSString).appendingPathComponent("\(basename).txt")
+            try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
         case "srt":
             let text = renderSRT(output: output)
             let path = (dir as NSString).appendingPathComponent("\(basename).srt")

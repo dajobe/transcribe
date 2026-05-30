@@ -15,12 +15,50 @@ iso_utc() {
 
 log_line() {
   if [[ -n "${TRANSCRIBE_LOG:-}" ]]; then
-    printf '%s %s\n' "$(iso_utc)" "$*" >>"${TRANSCRIBE_LOG}" 2>/dev/null || true
+    printf '%s\n' "$*" >>"${TRANSCRIBE_LOG}" 2>/dev/null || true
+  else
+    printf '%s\n' "$*"
   fi
 }
 
+log_value() {
+  local value="$1"
+  if [[ -z "$value" || "$value" =~ [[:space:]\",\\,] ]]; then
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+log_event() {
+  local level="$1"
+  local event="$2"
+  shift 2
+  local line
+  line="$(iso_utc) $level event=$event"
+  while [[ "$#" -gt 1 ]]; do
+    local key="$1"
+    local value="$2"
+    line+=" ${key}=$(log_value "$value")"
+    shift 2
+  done
+  log_line "$line"
+}
+
 warn() {
-  echo "$*" >&2
+  log_event WARN warning message "$*"
+}
+
+append_child_stdout() {
+  local out_tmp="$1"
+  [[ -s "$out_tmp" ]] || return 0
+  if [[ -n "${TRANSCRIBE_LOG:-}" ]]; then
+    cat "$out_tmp" >>"${TRANSCRIBE_LOG}" 2>/dev/null || true
+  else
+    cat "$out_tmp"
+  fi
 }
 
 # Globals set in main() before trap; used by end_log on EXIT.
@@ -34,7 +72,11 @@ end_log() {
   local end_epoch
   end_epoch=$(date +%s)
   local dur=$((end_epoch - start_epoch))
-  log_line "event=end path=${f} exit=${code} duration_s=${dur}${REASON:+ reason=${REASON}}"
+  if [[ -n "${REASON:-}" ]]; then
+    log_event INFO end path "$f" exit "$code" duration_s "$dur" reason "$REASON"
+  else
+    log_event INFO end path "$f" exit "$code" duration_s "$dur"
+  fi
 }
 
 file_size() {
@@ -78,7 +120,7 @@ is_allowed_audio() {
   local ext="${n##*.}"
   ext="$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')"
   case "$ext" in
-    mp3|wav|m4a|flac|aiff|caf) return 0 ;;
+    mp3|wav|m4a|flac|aiff|caf|aac) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -105,7 +147,7 @@ main() {
 
   start_epoch=$(date +%s)
   REASON=""
-  log_line "event=start path=${f}"
+  log_event INFO start path "$f"
   trap end_log EXIT
 
   local base
@@ -159,8 +201,7 @@ main() {
     case "$bin_version" in
       0.*|1.*)
         REASON=binary-too-old
-        log_line "transcribe-version=${bin_version} required>=2.0"
-        warn "folder-action-transcribe: $bin reports version $bin_version; this script requires transcribe >= 2.0"
+        log_event ERROR binary_too_old path "$f" transcribe_version "$bin_version" required ">=2.0"
         exit 1
         ;;
     esac
@@ -168,6 +209,9 @@ main() {
 
   local -a cmd
   cmd=("$bin" -o "$outdir" --format "$fmt")
+  if [[ "${TRANSCRIBE_EXTRA_ARGS:-}" != *"--progress-log"* ]]; then
+    cmd+=(--progress-log plain)
+  fi
   # TRANSCRIBE_EXTRA_ARGS: global flags only; must match current `transcribe --help`
   # (e.g. --transcript-only, --eta-hints off — not legacy spellings such as --no-diarize).
   if [[ -n "${TRANSCRIBE_EXTRA_ARGS:-}" ]]; then
@@ -177,36 +221,40 @@ main() {
   cmd+=(file "$f")
 
   local flock_warned=0
+  local out_tmp
   local err_tmp
+  out_tmp=$(mktemp "${TMPDIR:-/tmp}/transcribe-fa-out.XXXXXX")
   err_tmp=$(mktemp "${TMPDIR:-/tmp}/transcribe-fa.XXXXXX")
 
   set +e
   if [[ -n "${TRANSCRIBE_LOCK_FILE:-}" ]] && command -v flock >/dev/null 2>&1; then
     local lockfile="${TRANSCRIBE_LOCK_FILE/#\~/$HOME}"
     touch "$lockfile"
-    flock "$lockfile" "${cmd[@]}" 2>"$err_tmp"
+    flock "$lockfile" "${cmd[@]}" >"$out_tmp" 2>"$err_tmp"
   else
     if [[ -n "${TRANSCRIBE_LOCK_FILE:-}" && "$flock_warned" -eq 0 ]]; then
-      warn "folder-action-transcribe: flock not found; ignoring TRANSCRIBE_LOCK_FILE"
+      log_event WARN warning path "$f" message "flock not found; ignoring TRANSCRIBE_LOCK_FILE"
       flock_warned=1
     fi
-    "${cmd[@]}" 2>"$err_tmp"
+    "${cmd[@]}" >"$out_tmp" 2>"$err_tmp"
   fi
   local code=$?
   set -e
+
+  append_child_stdout "$out_tmp"
 
   if [[ "$code" -ne 0 ]]; then
     REASON=transcribe-failed
     local mean
     mean=$(transcribe_exit_meaning "$code")
-    log_line "transcribe-exit=${code} meaning=${mean}"
     if [[ -s "$err_tmp" ]]; then
-      # One line for the main log (transcribe prints newlines to stderr).
       local summ
-      summ=$(tr '\n' ' ' <"$err_tmp" | sed 's/  */ /g' | head -c 2000)
-      log_line "transcribe-stderr: ${summ}"
+      summ=$(tr '\n' ' ' <"$err_tmp" | sed 's/  */ /g; s/^ *//; s/ *$//' | head -c 2000)
+      log_event ERROR transcribe_failed path "$f" exit "$code" meaning "$mean" stderr_summary "$summ"
       if [[ -n "${TRANSCRIBE_LOG:-}" ]]; then
-        local persistent="${TRANSCRIBE_STDERR_LOG:-${TRANSCRIBE_LOG%/*}/transcribe.stderr.log}"
+        local log_dir
+        log_dir="$(dirname "$TRANSCRIBE_LOG")"
+        local persistent="${TRANSCRIBE_STDERR_LOG:-${log_dir}/transcribe.stderr.log}"
         {
           echo "=== $(iso_utc) exit=${code} meaning=${mean} path=${f} ==="
           cat "$err_tmp"
@@ -214,10 +262,10 @@ main() {
         } >>"$persistent" 2>/dev/null || true
       fi
     else
-      log_line "transcribe-stderr: (empty — run the same command in Terminal to see output)"
+      log_event ERROR transcribe_failed path "$f" exit "$code" meaning "$mean" stderr_summary "empty"
     fi
   fi
-  rm -f "$err_tmp"
+  rm -f "$out_tmp" "$err_tmp"
 
   exit "$code"
 }

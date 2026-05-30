@@ -73,9 +73,6 @@ transcribe --language en --speakers-min 2 --speakers-max 2 --format all file mee
 # Transcript only, no speaker labels, smaller model
 transcribe --transcript-only --model medium file lecture.m4a
 
-# Transcript to stdout and JSON to disk
-transcribe --stdout --format txt,json -o ./transcripts file interview.wav
-
 # Markdown transcript (and JSON) for notes / publishing
 transcribe --format md,json -o ./notes file meeting.m4a
 
@@ -142,8 +139,7 @@ threshold, and runs the pipeline once per session.
   base with `--output-prefix`.
 - **JSON metadata:** an `audio_files` array lists the source filenames for that
   session in concat order; the field is omitted for single-file input.
-- **Empty / no-audio directories:** exit code `3` with a clear message on
-  stderr.
+- **Empty / no-audio directories:** exit code `3` with a clear error message.
 - **Verbose mode** prints the per-clip sort keys (recorded date and mtime) and
   per-pair gap analysis, e.g.:
 
@@ -161,7 +157,7 @@ date no longer reflects when you actually recorded. `transcribe` detects this
 automatically: when the spread of recorded timestamps across clips is smaller
 than the longest clip's duration, the timestamps cannot represent real
 sequential recording starts, and the run falls back to filename ordering with a
-warning on stderr. Pass `--sort name` to silence the warning.
+warning. Pass `--sort name` to silence the warning.
 
 ### Recommended naming convention for directory input
 
@@ -203,7 +199,6 @@ file/directory alias. Run `transcribe --help` to see these options.
 | `-l, --language <code>`                 | Language code; when omitted or `(auto)`, Whisper auto-detects (see `transcribe --help`)          |
 | `-o, --output-dir <path>`               | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                         |
 | `-f, --format <fmt>`                    | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `md`, `all` (default: `txt,json`)  |
-| `--stdout`                              | Write transcript text to stdout instead of a file                                                |
 | `--speakers-min <n>`                    | Minimum speaker count hint for diarization                                                       |
 | `--speakers-max <n>`                    | Maximum speaker count hint for diarization                                                       |
 | `--transcript-only`                     | Skip speaker labels (transcript only)                                                            |
@@ -215,10 +210,11 @@ file/directory alias. Run `transcribe --help` to see these options.
 | `--stateless`                           | Do not consult or write idempotent processing history                                            |
 | `--mark-imported`                       | Mark planned inputs as already imported without transcribing                                     |
 | `--dry-run` / `--dryrun`                | Show what would process or skip without loading models, writing outputs, or updating history     |
-| `--verbose`                             | Print progress and timing to stderr                                                              |
-| `--quiet`                               | Reduce stderr logging (overrides config verbose for this run)                                    |
+| `--verbose`                             | Include debug-level progress, timing, and cache details in event logs or TUI diagnostics         |
+| `--quiet`                               | Show only warning and error event logs/diagnostics for this run                                  |
+| `--log-level debug` / `info` / `warn` / `error` | Minimum event log/diagnostic level; `--verbose` is `debug`, `--quiet` is `warn`        |
 | `--eta-hints on` or `off`               | Record timing for ETA hints from prior runs (default: on)                                        |
-| `--progress-log auto` / `plain` / `off` | Progress on stderr: TTY spinner, plain throttled lines, or off                                   |
+| `--progress-log auto` / `plain` / `off` | Processing output: stdout TUI on terminals, stdout event logs for batch, or off                  |
 | `--audio-encoder-compute <units>`       | Whisper audio encoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine` |
 | `--text-decoder-compute <units>`        | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
 | `--segmenter-compute <units>`           | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
@@ -252,7 +248,9 @@ outside the requested bounds.
 By default, `auto` uses the recommended backend mix for each WhisperKit and
 SpeakerKit model. On Apple Silicon this typically means a combination of GPU,
 Neural Engine, and CPU rather than forcing every component onto the GPU. Use
-`--verbose` to print the selected compute backend for WhisperKit and SpeakerKit.
+`--log-level debug --progress-log plain` to include selected compute backend
+details in stdout event logs, or `--verbose` in an interactive terminal to show
+them in the TUI diagnostics block.
 
 ### Timing statistics
 
@@ -351,12 +349,13 @@ directory containing `CloudRecordings.db`.
 are intended for development and can be slower.
 - The default `auto` mode is tuned for the fastest backend mix the models
 support, which may use a combination of GPU, Neural Engine, and CPU.
-- Use `--verbose` to print the selected WhisperKit and SpeakerKit compute
-backends at startup.
+- Use `--log-level debug --progress-log plain` to include selected WhisperKit
+  and SpeakerKit compute backends in stdout event logs, or `--verbose` in an
+  interactive terminal to show them in the TUI diagnostics block.
 
 ### Candidate Audio Extensions
 
-`mp3`, `wav`, `m4a`, `flac`, `aiff`, `caf`
+`mp3`, `wav`, `m4a`, `flac`, `aiff`, `caf`, `aac`
 
 Directory and folder-action inputs use these extensions to decide which files
 to try. A matching extension is not a guarantee that a file is decodable; actual
@@ -367,9 +366,9 @@ support is determined by WhisperKit/AVFoundation when the file is loaded.
 To transcribe files automatically when they are added to a folder, use macOS
 **Automator** with a **Folder Action** workflow that runs
 `**scripts/folder-action-transcribe.sh`**. An optional **example wrapper** that
-sets log/output paths and `TRANSCRIBE_BIN` is `**scripts/folder-script.sh`**
-(edit the `root_dir` and paths inside to match your layout; it invokes
-`folder-action-transcribe.sh` from the same directory).
+loads `$HOME/.transcribe.env`, sets log/output paths and `TRANSCRIBE_BIN`, and
+invokes the helper from `TRANSCRIBE_SCRIPT_DIR` is
+`**scripts/folder-script.sh`**.
 
 1. Build and install the `transcribe` binary (see [Build and
 Install](#build-and-install)).
@@ -395,8 +394,8 @@ Full behavior, stable-file wait, and exit codes:
 | `TRANSCRIBE_MAX_STABLE_WAIT`   | Max seconds to wait for a stable file (default: `3600`)                                                                                                                                 |
 | `TRANSCRIBE_LOCK_FILE`         | If set and `flock` exists, serialize concurrent runs                                                                                                                                    |
 | `TRANSCRIBE_SKIP_IF_MD_EXISTS` | If `1`, skip when `basename.md` already exists in the output dir                                                                                                                        |
-| `TRANSCRIBE_LOG`               | Structured events (`event=start` / `event=end`, etc.); see the spec                                                                                                                     |
-| `TRANSCRIBE_STDERR_LOG`        | Full `transcribe` stderr on failure (default: `transcribe.stderr.log` next to `TRANSCRIBE_LOG`)                                                                                         |
+| `TRANSCRIBE_LOG`               | Text event log in the same format as non-interactive `transcribe --progress-log plain` output; see the spec                                                                             |
+| `TRANSCRIBE_STDERR_LOG`        | Raw child stderr on failure only (default: `transcribe.stderr.log` next to `TRANSCRIBE_LOG`)                                                                                            |
 | `TRANSCRIBE_SCRIPT_DIR`        | Directory containing `folder-action-transcribe.sh` (if the wrapper cannot resolve it)                                                                                                   |
 | `TRANSCRIBE_SMOKE_LOG`         | If set, append debug lines (argc, `script_dir`, helper present) to this path                                                                                                            |
 
@@ -416,10 +415,10 @@ Full behavior, stable-file wait, and exit codes:
   `skip-non-audio` if needed. Final support is still checked by decoding the
   file.
 - **`event=end` with `exit=4` / `reason=transcribe-failed`:** Model download or
-  load failed. Check the same log for **`transcribe-exit=`**,
-  **`meaning=model`**, and **`transcribe-stderr:`** (and
-  **`transcribe.stderr.log`** next to your main log for the full stderr block).
-  Run **`transcribe`** on that file in Terminal for the same message.
+  load failed. Check the same log for **`ERROR event=transcribe_failed`**,
+  **`meaning=model`**, and **`stderr_summary=`** (and
+  **`transcribe.stderr.log`** next to your main log for the raw stderr block).
+  Run **`transcribe`** on that file in Terminal for the same failure.
 
 ## Output
 

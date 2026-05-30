@@ -12,6 +12,7 @@ enum TranscriptionDefaults {
 
     static let speakersEnabled = true
     static let verbose = false
+    static let logLevel = TranscribeEventLevel.info
     /// When true, timing stats / ETA hints are allowed unless env disables them.
     static let etaHintsEnabled = true
     static let progressLogMode = ProgressLogMode.auto

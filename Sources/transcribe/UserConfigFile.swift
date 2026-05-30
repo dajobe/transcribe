@@ -41,8 +41,21 @@ struct UserConfigFile: Codable, Equatable {
     var logging: LoggingSection?
     struct LoggingSection: Codable, Equatable {
         var verbose: Bool?
+        var level: String?
         var etaHints: Bool?
         var progressLog: String?
+
+        init(
+            verbose: Bool? = nil,
+            level: String? = nil,
+            etaHints: Bool? = nil,
+            progressLog: String? = nil
+        ) {
+            self.verbose = verbose
+            self.level = level
+            self.etaHints = etaHints
+            self.progressLog = progressLog
+        }
     }
 
     var dir: DirSection?

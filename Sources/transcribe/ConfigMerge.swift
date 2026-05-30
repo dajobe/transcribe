@@ -10,7 +10,7 @@ enum ConfigModelSource: Equatable {
 
 struct ResolvedSharedOptions {
     let model: String
-    /// Where the effective model string came from (for stderr labelling).
+    /// Where the effective model string came from.
     let modelSource: ConfigModelSource
     let language: String?
     let format: String
@@ -26,10 +26,10 @@ struct ResolvedSharedOptions {
     let embedderCompute: ComputeUnitsOption
     let speakersEnabled: Bool
     let verbose: Bool
+    let logLevel: TranscribeEventLevel
     let progressLogMode: ProgressLogMode
     let timingStatsPreference: Bool
 
-    let stdout: Bool
     let overwrite: Bool
     let redo: Bool
     let stateless: Bool
@@ -128,11 +128,16 @@ enum ConfigMerge {
             def: TranscriptionDefaults.embedderCompute
         )
 
-        let verboseTri = try cli.triVerbose()
+        let cliLogLevel = try cli.cliLogLevel()
         let speakersTri = try cli.triSpeakers()
         let etaHintsTri = cli.triEtaHints()
 
-        let verbose = verboseTri.merged(file: file.logging?.verbose, default: TranscriptionDefaults.verbose)
+        let logLevel = try mergeLogLevel(
+            cli: cliLogLevel,
+            file: file.logging?.level,
+            legacyVerbose: file.logging?.verbose
+        )
+        let verbose = logLevel == .debug
         let speakersEnabled = speakersTri.merged(file: file.speakers?.enabled, default: TranscriptionDefaults.speakersEnabled)
         let timingStatsPreference = etaHintsTri.merged(file: file.logging?.etaHints, default: TranscriptionDefaults.etaHintsEnabled)
 
@@ -157,9 +162,9 @@ enum ConfigMerge {
             embedderCompute: embedderCompute,
             speakersEnabled: speakersEnabled,
             verbose: verbose,
+            logLevel: logLevel,
             progressLogMode: progressLogMode,
             timingStatsPreference: timingStatsPreference,
-            stdout: cli.stdout,
             overwrite: cli.overwrite,
             redo: cli.redo,
             stateless: cli.stateless,
@@ -181,6 +186,27 @@ enum ConfigMerge {
             return mode
         }
         return TranscriptionDefaults.progressLogMode
+    }
+
+    private static func mergeLogLevel(
+        cli: TranscribeEventLevel?,
+        file: String?,
+        legacyVerbose: Bool?
+    ) throws -> TranscribeEventLevel {
+        if let cli { return cli }
+        if let file, !file.isEmpty {
+            guard let level = TranscribeEventLevel(rawValue: file.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
+                throw TranscribeError(
+                    message: "Invalid logging.level '\(file)' (expected debug, info, warn, or error).",
+                    exitCode: .invalidUsage
+                )
+            }
+            return level
+        }
+        if let legacyVerbose {
+            return legacyVerbose ? .debug : .info
+        }
+        return TranscriptionDefaults.logLevel
     }
 
     private static func mergeCompute(
@@ -271,13 +297,30 @@ enum ConfigMerge {
 
 extension SharedTranscriptionOptions {
     func validateTriStatePairs() throws {
-        _ = try triVerbose()
+        _ = try cliLogLevel()
         _ = try triSpeakers()
         _ = triEtaHints()
     }
 
-    func triVerbose() throws -> TriState<Bool> {
-        try TriState.from(enable: verbose, disable: quiet, enableLabel: "--verbose", disableLabel: "--quiet")
+    func cliLogLevel() throws -> TranscribeEventLevel? {
+        var selected: [(label: String, level: TranscribeEventLevel)] = []
+        if verbose {
+            selected.append(("--verbose", .debug))
+        }
+        if quiet {
+            selected.append(("--quiet", .warn))
+        }
+        if let logLevel {
+            selected.append(("--log-level", logLevel))
+        }
+        if selected.count > 1 {
+            let labels = selected.map(\.label).joined(separator: ", ")
+            throw TranscribeError(
+                message: "Use only one log-level selector per run; got \(labels).",
+                exitCode: .invalidUsage
+            )
+        }
+        return selected.first?.level
     }
 
     func triSpeakers() throws -> TriState<Bool> {

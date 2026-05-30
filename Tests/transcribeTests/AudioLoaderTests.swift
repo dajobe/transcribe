@@ -3,8 +3,6 @@ import XCTest
 @testable import transcribe
 
 final class AudioLoaderTests: XCTestCase {
-    private let generatedAudioFixtureExtensions = ["wav", "mp3", "m4a", "flac", "aiff", "caf", "aac"]
-
     func testUncompressedByteCountUsesFloatSize() {
         XCTAssertEqual(AudioLoader.uncompressedByteCount(forSampleCount: 1000), 4000)
     }
@@ -24,13 +22,21 @@ final class AudioLoaderTests: XCTestCase {
     }
 
     func testValidateAudioContainerAcceptsGeneratedFormats() throws {
-        for ext in generatedAudioFixtureExtensions {
+        for ext in AudioLoader.audioFormatExtensions {
             let url = try generatedAudioFixtureURL(ext)
             XCTAssertNoThrow(
                 try AudioLoader.validateAudioContainer(fromPath: url.path),
                 "Expected generated .\(ext) fixture to pass container preflight"
             )
         }
+    }
+
+    func testDirectoryCandidateExtensionsComeFromAudioFormatExtensions() {
+        XCTAssertEqual(AudioLoader.candidateExtensions, Set(AudioLoader.audioFormatExtensions))
+        XCTAssertEqual(
+            AudioLoader.candidateExtensionsDescription,
+            AudioLoader.audioFormatExtensions.joined(separator: ", ")
+        )
     }
 
     func testValidateAudioContainerRejectsNonAudio() throws {

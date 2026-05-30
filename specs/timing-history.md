@@ -231,7 +231,7 @@ compatibility.
 - **Tests:**
   [TimingStoreTests.swift](../Tests/transcribeTests/TimingStoreTests.swift),
   [LiveProgressTests.swift](../Tests/transcribeTests/LiveProgressTests.swift)
-  (stderr pipe tests).
+  (captured output tests).
 
 ## Risks / notes
 

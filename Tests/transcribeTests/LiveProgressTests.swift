@@ -3,15 +3,13 @@ import WhisperKit
 @testable import transcribe
 
 final class LiveProgressTests: XCTestCase {
-    /// When stderr is not a TTY (e.g. in tests or when piped), isStderrTTY() should be false.
-    func testIsStderrTTYFalseWhenNotTerminal() {
-        // In XCTest, stderr is typically not a TTY (unless run in a terminal with no redirect).
-        // When we run "swift test", stderr is often a pipe. So we can't assert true/false
-        // without environment assumptions. We only assert the function returns a Bool.
-        let result = isStderrTTY()
+    /// TTY detection is based on stdout because both the live TUI and text
+    /// event modes now write processing output there.
+    func testIsStdoutTTYReturnsBool() {
+        // In XCTest, stdout is typically a pipe, but a local terminal run can
+        // differ. This only pins that the helper is callable in tests.
+        let result = isStdoutTTY()
         _ = result
-        // If we're in a context where stderr is a pipe (e.g. CI), result is false.
-        // If run in a real terminal with no redirect, result could be true.
     }
 
     func testLiveProgressDisplayWritesDiarizationLine() async throws {
@@ -95,6 +93,33 @@ final class LiveProgressTests: XCTestCase {
         XCTAssertTrue(finalTotalLine.contains("elapsed"), "Final snapshot should include total elapsed time, got: \(output)")
         XCTAssertFalse(finalTotalLine.contains("ETA"), "Final total line should not keep an ETA, got: \(output)")
         XCTAssertTrue(output.contains("Encoding:"), "Final snapshot should leave phase rows visible, got: \(output)")
+    }
+
+    func testLiveProgressDisplayIncludesRunContext() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let display = LiveProgressDisplay(
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            contextLines: [
+                "Session: 1/2",
+                "Input: clip.m4a",
+                "Output: clip (txt,json) -> /tmp/out [clip.txt, clip.json]",
+                "Model: openai_whisper-large-v3_turbo",
+            ]
+        )
+        display.start()
+        _ = display.finish()
+        writeHandle.closeFile()
+
+        let output = String(data: readHandle.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertTrue(output.contains("Session: 1/2"), output)
+        XCTAssertTrue(output.contains("Input: clip.m4a"), output)
+        XCTAssertTrue(output.contains("Output: clip"), output)
+        XCTAssertTrue(output.contains("Model: openai_whisper-large-v3_turbo"), output)
     }
 
     func testDurationFormattingOmitsZeroHigherUnits() async throws {
@@ -583,6 +608,105 @@ final class LiveProgressTests: XCTestCase {
             totalLines.contains { $0.contains("ETA ~49s") || $0.contains("ETA ~50s") },
             "Expected total ETA to use max(transcription path, diarization path), got: \(totalLines)"
         )
+    }
+
+    func testDiagnosticsRenderBelowPhaseRowsAndRemainInFinalSnapshot() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let display = LiveProgressDisplay(
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            renderMode: .lineLog(minInterval: 0)
+        )
+        display.start()
+        display.appendDiagnostic(TranscribeEvent(
+            level: .debug,
+            name: "verbose",
+            fields: [TranscribeEventField("elapsed_s", .double(4.2))],
+            message: "loaded model cache metadata"
+        ))
+        _ = display.finish()
+        writeHandle.closeFile()
+
+        let output = String(data: readHandle.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertTrue(output.contains("Diagnostics:"), output)
+        XCTAssertTrue(
+            output.contains(#"DEBUG event=verbose elapsed_s=4.2 message="loaded model cache metadata""#),
+            output
+        )
+
+        let finalTotalRange = try XCTUnwrap(output.range(of: "✓ Total:", options: .backwards))
+        let finalDiagnosticsRange = try XCTUnwrap(output.range(of: "Diagnostics:", options: .backwards))
+        XCTAssertGreaterThan(
+            output.distance(from: output.startIndex, to: finalDiagnosticsRange.lowerBound),
+            output.distance(from: output.startIndex, to: finalTotalRange.lowerBound),
+            "Final snapshot should retain diagnostics below the phase rows, got: \(output)"
+        )
+    }
+
+    func testDiagnosticsAreBoundedToLastFive() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let display = LiveProgressDisplay(
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            renderMode: .lineLog(minInterval: 0)
+        )
+        display.start()
+        for index in 1...6 {
+            display.appendDiagnostic(TranscribeEvent(
+                level: .warn,
+                name: "warning",
+                message: "diagnostic \(index)"
+            ))
+        }
+        _ = display.finish()
+        writeHandle.closeFile()
+
+        let output = String(data: readHandle.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let header = "Diagnostics (last 5 of 6):"
+        let headerRange = try XCTUnwrap(output.range(of: header, options: .backwards))
+        let finalBlock = String(output[headerRange.lowerBound...])
+        XCTAssertFalse(finalBlock.contains(#"message="diagnostic 1""#), finalBlock)
+        for index in 2...6 {
+            XCTAssertTrue(finalBlock.contains(#"message="diagnostic \#(index)""#), finalBlock)
+        }
+    }
+
+    func testFailureSnapshotShowsFailedTotalAndLeavesUnfinishedPhasesRunning() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let display = LiveProgressDisplay(
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            renderMode: .lineLog(minInterval: 0)
+        )
+        display.beginModelLoading()
+        display.appendDiagnostic(TranscribeEvent(
+            level: .error,
+            name: "run_failed",
+            fields: [TranscribeEventField("exit", .int(3))],
+            message: "model failed"
+        ))
+        display.fail()
+        writeHandle.closeFile()
+
+        let output = String(data: readHandle.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let failedTotalRange = try XCTUnwrap(output.range(of: "✕ Total:", options: .backwards))
+        let finalBlock = String(output[failedTotalRange.lowerBound...])
+        XCTAssertTrue(finalBlock.contains("failed after"), finalBlock)
+        XCTAssertTrue(finalBlock.contains(#"ERROR event=run_failed exit=3 message="model failed""#), finalBlock)
+        XCTAssertTrue(finalBlock.contains("▶ Model Loading:"), finalBlock)
+        XCTAssertFalse(finalBlock.contains("✓ Model Loading:"), finalBlock)
     }
 
     func testUpdatesAfterFinishAreIgnored() throws {

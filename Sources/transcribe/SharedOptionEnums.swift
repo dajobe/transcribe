@@ -6,13 +6,13 @@ enum OnOff: String, CaseIterable, ExpressibleByArgument {
     case off
 }
 
-/// How progress / ETA lines are rendered on stderr.
+/// How processing progress is rendered.
 enum ProgressLogMode: String, CaseIterable, ExpressibleByArgument {
-    /// TTY spinner when stderr is a terminal; otherwise no live line.
+    /// Live TUI when stdout is a terminal; otherwise stdout event logs.
     case auto
-    /// Plain throttled stderr lines (~1/s), for pipes and logs.
+    /// Plain stdout event logs for pipes and batch logs.
     case plain
-    /// No live progress rendering.
+    /// No progress/status rendering.
     case off
 }
 

@@ -309,9 +309,6 @@ struct SharedTranscriptionOptions: ParsableArguments {
     )
     var format: String?
 
-    @Flag(help: "Write the primary transcript to stdout instead of a text file")
-    var stdout: Bool = false
-
     @Option(
         name: .long,
         help: ArgumentHelp(
@@ -364,11 +361,17 @@ struct SharedTranscriptionOptions: ParsableArguments {
     )
     var dryRun: Bool = false
 
-    @Flag(name: .long, help: "Print progress, timing, and cache details to stderr")
+    @Flag(name: .long, help: "Emit debug-level progress, timing, and cache details in event logs")
     var verbose: Bool = false
 
-    @Flag(name: .long, help: "Reduce stderr logging (overrides config verbose for this run)")
+    @Flag(name: .long, help: "Show only warning and error event logs for this run")
     var quiet: Bool = false
+
+    @Option(
+        name: .long,
+        help: "Minimum event log level: debug, info, warn, or error (default: \(TranscriptionDefaults.logLevel.rawValue))"
+    )
+    var logLevel: TranscribeEventLevel?
 
     @Option(
         name: .long,
@@ -378,7 +381,7 @@ struct SharedTranscriptionOptions: ParsableArguments {
 
     @Option(
         name: .long,
-        help: "Progress on stderr: auto (TTY spinner when a terminal), plain (throttled lines for pipes/logs), or off"
+        help: "Progress output: auto (TUI on terminal, event logs otherwise), plain (event logs), or off"
     )
     var progressLog: ProgressLogMode?
 

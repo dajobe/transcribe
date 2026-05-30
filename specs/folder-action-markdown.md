@@ -74,20 +74,14 @@ Valid tokens include **`md`**. Comma-separated lists behave as today
 Expands to **`txt`**, **`json`**, **`srt`**, **`vtt`**, **`md`** (in that
 order).
 
-### `--stdout`
-
-Only applies to **`txt`**. Markdown is always written as **`basename.md`** when
-`md` is requested; it is never written to stdout.
-
 ## Folder Action script
 
 **Path:** `scripts/folder-action-transcribe.sh`
 
 **Optional wrapper:** `scripts/folder-script.sh` is an example Automator driver
-that sets log/output paths, `TRANSCRIBE_BIN`, and `TRANSCRIBE_LOCK_FILE`, then
-invokes `folder-action-transcribe.sh` from the **same directory** as the wrapper
-(resolved via `BASH_SOURCE`). Edit the `root_dir` / paths inside for your
-machine; `chmod +x` both scripts.
+that loads `$HOME/.transcribe.env`, sets default log/output paths, and invokes
+`folder-action-transcribe.sh` from `TRANSCRIBE_SCRIPT_DIR` (default:
+`$HOME/bin`). `chmod +x` both scripts.
 
 **Invocation:** A single argument: the POSIX path to the file that was added
 (Automator “Folder Action receives files and folders added to …” should pass
@@ -145,22 +139,20 @@ each new item as an argument).
 **`TRANSCRIBE_LOCK_FILE`** is non-empty, the script runs `transcribe` under
 **`flock "$TRANSCRIBE_LOCK_FILE"`** so concurrent drops do not overlap GPU work.
 If **`flock`** is missing, the script runs without locking and logs a warning to
-stderr once.
+the event log once.
 
-11. **Logging** — If **`TRANSCRIBE_LOG`** is set, append lines with an **ISO
-    8601 UTC** timestamp prefix (`YYYY-MM-DDThh:mm:ssZ`). For each file path
-    processed:
+11. **Logging** — If **`TRANSCRIBE_LOG`** is set, append text event lines in the
+    same format as non-interactive **`transcribe --progress-log plain`** output.
+    See [cli-output-and-batch-logs.md](cli-output-and-batch-logs.md). For each
+    file path processed:
     - **`event=start`** — beginning of handling (after the path is resolved).
-    - **`event=end`** — always logged on exit, with **`path=`**, **`exit=`** (exit
-      code), **`duration_s=`** (wall-clock seconds from start to end), and
-      optionally **`reason=`** (e.g. `skip-non-audio`, `skip-unstable`,
-      `transcribe-failed` when the child exits non-zero).
-    - When **`transcribe` exits non-zero:** **`transcribe-exit=`** and
-      **`meaning=`** (maps to the binary’s exit codes: `runtime`, `invalid-usage`,
-      `input-file`, **`model`** (exit 4), **`output-write`** (exit 5), `other`).
-      Then **`transcribe-stderr:`** with a single-line summary of stderr (the
-      binary’s error message). Full stderr for that run is also appended to
-      **`TRANSCRIBE_STDERR_LOG`** if set, otherwise
+    - **`event=end`** — always logged on exit, with **`path=`**, **`exit=`**,
+      **`duration_s=`**, and optionally **`reason=`**.
+    - Child stdout event lines are appended verbatim to **`TRANSCRIBE_LOG`**.
+    - When **`transcribe` exits non-zero:** one
+      **`ERROR event=transcribe_failed`** line records **`exit=`**,
+      **`meaning=`**, and **`stderr_summary=`**. Full raw stderr for that run is
+      also appended to **`TRANSCRIBE_STDERR_LOG`** if set, otherwise
       **`dirname(TRANSCRIBE_LOG)/transcribe.stderr.log`** when **`TRANSCRIBE_LOG`**
       is set.
 

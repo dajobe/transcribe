@@ -61,7 +61,7 @@ When the source argument is a directory, `transcribe`:
   directories).
 
 If no supported audio files remain after filtering, the run fails with exit code
-`3` and a clear stderr message.
+`3` and a clear error message.
 
 ## Sort order (`--sort` / `--input-sort`)
 
@@ -108,7 +108,7 @@ When the trust check fails the same data also can't be trusted for
 `--session-gap`, so session splitting is disabled and the directory is treated
 as a single session.
 
-Fallback orders by natural-sort filename instead and emits a warning to stderr
+Fallback orders by natural-sort filename instead and emits a warning
 identifying the mismatch:
 
 ```text

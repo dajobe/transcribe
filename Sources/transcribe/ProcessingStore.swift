@@ -62,8 +62,67 @@ struct ProcessingSettingsSignature: Codable, Equatable {
     let min_speakers: Int?
     let max_speakers: Int?
     let formats: [String]
-    let write_txt_to_stdout: Bool
     let transcribe_version: String
+    let legacy_write_txt_to_stdout: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case language
+        case diarization_enabled
+        case speaker_strategy
+        case min_speakers
+        case max_speakers
+        case formats
+        case write_txt_to_stdout
+        case transcribe_version
+    }
+
+    init(
+        model: String,
+        language: String?,
+        diarization_enabled: Bool,
+        speaker_strategy: String,
+        min_speakers: Int?,
+        max_speakers: Int?,
+        formats: [String],
+        transcribe_version: String,
+        legacy_write_txt_to_stdout: Bool = false
+    ) {
+        self.model = model
+        self.language = language
+        self.diarization_enabled = diarization_enabled
+        self.speaker_strategy = speaker_strategy
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
+        self.formats = formats
+        self.transcribe_version = transcribe_version
+        self.legacy_write_txt_to_stdout = legacy_write_txt_to_stdout
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        model = try container.decode(String.self, forKey: .model)
+        language = try container.decodeIfPresent(String.self, forKey: .language)
+        diarization_enabled = try container.decode(Bool.self, forKey: .diarization_enabled)
+        speaker_strategy = try container.decode(String.self, forKey: .speaker_strategy)
+        min_speakers = try container.decodeIfPresent(Int.self, forKey: .min_speakers)
+        max_speakers = try container.decodeIfPresent(Int.self, forKey: .max_speakers)
+        formats = try container.decode([String].self, forKey: .formats)
+        transcribe_version = try container.decode(String.self, forKey: .transcribe_version)
+        legacy_write_txt_to_stdout = try container.decodeIfPresent(Bool.self, forKey: .write_txt_to_stdout) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(model, forKey: .model)
+        try container.encodeIfPresent(language, forKey: .language)
+        try container.encode(diarization_enabled, forKey: .diarization_enabled)
+        try container.encode(speaker_strategy, forKey: .speaker_strategy)
+        try container.encodeIfPresent(min_speakers, forKey: .min_speakers)
+        try container.encodeIfPresent(max_speakers, forKey: .max_speakers)
+        try container.encode(formats, forKey: .formats)
+        try container.encode(transcribe_version, forKey: .transcribe_version)
+    }
 
     func isCompatibleForSkip(with other: ProcessingSettingsSignature) -> Bool {
         model == other.model
@@ -73,7 +132,8 @@ struct ProcessingSettingsSignature: Codable, Equatable {
             && min_speakers == other.min_speakers
             && max_speakers == other.max_speakers
             && formats == other.formats
-            && write_txt_to_stdout == other.write_txt_to_stdout
+            && !legacy_write_txt_to_stdout
+            && !other.legacy_write_txt_to_stdout
     }
 }
 

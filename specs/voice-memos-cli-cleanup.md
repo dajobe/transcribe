@@ -77,12 +77,13 @@ Global options are owned by the root command and must appear before `file`,
 `dir`, `voice-memos`, or the root path alias:
 
 - `--model`, `--language`, `--model-dir`
-- `--output-dir`, `--output-prefix`, `--format`, `--stdout`
+- `--output-dir`, `--output-prefix`, `--format`
 - `--transcript-only`, `--with-speakers`, `--speakers-min`, `--speakers-max`,
   `--speaker-merge`
 - `--overwrite`, `--redo`, `--stateless`, `--mark-imported`, `--dry-run` /
   `--dryrun`
-- `--eta-hints`, `--progress-log`, `--quiet`, and compute-unit options
+- `--eta-hints`, `--progress-log`, `--log-level`, `--verbose`, `--quiet`, and
+  compute-unit options
 
 Global options are intentionally not accepted after source commands. For
 example, `transcribe file meeting.m4a --format md` is invalid; use `transcribe
@@ -123,7 +124,7 @@ Removed root-level options:
 - Directory-specific options on the root path alias are invalid.
 - `--mark-imported --redo` is invalid.
 - `--mark-imported --stateless` is invalid.
-- `--stdout` requires `txt` to be one of the requested formats.
+- Removed options such as `--stdout` are invalid.
 - Speaker bounds must be positive; `--speakers-min` must be less than or equal
   to `--speakers-max`.
 - Speaker bounds are invalid with `--transcript-only`.
@@ -166,7 +167,7 @@ Store:
 - source fingerprint: SHA-256 of file bytes, or ordered per-file SHA-256s for
   directory sessions
 - important settings signature: model, language, diarization, speaker strategy,
-  speaker bounds, requested formats, and stdout text behavior
+  speaker bounds, and requested formats
 - transcribe version for audit/debugging; a version-only change does not force
   re-transcription
 - output dir, basename, output paths, completion time, duration, warning count
@@ -268,8 +269,7 @@ Markdown structure:
   without speakers use `## _HH:MM:SS - HH:MM:SS_`.
 
 The Markdown transcript body follows the same merge and time-range logic as the
-plain `txt` format. Markdown is always written to a file when requested; it is
-not written to stdout.
+plain `txt` format. Markdown is always written to a file when requested.
 
 `--format all` expands to `txt`, `json`, `srt`, `vtt`, and `md`.
 
@@ -293,7 +293,7 @@ Behavior:
   before a copy finishes. Defaults: `TRANSCRIBE_STABLE_SECS=2` and
   `TRANSCRIBE_MAX_STABLE_WAIT=3600`.
 - Process only supported audio extensions: `mp3`, `wav`, `m4a`, `flac`, `aiff`,
-  and `caf`.
+  `caf`, and `aac`.
 - Skip hidden files and `.tmp` files.
 - If `TRANSCRIBE_SKIP_IF_MD_EXISTS=1`, skip when `basename.md` already exists in
   the resolved output directory.
@@ -308,9 +308,9 @@ Behavior:
   child (legacy: `TRANSCRIBE_TIMING_STATS=0`).
 - If `TRANSCRIBE_LOCK_FILE` is set and `flock` exists, serialize runs under that
   lock.
-- If `TRANSCRIBE_LOG` is set, append structured start/end lines with UTC
-  timestamps, child exit code, duration, and skip/failure reason. Non-zero
-  `transcribe` runs include mapped exit-code meaning and a stderr summary.
+- If `TRANSCRIBE_LOG` is set, append text event lines with UTC timestamps,
+  child exit code, duration, and skip/failure reason. Non-zero `transcribe`
+  runs include mapped exit-code meaning and a `stderr_summary` field.
 
 The constructed command shape is:
 

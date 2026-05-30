@@ -137,6 +137,66 @@ final class ProcessingStoreTests: XCTestCase {
         }
     }
 
+    func testLegacyStdoutFalseRecordStillSkipsButLegacyStdoutTrueDoesNot() throws {
+        let state = try makeTempDir()
+        let output = try makeTempDir()
+        try withXDGStateHome(state.path) {
+            let audio = output.appendingPathComponent("clip.m4a")
+            try Data("audio".utf8).write(to: audio)
+            let transcript = output.appendingPathComponent("clip.txt")
+            try Data("text".utf8).write(to: transcript)
+            let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+            let sourceID = sourceIDForFiles(kind: .file, files: [audio.path])
+            let settings = ProcessingSettingsSignature(
+                model: "model",
+                language: "en",
+                diarization_enabled: false,
+                speaker_strategy: "subsegment",
+                min_speakers: nil,
+                max_speakers: nil,
+                formats: ["txt"],
+                transcribe_version: "2.5.2"
+            )
+
+            try writeLegacyProcessingRecord(
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                output: output,
+                transcript: transcript,
+                writeTxtToStdout: false
+            )
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file,
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                settings: settings,
+                outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
+
+            try FileManager.default.removeItem(at: try StatePaths.processingHistoryURL())
+            try writeLegacyProcessingRecord(
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                output: output,
+                transcript: transcript,
+                writeTxtToStdout: true
+            )
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file,
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                settings: settings,
+                outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .process, reason: .settingsChanged))
+        }
+    }
+
+    func testSettingsSignatureEncodingOmitsLegacyStdoutField() throws {
+        let data = try JSONEncoder().encode(sampleSettings())
+        let text = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertFalse(text.contains("write_txt_to_stdout"), text)
+    }
+
     func testChangedSettingsDoNotSkip() throws {
         let state = try makeTempDir()
         let output = try makeTempDir()
@@ -513,9 +573,56 @@ final class ProcessingStoreTests: XCTestCase {
             min_speakers: nil,
             max_speakers: nil,
             formats: ["json"],
-            write_txt_to_stdout: false,
             transcribe_version: version
         )
+    }
+
+    private func writeLegacyProcessingRecord(
+        sourceID: String,
+        fingerprint: SourceFingerprint,
+        output: URL,
+        transcript: URL,
+        writeTxtToStdout: Bool
+    ) throws {
+        let url = try StatePaths.processingHistoryURL()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let files = fingerprint.files.map { file -> [String: Any] in
+            var row: [String: Any] = [
+                "path": file.path,
+                "sha256": file.sha256,
+                "bytes": file.bytes,
+            ]
+            if let mtime = file.mtime {
+                row["mtime"] = mtime
+            }
+            return row
+        }
+        let row: [String: Any] = [
+            "schema_version": 1,
+            "completed_at": "2026-05-29T00:00:00Z",
+            "history_reason": "first_run",
+            "source_kind": "file",
+            "source_id": sourceID,
+            "source_fingerprint": ["files": files],
+            "settings_signature": [
+                "model": "model",
+                "language": "en",
+                "diarization_enabled": false,
+                "speaker_strategy": "subsegment",
+                "formats": ["txt"],
+                "write_txt_to_stdout": writeTxtToStdout,
+                "transcribe_version": "2.4.0",
+            ],
+            "output_dir": output.path,
+            "basename": "clip",
+            "output_paths": [transcript.path],
+            "audio_duration_s": 1.0,
+            "warning_count": 0,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
+        var line = data
+        line.append(Data("\n".utf8))
+        try line.write(to: url)
     }
 
     private func withXDGStateHome(_ path: String, _ body: () throws -> Void) throws {

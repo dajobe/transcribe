@@ -1,34 +1,65 @@
-# Example Automator Folder Action wrapper
+#!/bin/bash
+# Example Automator Folder Action wrapper.
 #
-# This goes into Automator shell script body
-#
-# Automator: Run Shell Script → "Pass input" must be "as arguments" (not stdin).
-#
-# Requires configuring in $HOME/.transcribe.env
+# Automator: Run Shell Script -> "Pass input" must be "as arguments".
+# Configure paths in $HOME/.transcribe.env or by editing the defaults below.
 
-set -e
+set -euo pipefail
 
-. $HOME/.transcribe.env
+iso_utc() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+log_value() {
+  local value="$1"
+  if [[ -z "$value" || "$value" =~ [[:space:]\",\\,] ]]; then
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+log_event() {
+  local level="$1"
+  local event="$2"
+  shift 2
+  local line
+  line="$(iso_utc) $level event=$event"
+  while [[ "$#" -gt 1 ]]; do
+    local key="$1"
+    local value="$2"
+    line+=" ${key}=$(log_value "$value")"
+    shift 2
+  done
+  if [[ -n "${TRANSCRIBE_LOG:-}" ]]; then
+    printf '%s\n' "$line" >>"$TRANSCRIBE_LOG"
+  else
+    printf '%s\n' "$line"
+  fi
+}
+
+if [[ -f "$HOME/.transcribe.env" ]]; then
+  # shellcheck disable=SC1090
+  . "$HOME/.transcribe.env"
+fi
 
 TRANSCRIBE_BIN="${TRANSCRIBE_BIN:-$HOME/bin/transcribe}"
 export TRANSCRIBE_BIN
 TRANSCRIBE_SCRIPT_DIR="${TRANSCRIBE_SCRIPT_DIR:-$HOME/bin}"
+TRANSCRIBE_SCRIPT_DIR="${TRANSCRIBE_SCRIPT_DIR/#\~/$HOME}"
 export TRANSCRIBE_SCRIPT_DIR
 TRANSCRIBE_LOG="${TRANSCRIBE_LOG:-/tmp/transcribe.log}"
 export TRANSCRIBE_LOG
 
-if [[ $# -eq 0 ]]; then
-  echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") folder-script: no input paths (Automator must pass input as arguments, not stdin)" >>"$TRANSCRIBE_LOG"
-  exit 0
-fi
-
 helper="$TRANSCRIBE_SCRIPT_DIR/folder-action-transcribe.sh"
-# Smoke log: set TRANSCRIBE_SMOKE_LOG=/tmp/folder-action-smoke.log to debug Automator.
+
 if [[ -n "${TRANSCRIBE_SMOKE_LOG:-}" ]]; then
   {
     echo "=== $(date) ==="
     echo "argc=$# argv=$*"
-    echo "script_dir=$script_dir"
+    echo "script_dir=$TRANSCRIBE_SCRIPT_DIR"
     echo "helper=$helper"
     if [[ -x "$helper" ]]; then
       echo "helper_ok=yes"
@@ -38,81 +69,16 @@ if [[ -n "${TRANSCRIBE_SMOKE_LOG:-}" ]]; then
   } >>"${TRANSCRIBE_SMOKE_LOG}" 2>&1 || true
 fi
 
-if [[ ! -x "$helper" ]]; then
-  echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") folder-script: missing or not executable: $helper (set TRANSCRIBE_SCRIPT_DIR or run this script from disk, not inline)" >>"$TRANSCRIBE_LOG"
-  exit 1
-fi
-
-for f in "$@"; do
-  echo "$f"
-  "$helper" "$f" || true
-done
-
-#!/bin/bash
-# Example Automator Folder Action wrapper: set paths below, chmod +x,
-# point Automator at this file, pass input as arguments. Requires
-# folder-action-transcribe.sh in the same directory (e.g. keep both
-# under scripts/ or copy both to ~/bin).
-#
-# Automator: Run Shell Script → "Pass input" must be "as arguments" (not stdin).
-# If you paste this inline instead of running this file, set script_dir to the
-# directory that contains folder-action-transcribe.sh.
-
-set -e
-
-# Directory containing folder-action-transcribe.sh. When the script is pasted
-# inline into Automator, BASH_SOURCE is unreliable — set TRANSCRIBE_SCRIPT_DIR
-# (e.g. to $HOME/bin) or hardcode script_dir below.
-if [[ -n "${TRANSCRIBE_SCRIPT_DIR:-}" ]]; then
-  script_dir="${TRANSCRIBE_SCRIPT_DIR/#\~/$HOME}"
-else
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-
-# ROOT for audio input, logs, lock file dir, and default output
-root_dir="$HOME/somewhere"
-logs_dir="$root_dir/logs"
-input_dir="$root_dir/audio"
-output_dir="$root_dir/transcriptions"
-
-mkdir -p "$logs_dir" "$output_dir"
-
-TRANSCRIBE_BIN="${TRANSCRIBE_BIN:-$HOME/bin/transcribe}"
-export TRANSCRIBE_BIN
-TRANSCRIBE_LOG="$logs_dir/transcribe.log"
-export TRANSCRIBE_LOG
-TRANSCRIBE_OUTPUT_DIR="$output_dir"
-export TRANSCRIBE_OUTPUT_DIR
-TRANSCRIBE_LOCK_FILE="$input_dir/transcribe.lock"
-export TRANSCRIBE_LOCK_FILE
-
 if [[ $# -eq 0 ]]; then
-  echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") folder-script: no input paths (Automator must pass input as arguments, not stdin)" >>"$TRANSCRIBE_LOG"
+  log_event WARN no_input message "Automator must pass input as arguments, not stdin"
   exit 0
 fi
 
-helper="$script_dir/folder-action-transcribe.sh"
-# Smoke log: set TRANSCRIBE_SMOKE_LOG=/tmp/folder-action-smoke.log to debug Automator.
-if [[ -n "${TRANSCRIBE_SMOKE_LOG:-}" ]]; then
-  {
-    echo "=== $(date) ==="
-    echo "argc=$# argv=$*"
-    echo "script_dir=$script_dir"
-    echo "helper=$helper"
-    if [[ -x "$helper" ]]; then
-      echo "helper_ok=yes"
-    else
-      echo "helper_ok=no (missing or not executable)"
-    fi
-  } >>"${TRANSCRIBE_SMOKE_LOG}" 2>&1 || true
-fi
-
 if [[ ! -x "$helper" ]]; then
-  echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") folder-script: missing or not executable: $helper (set TRANSCRIBE_SCRIPT_DIR or run this script from disk, not inline)" >>"$TRANSCRIBE_LOG"
+  log_event ERROR missing_helper helper "$helper" message "folder-action-transcribe.sh is missing or not executable"
   exit 1
 fi
 
 for f in "$@"; do
-  echo "$f"
   "$helper" "$f" || true
 done

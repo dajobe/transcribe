@@ -25,7 +25,7 @@ could evolve **without** duplicating pipeline logic in a second app.
 | Target                          | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                 |
 |:--------------------------------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **`TranscribeCore`** (name TBD) | **Library**: [`TranscriptionPipeline.swift`](../Sources/transcribe/TranscriptionPipeline.swift), [`OutputWriter.swift`](../Sources/transcribe/OutputWriter.swift), [`TranscriptModels.swift`](../Sources/transcribe/TranscriptModels.swift), [`AudioLoader.swift`](../Sources/transcribe/AudioLoader.swift), [`Errors.swift`](../Sources/transcribe/Errors.swift), compute/options helpers, timing store if still shared, etc. |
-| **`transcribe`**                | **Thin executable**: [ArgumentParser](https://github.com/apple/swift-argument-parser) parses flags → builds a configuration value → calls the library → maps [`TranscribeError`](../Sources/transcribe/Errors.swift) to process exit codes and stderr strings.                                                                                                                                                                 |
+| **`transcribe`**                | **Thin executable**: [ArgumentParser](https://github.com/apple/swift-argument-parser) parses flags → builds a configuration value → calls the library → maps [`TranscribeError`](../Sources/transcribe/Errors.swift) to process exit codes and user-facing messages.                                                                                                                                                          |
 | **`transcribeTests`**           | Depends on the **library** target so unit tests do not require the executable’s `main`.                                                                                                                                                                                                                                                                                                                                        |
 
 Refactoring should move types and functions without changing observable CLI
@@ -44,13 +44,13 @@ compute options, and output format list — mirroring what
 [`runPipeline`](../Sources/transcribe/main.swift) assembles today.
 
 - Surface failures as **`TranscribeError`** (or a small set of typed errors) so
-  a GUI can show alerts without parsing stderr.
+  a GUI can show alerts without parsing CLI text output.
 
 ## Progress and logging
 
 Today [`LiveProgress`](../Sources/transcribe/LiveProgress.swift) and
-[`VerboseLogger`](../Sources/transcribe/VerboseLog.swift) assume a **TTY or
-line-oriented stderr** consumer.
+[`VerboseLogger`](../Sources/transcribe/VerboseLog.swift) are CLI-oriented
+stdout renderers/reporters.
 
 For a GUI library:
 
@@ -58,7 +58,7 @@ For a GUI library:
   `AsyncStream<TranscriptionProgress>` or a small **protocol** (`phaseStarted`,
   `fractionComplete`, ETA fields) implemented by a view model.
 - Allow **injecting a log handler** (`os_log`, file, or no-op) instead of
-  hard-coding stderr.
+  hard-coding CLI output.
 
 ## Cancellation
 

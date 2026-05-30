@@ -80,22 +80,20 @@ no real audio or model work yet.
   SpeakerKit, swift-argument-parser).
 - Implement CLI parsing for the [CLI Contract](specs/transcribe.md): root/global
   options, `file`, `dir`, and `voice-memos` source commands, plus the simple
-  root file/directory alias. Enforce semantics: `--stdout` only with txt;
-  `--speakers-min` / `--speakers-max` invalid with `--transcript-only`; `min <=
-  max` when both speaker options set; invalid combinations exit with code `2`.
+  root file/directory alias. Enforce semantics: `--speakers-min` /
+  `--speakers-max` invalid with `--transcript-only`; `min <= max` when both
+  speaker options set; invalid combinations exit with code `2`.
 - Use a single, consistent exit-code scheme: `0` success, `1` runtime failure,
   `2` invalid usage, `3` input file, `4` model, `5` output write. Ensure all
-  user-facing errors and logs go to stderr.
+  processing status follows [cli-output-and-batch-logs.md](cli-output-and-batch-logs.md).
 
 **Testing checkpoint:**
 
 - CLI parsing: valid invocations succeed (e.g. exit 0 with a stub run or early
   "not implemented" exit 1).
-- Invalid option combinations (e.g. `--stdout` without txt, `--speakers-min`
-  with `--transcript-only`, `--speakers-min 3 --speakers-max 2`) exit with code
-  `2`.
-- `--help` and `--version` produce expected output to stdout; nothing else to
-  stdout unless `--stdout` is used later.
+- Invalid option combinations (e.g. `--speakers-min` with `--transcript-only`,
+  `--speakers-min 3 --speakers-max 2`) exit with code `2`.
+- `--help` and `--version` produce expected report-style output to stdout.
 
 ---
 
@@ -120,11 +118,11 @@ diarization); produce an in-memory transcript structure.
 **Testing checkpoint:**
 
 - Input file failures: missing file, unreadable file, unsupported format → exit
-  `3` and clear stderr message.
+  `3` and clear error message.
 - No-diarize mode: run on a small fixture (or mocked segment result); process
   completes and yields segment data.
 - Empty or no-speech audio: valid empty output (e.g. empty segments), no crash;
-  optional warning to stderr.
+  optional warning.
 
 ---
 
@@ -145,9 +143,8 @@ matching the spec.
   text: merge consecutive same-speaker segments into paragraphs; include speaker
   and time range when diarization present (later). SRT: speaker prefix per cue
   when present. VTT: voice tags for speaker. Respect `--format` (default
-  `txt,json`) and `--format all` → all four. `--stdout`: when txt is requested,
-  write transcript text to stdout and do not write `.txt` file; logs only to
-  stderr.
+  `txt,json`) and `--format all` → all four. Transcript text is always written
+  to the requested output file.
 
 **Testing checkpoint:**
 
@@ -161,7 +158,7 @@ matching the spec.
 - Golden-file tests: small fixture with known transcript; compare generated txt,
   json, srt, vtt to golden files (or structured assertions). Include
   transcript-only case (no speaker labels in outputs).
-- `--stdout`: transcript on stdout, no `.txt` file; stderr unchanged.
+- Text output: transcript is written to `.txt` when `txt` is requested.
 
 ---
 
@@ -207,10 +204,11 @@ diagnostics.
 - **Failure behavior:** Model download fails → retry once, then exit `4`. Output
   write failure (e.g. disk full): exit `5`, do not leave truncated output files
   (write to temp and rename; on failure, remove temp).
-- **Verbose:** When `--verbose` is set, emit progress and timing to stderr only
-  (e.g. load audio, cache path, transcription/diarization start and complete,
-  merge, write outputs, total time). Include where possible: duration, language,
-  speaker count, cache hit vs download, realtime factor.
+- **Logging:** Use stdout TUI or stdout text events according to
+  `--progress-log`. Event logs default to `INFO+`; `--log-level debug` (or
+  `--verbose`) adds progress and timing detail where possible: duration,
+  language, speaker count, cache hit vs download, realtime factor. `--quiet`
+  is shorthand for `--log-level warn`.
 
 **Testing checkpoint:**
 
@@ -220,7 +218,8 @@ diagnostics.
   URL or env if feasible).
 - Output write failure: simulate full disk or permission error; assert exit `5`
   and no truncated file left in place.
-- Verbose: `--verbose` produces stderr output; no log output to stdout.
+- Event logs: `--progress-log plain` produces stdout text events with stable
+  event names and quoted fields.
 
 ---
 

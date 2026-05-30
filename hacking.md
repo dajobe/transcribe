@@ -166,9 +166,10 @@ The ledger records completed source sessions and imported baselines. It stores:
 - source kind and stable source id
 - per-file SHA-256 fingerprint, byte size, and mtime for the source files
 - settings signature (model, language, diarization on/off, speaker strategy,
-  min/max speakers, formats, write-txt-to-stdout) for completed transcription
-  runs; `null` for `--mark-imported` baselines. The recorded transcribe version
-  is audit metadata and does not force re-transcription by itself.
+  min/max speakers, formats) for completed transcription runs; legacy records
+  may contain `write_txt_to_stdout`, but new records omit it. The recorded
+  transcribe version is audit metadata and does not force re-transcription by
+  itself. `settings_signature` is `null` for `--mark-imported` baselines.
 - output paths and `output_dir` / `basename`
 - Voice Memos audit metadata when present (title, recorded-at, unique id, path)
 

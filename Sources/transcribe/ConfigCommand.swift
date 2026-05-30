@@ -244,6 +244,7 @@ enum ConfigCommand {
         r("compute.segmenter", shared.segmenterCompute.rawValue, TranscriptionDefaults.segmenterCompute.rawValue)
         r("compute.embedder", shared.embedderCompute.rawValue, TranscriptionDefaults.embedderCompute.rawValue)
         r("speakers.enabled", boolStr(shared.speakersEnabled), boolStr(TranscriptionDefaults.speakersEnabled))
+        r("logging.level", shared.logLevel.rawValue, TranscriptionDefaults.logLevel.rawValue)
         r("logging.verbose", boolStr(shared.verbose), boolStr(TranscriptionDefaults.verbose))
         r("logging.etaHints", boolStr(shared.timingStatsPreference), boolStr(TranscriptionDefaults.etaHintsEnabled))
         r("logging.progressLog", shared.progressLogMode.rawValue, TranscriptionDefaults.progressLogMode.rawValue)
@@ -331,6 +332,10 @@ enum ConfigCommand {
             guard var l = cfg.logging else { return true }
             l.verbose = nil
             cfg.logging = pruneLoggingSection(l)
+        case "logging.level":
+            guard var l = cfg.logging else { return true }
+            l.level = nil
+            cfg.logging = pruneLoggingSection(l)
         case "logging.etaHints":
             guard var l = cfg.logging else { return true }
             l.etaHints = nil
@@ -403,7 +408,7 @@ enum ConfigCommand {
     }
 
     private static func pruneLoggingSection(_ l: UserConfigFile.LoggingSection) -> UserConfigFile.LoggingSection? {
-        if l.verbose == nil && l.etaHints == nil && l.progressLog == nil { return nil }
+        if l.verbose == nil && l.level == nil && l.etaHints == nil && l.progressLog == nil { return nil }
         return l
     }
 
@@ -475,6 +480,10 @@ enum ConfigCommand {
         case "logging.verbose":
             var l = cfg.logging ?? UserConfigFile.LoggingSection()
             l.verbose = try parseTriBool(v)
+            cfg.logging = l
+        case "logging.level":
+            var l = cfg.logging ?? UserConfigFile.LoggingSection()
+            l.level = try parseLogLevelRaw(v)
             cfg.logging = l
         case "logging.etaHints":
             var l = cfg.logging ?? UserConfigFile.LoggingSection()
@@ -555,6 +564,14 @@ enum ConfigCommand {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard ProgressLogMode(rawValue: t) != nil else {
             throw TranscribeError(message: "Expected logging.progressLog auto, plain, or off.", exitCode: .invalidUsage)
+        }
+        return t
+    }
+
+    private static func parseLogLevelRaw(_ s: String) throws -> String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard TranscribeEventLevel(rawValue: t) != nil else {
+            throw TranscribeError(message: "Expected logging.level debug, info, warn, or error.", exitCode: .invalidUsage)
         }
         return t
     }

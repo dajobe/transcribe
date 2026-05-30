@@ -329,8 +329,9 @@ Final snapshot:
 Line-level ETAs mean time to finish that running phase. The top-line ETA means
 time left in the current session.
 
-Plain `--progress-log plain` should emit throttled snapshots with the same lines
-without ANSI cursor control.
+Interactive `--progress-log auto` should render these lines when stdout is a
+terminal. Plain `--progress-log plain` emits stdout text events instead of live
+snapshots; see [cli-output-and-batch-logs.md](cli-output-and-batch-logs.md).
 
 ## Capturing Timings
 
@@ -453,8 +454,8 @@ Add focused tests:
 - `AudioLoaderTests`
   - Cheap duration probe returns a positive duration for fixture audio.
 - `CLITests`
-  - `--progress-log plain` emits a pre-callback phase line for a seeded timing
-    history scenario without ANSI cursor codes.
+  - Non-interactive processing emits stdout text events without ANSI cursor
+    codes.
 - Script smoke tests
   - Dry-run reports counts without modifying the file.
   - Migration creates a backup and rewrites v1 rows to v2.
@@ -471,8 +472,8 @@ Add focused tests:
 5. Wire phase and overall ETAs into `PipelineRunner`.
 6. Add the manual JSONL v2 migration script and smoke tests.
 7. Run focused tests, then `swift test` and `git diff --check`.
-8. Manually verify a `voice-memos` or large-file run with `--progress-log plain`
-   so the pre-callback output is easy to inspect.
+8. Manually verify a `voice-memos` or large-file terminal run with
+   `--progress-log auto` so the pre-callback TUI is easy to inspect.
 
 ## Open Questions
 
