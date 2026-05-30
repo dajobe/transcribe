@@ -1,4 +1,5 @@
 import Foundation
+import AudioToolbox
 import WhisperKit
 
 enum AudioLoaderError: Error {
@@ -20,11 +21,76 @@ struct AudioLoadLimits: Equatable {
 }
 
 enum AudioLoader {
-    /// Supported audio file extensions (lowercase, without leading dot).
-    static let supportedExtensions: Set<String> = ["mp3", "wav", "m4a", "flac", "aiff", "caf"]
+    /// File extensions considered audio candidates during directory discovery.
+    ///
+    /// Actual decoding support depends on WhisperKit's AVFoundation loading
+    /// path for the specific file, codec, and container.
+    static let candidateExtensions: Set<String> = ["mp3", "wav", "m4a", "flac", "aiff", "caf"]
 
-    /// Supported audio formats for error messages (from WhisperKit/AVFoundation).
-    static let supportedFormats = "mp3, wav, m4a, flac, aiff, caf"
+    /// Human-readable list of candidate audio extensions.
+    static let candidateExtensionsDescription = "mp3, wav, m4a, flac, aiff, caf"
+
+    /// Cheaply validates that a path is an audio container without decoding it.
+    ///
+    /// WhisperKit's loader can raise uncaught AVFAudio Obj-C exceptions for
+    /// some valid AAC/M4A files when it seeks during an early validation pass.
+    /// Keep preflight on the container-inspection path and leave full decoding
+    /// to the actual transcription load.
+    static func validateAudioContainer(fromPath path: String) throws {
+        let expandedPath = (path as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: expandedPath) else {
+            throw TranscribeError(
+                message: "Input file does not exist: \(path)",
+                exitCode: .inputFile
+            )
+        }
+
+        let url = URL(fileURLWithPath: expandedPath)
+        var audioFile: AudioFileID?
+        let openStatus = AudioFileOpenURL(url as CFURL, .readPermission, 0, &audioFile)
+        guard openStatus == noErr, let audioFile else {
+            throw TranscribeError(
+                message:
+                    "Failed to inspect audio container: \(path) (\(describeOSStatus(openStatus))). Candidate extensions: \(candidateExtensionsDescription). Actual support depends on WhisperKit/AVFoundation decoding for this file.",
+                exitCode: .inputFile
+            )
+        }
+        defer { AudioFileClose(audioFile) }
+
+        var format = AudioStreamBasicDescription()
+        var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let formatStatus = AudioFileGetProperty(
+            audioFile,
+            kAudioFilePropertyDataFormat,
+            &formatSize,
+            &format
+        )
+        guard formatStatus == noErr,
+              format.mFormatID != 0,
+              format.mSampleRate > 0,
+              format.mChannelsPerFrame > 0 else {
+            throw TranscribeError(
+                message:
+                    "Failed to inspect audio format: \(path) (\(describeOSStatus(formatStatus))).",
+                exitCode: .inputFile
+            )
+        }
+
+        var packetCount: UInt64 = 0
+        var packetCountSize = UInt32(MemoryLayout<UInt64>.size)
+        let packetStatus = AudioFileGetProperty(
+            audioFile,
+            kAudioFilePropertyAudioDataPacketCount,
+            &packetCountSize,
+            &packetCount
+        )
+        if packetStatus == noErr, packetCount == 0 {
+            throw TranscribeError(
+                message: "Audio file contains no audio packets: \(path)",
+                exitCode: .inputFile
+            )
+        }
+    }
 
     static func uncompressedByteCount(forSampleCount count: Int) -> Int {
         count * MemoryLayout<Float>.size
@@ -63,7 +129,8 @@ enum AudioLoader {
                 message = error.localizedDescription
             }
             throw TranscribeError(
-                message: "Failed to load audio: \(message). Supported formats: \(supportedFormats).",
+                message:
+                    "Failed to load audio: \(message). Candidate extensions: \(candidateExtensionsDescription). Actual support depends on WhisperKit/AVFoundation decoding for this file.",
                 exitCode: .inputFile
             )
         }
@@ -77,6 +144,22 @@ enum AudioLoader {
         emitWarning(
             String(format: "Large input file (%.0f MB on disk): %@. Decoding may use substantial memory.", mb, path)
         )
+    }
+
+    private static func describeOSStatus(_ status: OSStatus) -> String {
+        guard status != noErr else { return "noErr" }
+        let code = UInt32(bitPattern: status)
+        let bytes = [
+            UInt8((code >> 24) & 0xff),
+            UInt8((code >> 16) & 0xff),
+            UInt8((code >> 8) & 0xff),
+            UInt8(code & 0xff),
+        ]
+        if bytes.allSatisfy({ $0 >= 32 && $0 <= 126 }),
+           let text = String(bytes: bytes, encoding: .ascii) {
+            return "'\(text)' (\(status))"
+        }
+        return "\(status)"
     }
 
     private static func enforceUncompressedLimit(

@@ -81,8 +81,7 @@ struct RuntimeComputeOptions {
             textDecoderCompute: fallbackComputeUnit(
                 for: textDecoder,
                 preferred: whisperPreferred.textDecoderCompute
-            ),
-            prefillCompute: .cpuOnly
+            )
         )
 
         let speakerPreferred = SpeakerComputeOptions(
@@ -103,7 +102,7 @@ struct RuntimeComputeOptions {
     }
 
     static func whisperSummary(_ whisper: ModelComputeOptions) -> String {
-        "mel=\(whisper.melCompute.displayName), encoder=\(whisper.audioEncoderCompute.displayName), decoder=\(whisper.textDecoderCompute.displayName), prefill=\(whisper.prefillCompute.displayName)"
+        "mel=\(whisper.melCompute.displayName), encoder=\(whisper.audioEncoderCompute.displayName), decoder=\(whisper.textDecoderCompute.displayName)"
     }
 
     private static func fallbackComputeUnit(
@@ -118,8 +117,7 @@ private extension ModelComputeOptions {
     func sameValues(as other: ModelComputeOptions) -> Bool {
         melCompute.rawValue == other.melCompute.rawValue &&
             audioEncoderCompute.rawValue == other.audioEncoderCompute.rawValue &&
-            textDecoderCompute.rawValue == other.textDecoderCompute.rawValue &&
-            prefillCompute.rawValue == other.prefillCompute.rawValue
+            textDecoderCompute.rawValue == other.textDecoderCompute.rawValue
     }
 }
 

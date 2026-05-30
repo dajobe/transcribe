@@ -3,8 +3,8 @@
 ## Overview
 
 `transcribe` is a macOS command-line tool that combines
-[WhisperKit](https://github.com/argmaxinc/WhisperKit) for speech-to-text and
-SpeakerKit for speaker diarization into a single local pipeline.
+[WhisperKit](https://github.com/argmaxinc/argmax-oss-swift) for speech-to-text
+and SpeakerKit for speaker diarization into a single local pipeline.
 
 Given an audio file, the tool produces a timestamped transcript with optional
 speaker labels. All processing runs on-device on Apple Silicon. The tool must
@@ -135,18 +135,21 @@ BATCH OPTIONS:
 User defaults and `transcribe config` (JSON on disk, CLI for read/write) are
 specified in [user-config.md](user-config.md).
 
-### Supported Input Formats
+### Candidate Input Extensions
 
-At minimum, the tool should accept formats supported by WhisperKit's audio
-loading path, expected to include:
+Directory discovery and folder-action inputs should consider files with these
+extensions as audio candidates:
 
 - `mp3`
 - `wav`
 - `m4a`
 - `flac`
+- `aiff`
+- `caf`
 
-If support differs in practice, the implementation must reflect actual supported
-formats in `--help` output and error messages.
+Single-file inputs are not rejected by extension. Actual support is determined
+by WhisperKit's AVFoundation audio loading path for the specific file, codec,
+and container, and undecodable files must fail with a clear input-file error.
 
 ### Argument Semantics
 
@@ -341,7 +344,7 @@ still be delivered.
 | Condition                                        | Required behavior                                                           |
 |:-------------------------------------------------|:----------------------------------------------------------------------------|
 | Input file does not exist or is unreadable       | Fail with exit code `3` before model initialization                         |
-| Unsupported or undecodable audio                 | Fail with exit code `3` and list supported formats if known                 |
+| Unsupported or undecodable audio                 | Fail with exit code `3`; distinguish candidate extensions from decoder support |
 | Model download fails                             | Retry once, then fail with exit code `4`                                    |
 | Output file already exists without `--overwrite` | Fail with exit code `5` before expensive processing                         |
 | Disk full or partial write                       | Fail with exit code `5`; do not leave truncated final output files in place |
@@ -540,15 +543,15 @@ let package = Package(
     name: "transcribe",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.17.0"),
+        .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
     ],
     targets: [
         .executableTarget(
             name: "transcribe",
             dependencies: [
-                .product(name: "WhisperKit", package: "WhisperKit"),
-                .product(name: "SpeakerKit", package: "WhisperKit"),
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
+                .product(name: "SpeakerKit", package: "argmax-oss-swift"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         )
@@ -608,7 +611,7 @@ confirm or update the spec accordingly.
 | **WhisperKit API**        | Learn actual entry points for loading audio, initializing the pipeline, and transcribing.                                                                                                            | Build a minimal Swift app or test that loads audio, creates WhisperKit, runs transcription; note types for audio in/out and segment structure.  |
 | **SpeakerKit API**        | Learn diarization entry points, min/max speaker params, and how results are returned (e.g. labels per segment or per time range).                                                                    | Same minimal app: call diarization on the same audio; confirm how speaker labels map to time ranges or segments.                                |
 | **Merge / strategy**      | Confirm whether "merge speaker info into transcript" is provided by the library (e.g. `addSpeakerInfo(to:strategy:)`) or must be implemented by aligning segment timestamps with diarization output. | Check WhisperKit/SpeakerKit docs and APIs for any built-in merge; if none, design alignment logic and document in spec or Implementation Notes. |
-| **Supported formats**     | List formats WhisperKit actually accepts for its audio loading path.                                                                                                                                 | Run or read WhisperKit code for audio loading (e.g. AVFoundation path); update "Supported Input Formats" and `--help` text to match.            |
+| **Audio decoding**        | List the containers/codecs WhisperKit actually accepts for its audio loading path, separate from candidate filename extensions.                                                                       | Run or read WhisperKit code for audio loading (e.g. AVFoundation path); update "Candidate Input Extensions" and error text to avoid overclaiming support. |
 | **Model cache location**  | Confirm whether both Whisper and diarization models can be stored under `--model-dir` or if separate or vendor-specific paths apply.                                                                 | Check WhisperKit/SpeakerKit init options and docs for cache/config paths; resolve Open Question on cache and document default.                  |
 | **Word-level timestamps** | Determine if word timestamps are always available for the default model (and others) or only in certain configs.                                                                                     | Run transcription with default model; inspect result type for optional `words`; check docs. Update JSON contract or warnings if conditional.    |
 
@@ -618,7 +621,7 @@ dependency versions, product names).
 
 ## References
 
-- [WhisperKit GitHub](https://github.com/argmaxinc/WhisperKit)
+- [Argmax OSS GitHub](https://github.com/argmaxinc/argmax-oss-swift)
 - [Argmax SpeakerKit announcement](https://www.argmaxinc.com/blog/speakerkit)
 - [WhisperKit CoreML models](https://huggingface.co/argmaxinc/whisperkit-coreml)
 - [swift-argument-parser](https://github.com/apple/swift-argument-parser)

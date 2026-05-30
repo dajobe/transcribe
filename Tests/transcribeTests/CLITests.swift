@@ -160,7 +160,7 @@ final class CLITests: XCTestCase {
         process.waitUntilExit()
         let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(process.terminationStatus, 3, "empty directory should exit 3, stderr: \(stderr)")
-        XCTAssertTrue(stderr.contains("No audio files"), "stderr should mention no audio files; got: \(stderr)")
+        XCTAssertTrue(stderr.contains("No candidate audio files"), "stderr should mention no candidate audio files; got: \(stderr)")
     }
 
     func testNoFilenameTimeRecoveryFlagAccepted() throws {
@@ -939,7 +939,7 @@ final class CLITests: XCTestCase {
         process.waitUntilExit()
         let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(process.terminationStatus, 3, "directory with only non-audio should exit 3, stderr: \(stderr)")
-        XCTAssertTrue(stderr.contains("No audio files"), "stderr should mention no audio files; got: \(stderr)")
+        XCTAssertTrue(stderr.contains("No candidate audio files"), "stderr should mention no candidate audio files; got: \(stderr)")
     }
 
     private func runCommand(_ arguments: [String]) throws -> (status: Int32, stdout: String, stderr: String) {

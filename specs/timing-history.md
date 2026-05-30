@@ -65,14 +65,14 @@ without replacing the spec text below.
 extrapolation from fraction (same idea as this app’s diarization line).
 
 - [Issue #202 – Progress bar for Swift
-  CLI?](https://github.com/argmaxinc/WhisperKit/issues/202) — Feature request;
+  CLI?](https://github.com/argmaxinc/argmax-oss-swift/issues/202) — Feature request;
   direction is to drive UI from WhisperKit’s **progress** object.
 - [PR #179 – Fix progress when using VAD
-  chunking](https://github.com/argmaxinc/WhisperKit/pull/179) — Makes
+  chunking](https://github.com/argmaxinc/argmax-oss-swift/pull/179) — Makes
   `fractionCompleted` **monotonic** across VAD chunks via weighted child
   progress (important for any fraction-based ETA).
 - [PR #335 – WhisperKit CLI verbose / progress-style
-  logging](https://github.com/argmaxinc/WhisperKit/pull/335) — Upstream CLI
+  logging](https://github.com/argmaxinc/argmax-oss-swift/pull/335) — Upstream CLI
   improvements around progress and logging (still **live** signals, not a
   history file).
 

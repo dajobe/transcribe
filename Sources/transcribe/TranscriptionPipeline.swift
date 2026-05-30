@@ -87,12 +87,12 @@ func loadPreparedAudio(
     return PreparedAudio(samples: combined, durationSeconds: durationSeconds)
 }
 
-/// Decodes every input audio file once before model initialization. This keeps
-/// bad or corrupt inputs on the cheap input-error path instead of discovering
-/// them only after Whisper/SpeakerKit models have been downloaded or loaded.
+/// Inspects every input audio file before model initialization. This keeps
+/// missing or non-audio inputs on the cheap input-error path without forcing a
+/// full AVFoundation decode before Whisper/SpeakerKit models are loaded.
 func preflightAudioDecoding(
     for sessions: [AudioSession],
-    limits: AudioLoadLimits = .default,
+    limits _: AudioLoadLimits = .default,
     logger: VerboseLogger? = nil
 ) throws {
     var seen: Set<String> = []
@@ -112,8 +112,7 @@ func preflightAudioDecoding(
     }
 
     for path in paths {
-        let samples = try AudioLoader.loadAudio(fromPath: path, limits: limits)
-        _ = samples.count
+        try AudioLoader.validateAudioContainer(fromPath: path)
     }
 }
 
@@ -179,27 +178,29 @@ func initializeSpeakerKit(
     logger: VerboseLogger? = nil
 ) async throws -> SpeakerKit {
     let expandedModelDir = (modelDir as NSString).expandingTildeInPath
-    let speakerConfig = PyannoteConfig(
-        downloadBase: URL(fileURLWithPath: expandedModelDir),
-        modelFolder: nil,
-        download: true,
-        verbose: verbose
-    )
 
     func loadSpeakerKit(using selectedCompute: RuntimeComputeOptions.SpeakerComputeOptions) async throws -> SpeakerKit {
-        let speakerManager = SpeakerKitModelManager(
+        let speakerConfig = PyannoteConfig(
+            downloadBase: expandedModelDir,
+            modelFolder: nil,
+            download: true,
+            load: true,
+            verbose: verbose
+        )
+        let diarizer = SpeakerKitDiarizer.pyannote(
             config: speakerConfig,
             segmenterModelInfo: .segmenter(computeUnits: selectedCompute.segmenter),
             embedderModelInfo: .embedder(computeUnits: selectedCompute.embedder)
         )
-        if speakerConfig.download {
-            try await speakerManager.downloadModels()
-        }
-        try await speakerManager.loadModels()
-        guard let models = speakerManager.models as? PyannoteModels else {
-            throw SpeakerKitError.modelUnavailable("Failed to load SpeakerKit models")
-        }
-        return try SpeakerKit(models: models)
+        let configuredSpeakerKit = PyannoteConfig(
+            downloadBase: expandedModelDir,
+            modelFolder: nil,
+            download: true,
+            load: true,
+            verbose: verbose,
+            diarizer: diarizer
+        )
+        return try await SpeakerKit(configuredSpeakerKit)
     }
 
     do {

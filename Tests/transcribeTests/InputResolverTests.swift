@@ -62,7 +62,8 @@ final class InputResolverTests: XCTestCase {
             XCTFail("Expected throw")
         } catch let te as TranscribeError {
             XCTAssertEqual(te.exitCode, .inputFile)
-            XCTAssertTrue(te.message.contains("No audio files"))
+            XCTAssertTrue(te.message.contains("No candidate audio files"))
+            XCTAssertTrue(te.message.contains("Candidate extensions"))
         }
     }
 

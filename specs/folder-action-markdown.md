@@ -103,10 +103,11 @@ each new item as an argument).
    without invoking `transcribe` (avoids infinite wait on streaming writes).
 
 2. **Extension allowlist** — Process only files whose extension matches the
-   supported set documented with the CLI (see
-   [AudioLoader.supportedFormats](../Sources/transcribe/AudioLoader.swift)):
+   candidate set documented with the CLI (see
+   [AudioLoader.candidateExtensionsDescription](../Sources/transcribe/AudioLoader.swift)):
    **`mp3`**, **`wav`**, **`m4a`**, **`flac`**, **`aiff`**, **`caf`**
-   (case-insensitive). Other extensions: exit **0** (skip).
+   (case-insensitive). Other extensions: exit **0** (skip). Actual decoder
+   support is still determined when `transcribe` loads the file.
 
 3. **Ignores** — Skip if the basename starts with **`.`** (hidden), or ends with
    **`.tmp`**.

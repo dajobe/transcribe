@@ -104,10 +104,11 @@ no real audio or model work yet.
 **Goal:** Load audio once via WhisperKit’s path; run Whisper only (no
 diarization); produce an in-memory transcript structure.
 
-- Implement audio preparation: load from file path, decode/normalize/resample
-  using WhisperKit’s expected API (from spike). Fail with exit `3` if file
-  missing, unreadable, or unsupported/undecodable; list supported formats in
-  error when known.
+- Implement audio preparation: inspect the audio container before model init,
+  then load from file path and decode/normalize/resample using WhisperKit's
+  expected API (from spike). Fail with exit `3` if the file is missing,
+  unreadable, or unsupported/undecodable; distinguish candidate filename
+  extensions from actual decoder support in errors.
 - Initialize WhisperKit with `--model` and `--model-dir`; implement
   transcription-only path when `--transcript-only` is set. Output: internal
   transcript representation (segments with start/end/text, optional words)

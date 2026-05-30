@@ -302,7 +302,7 @@ No HTTP servers, no UNIX sockets, no remote API endpoints.
 **File:** `Package.resolved`
 
 Dependencies are pinned to specific versions. The `Package.swift` uses
-`.from("0.17.0")` for WhisperKit (a semver range), but `Package.resolved` locks
+`.from("1.0.0")` for Argmax OSS (a semver range), but `Package.resolved` locks
 exact versions in CI and release builds. Good supply-chain practice.
 
 ### 4.8 Processing History Is Append-Only

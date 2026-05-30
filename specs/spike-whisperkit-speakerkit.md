@@ -1,25 +1,29 @@
 # Spike: WhisperKit and SpeakerKit API Research
 
 Research completed for the transcribe CLI implementation. Source: Argmax
-WhisperKit repository (main branch).
+WhisperKit repository (main branch). This spike reflects the original
+WhisperKit 0.17.0 implementation; see
+[argmax-oss-1.0-upgrade.md](argmax-oss-1.0-upgrade.md) for the current package
+identity and SpeakerKit lifecycle API.
 
 ## Package Layout
 
-- **Repository:** <https://github.com/argmaxinc/WhisperKit>
-- **Package name (SPM):** `whisperkit` (lowercase in Package.swift)
+- **Repository:** <https://github.com/argmaxinc/argmax-oss-swift>
+- **Package name (SPM):** `argmax-oss-swift`
 - **Products we use:**
   - `WhisperKit` (library, target: WhisperKit)
   - `SpeakerKit` (library, target: SpeakerKit)
 - **Dependency:** Add as `.package(url:
-  "https://github.com/argmaxinc/WhisperKit.git", from: "0.17.0")`. Consume
-  products: `WhisperKit`, `SpeakerKit`. Both are in the same repo.
+  "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.0.0")`.
+  Consume products: `WhisperKit`, `SpeakerKit`. Both are in the same repo.
 - **WhisperKit dependencies:** ArgmaxCore, Hub, Tokenizers (from
   swift-transformers). SpeakerKit depends on ArgmaxCore, WhisperKit, Hub. Our
   package only needs to depend on WhisperKit and SpeakerKit; their transitive
   deps are resolved by SPM.
 - **Platform:** WhisperKit uses macOS 13+, iOS 16+. Spec requires macOS 14+; we
   set `.macOS(.v14)`.
-- **Swift tools version:** WhisperKit uses 5.9. We use 5.9 for compatibility.
+- **Swift tools version:** Argmax OSS 1.0.0 uses 5.10. This repo can keep its
+  own tools version unless SwiftPM requires a bump.
 
 ## WhisperKit API
 
@@ -82,12 +86,9 @@ WhisperKit repository (main branch).
 
 - `SpeakerKit(_ config: PyannoteConfig) async throws` — loads (and optionally
   downloads) Pyannote models.
-- **PyannoteConfig:** `modelFolder: URL?`, `downloadBase: URL?`, `download: Bool
-  = true`, `verbose: Bool`. Use same cache root as Whisper: e.g. `modelFolder:
-  URL(fileURLWithPath: modelDir).appendingPathComponent("speakerkit")` or pass
-  same dir if SpeakerKit accepts a shared parent; check SpeakerKitModelManager
-  for exact path usage. Config has `modelFolder` for where to find/download
-  diarization models.
+- **PyannoteConfig:** `modelFolder`, `downloadBase`, `download`, `load`, and
+  `verbose` configure the model lifecycle. Use the same cache root as Whisper
+  unless a dedicated local model folder is needed.
 
 ### Diarization
 
@@ -125,7 +126,7 @@ WhisperKit repository (main branch).
   `--model-dir` (e.g. `~/.cache/transcribe` for Whisper).
 - **SpeakerKit:** `PyannoteConfig.modelFolder` — can point to a subdirectory of
   the same `--model-dir` (e.g. `modelDir/speakerkit` or as required by
-  SpeakerKitModelManager). Both families can live under one `--model-dir`;
+  SpeakerKit's model loader). Both families can live under one `--model-dir`;
   implementation will set both configs from that root.
 
 ## Word-Level Timestamps
@@ -139,7 +140,7 @@ WhisperKit repository (main branch).
 
 | Concern            | Finding                                                                                                              |
 |:-------------------|:---------------------------------------------------------------------------------------------------------------------|
-| Package / products | Same repo; products `WhisperKit`, `SpeakerKit`; dependency from "0.17.0"                                             |
+| Package / products | Same repo; products `WhisperKit`, `SpeakerKit`; dependency from "1.0.0"                                             |
 | Audio load         | `AudioProcessor.loadAudioAsFloatArray(fromPath:channelMode:)` → `[Float]`                                            |
 | Transcribe         | `whisperKit.transcribe(audioPath:decodeOptions:callback:)` or `transcribe(audioArray:...)` → `[TranscriptionResult]` |
 | Diarize            | `SpeakerKit(PyannoteConfig(...))` then `diarize(audioArray:options:progressCallback:)` → `DiarizationResult`         |

@@ -2,14 +2,42 @@ VERSION := $(shell grep 'static let version' Sources/transcribe/main.swift | sed
 VERSION_COMMIT := $(shell git log -G 'static let version' -n 1 --format=%H -- Sources/transcribe/main.swift)
 PREFIX  ?= $(HOME)
 BINDIR  ?= $(PREFIX)/bin
+TRANSCRIBE_BINARY ?= .build/debug/transcribe
+AUDIO_FORMAT_FIXTURE_DIR ?= Tests/transcribeTests/Fixtures/AudioFormats
+AUDIO_FORMAT_SMOKE_EXTENSIONS ?= wav mp3 m4a flac aiff caf aac
+AUDIO_FORMAT_SMOKE_MODEL ?= openai_whisper-base
+AUDIO_FORMAT_SMOKE_MODEL_DIR ?= $(HOME)/.cache/transcribe
 
-.PHONY: build test install tag verify-tag release changelog
+.PHONY: build test test-audio-formats smoke-audio-formats install tag verify-tag release changelog
 
 build:
 	swift build -c release
 
 test:
 	swift test
+
+test-audio-formats:
+	swift build
+	@set -e; \
+	for ext in $(AUDIO_FORMAT_SMOKE_EXTENSIONS); do \
+		fixture="$(AUDIO_FORMAT_FIXTURE_DIR)/smoke.$$ext"; \
+		printf 'Audio format smoke: %s\n' "$$fixture"; \
+		"$(TRANSCRIBE_BINARY)" \
+			--quiet \
+			--model "$(AUDIO_FORMAT_SMOKE_MODEL)" \
+			--model-dir "$(AUDIO_FORMAT_SMOKE_MODEL_DIR)" \
+			--transcript-only \
+			--stdout \
+			--format txt \
+			--stateless \
+			--eta-hints off \
+			--progress-log off \
+			--audio-encoder-compute cpuOnly \
+			--text-decoder-compute cpuOnly \
+			file "$$fixture" >/dev/null; \
+	done
+
+smoke-audio-formats: test-audio-formats
 
 # Install the release binary to $(BINDIR) (default: $HOME/bin).
 # Override with: make install BINDIR=/usr/local/bin

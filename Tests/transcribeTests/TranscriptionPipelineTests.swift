@@ -3,7 +3,7 @@ import XCTest
 @testable import transcribe
 
 final class TranscriptionPipelineTests: XCTestCase {
-    func testPreflightAudioDecodingFailsBadAudioBeforeModelInit() throws {
+    func testPreflightAudioDecodingFailsNonAudioBeforeModelInit() throws {
         let dir = try makeTemporaryDirectory()
         let badAudio = dir.appendingPathComponent("bad.m4a")
         try Data("not an audio container".utf8).write(to: badAudio)

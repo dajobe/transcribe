@@ -1,9 +1,9 @@
 # transcribe
 
 A macOS command-line tool for local meeting transcription with speaker
-diarization. Combines [WhisperKit](https://github.com/argmaxinc/WhisperKit) for
-speech-to-text and SpeakerKit for speaker diarization into a single pipeline
-that runs entirely on-device on Apple Silicon.
+diarization. Combines [WhisperKit](https://github.com/argmaxinc/argmax-oss-swift)
+for speech-to-text and SpeakerKit for speaker diarization into a single
+pipeline that runs entirely on-device on Apple Silicon.
 
 No cloud APIs, API keys, Python, or HuggingFace authentication required.
 
@@ -126,9 +126,10 @@ threshold, and runs the pipeline once per session.
   transcript per recording (any positive recorded-at gap starts a new session).
   Splitting is skipped when adjacent clips lack the metadata needed to compute a
   gap.
-- **Filtering:** files are filtered by extension (case-insensitive) against the
-  supported formats. Hidden files (`.DS_Store`, `._*`) and subdirectories are
-  skipped; subdirectories are not recursed into.
+- **Filtering:** directory inputs are filtered by candidate audio extension
+  (case-insensitive). Hidden files (`.DS_Store`, `._*`) and subdirectories are
+  skipped; subdirectories are not recursed into. Actual decoder support is
+  checked when each file is loaded.
 - **Padding:** ~200 ms of silence is inserted between consecutive clips within a
   session to smooth Whisper's VAD chunking.
 - **Diarization:** runs once per session, so a speaker who appears in multiple
@@ -351,9 +352,13 @@ support, which may use a combination of GPU, Neural Engine, and CPU.
 - Use `--verbose` to print the selected WhisperKit and SpeakerKit compute
 backends at startup.
 
-### Supported Audio Formats
+### Candidate Audio Extensions
 
 `mp3`, `wav`, `m4a`, `flac`, `aiff`, `caf`
+
+Directory and folder-action inputs use these extensions to decide which files
+to try. A matching extension is not a guarantee that a file is decodable; actual
+support is determined by WhisperKit/AVFoundation when the file is loaded.
 
 ### Folder Action (drop folder)
 
@@ -405,8 +410,9 @@ Full behavior, stable-file wait, and exit codes:
   and run the script file by path instead of pasting. Enable
   **`TRANSCRIBE_SMOKE_LOG=/tmp/folder-action-smoke.log`** to log `script_dir`
   and whether the helper exists.
-- **Extensions:** Allowed audio types only; see the log for `skip-non-audio` if
-  needed.
+- **Extensions:** Candidate audio extensions only; see the log for
+  `skip-non-audio` if needed. Final support is still checked by decoding the
+  file.
 - **`event=end` with `exit=4` / `reason=transcribe-failed`:** Model download or
   load failed. Check the same log for **`transcribe-exit=`**,
   **`meaning=model`**, and **`transcribe-stderr:`** (and
@@ -498,8 +504,8 @@ This project is licensed under the [MIT License](LICENSE).
 
 | Dependency                                                              | License    |
 |:------------------------------------------------------------------------|:-----------|
-| [WhisperKit](https://github.com/argmaxinc/WhisperKit)                   | MIT        |
-| [SpeakerKit](https://github.com/argmaxinc/WhisperKit)                   | MIT        |
+| [WhisperKit](https://github.com/argmaxinc/argmax-oss-swift)             | MIT        |
+| [SpeakerKit](https://github.com/argmaxinc/argmax-oss-swift)             | MIT        |
 | [swift-argument-parser](https://github.com/apple/swift-argument-parser) | Apache 2.0 |
 
 Speaker diarization uses [pyannote](https://github.com/pyannote/pyannote-audio)

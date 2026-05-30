@@ -65,7 +65,7 @@ enum InputResolver {
             .filter { name in
                 let ext = (name as NSString).pathExtension.lowercased()
                 guard !ext.isEmpty,
-                    AudioLoader.supportedExtensions.contains(ext) else { return false }
+                    AudioLoader.candidateExtensions.contains(ext) else { return false }
                 let full = (absDirPath as NSString).appendingPathComponent(name)
                 var entryIsDir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: full, isDirectory: &entryIsDir) else {
@@ -78,7 +78,7 @@ enum InputResolver {
         if candidates.isEmpty {
             throw TranscribeError(
                 message:
-                    "No audio files found in directory: \(rawArg). Supported formats: \(AudioLoader.supportedFormats).",
+                    "No candidate audio files found in directory: \(rawArg). Candidate extensions: \(AudioLoader.candidateExtensionsDescription).",
                 exitCode: .inputFile
             )
         }
