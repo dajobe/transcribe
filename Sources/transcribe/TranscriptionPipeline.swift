@@ -312,6 +312,8 @@ func runTranscriptionOnly(
     liveProgressMode: LiveProgressRenderMode? = nil,
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
+    historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
+    liveProgressDisplay: LiveProgressDisplay? = nil,
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     var phases = PhaseTimings()
@@ -334,13 +336,14 @@ func runTranscriptionOnly(
         decodeOptions.language = lang
     }
 
-    let liveDisplay: LiveProgressDisplay? = {
+    let liveDisplay: LiveProgressDisplay? = liveProgressDisplay ?? {
         guard let mode = liveProgressMode else { return nil }
         return LiveProgressDisplay(
             startDate: pipelineStartDate,
             stderr: .standardError,
             showDiarizationLine: false,
             audioDurationSeconds: durationSeconds,
+            historicalRatios: historicalRatios,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
             renderMode: mode
         )
@@ -351,6 +354,8 @@ func runTranscriptionOnly(
     }
     let results: [TranscriptionResult]
     if let display = liveDisplay {
+        display.start()
+        let transcribeStartDate = Date()
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
             try await whisperKit.transcribe(
                 audioArray: audioArray,
@@ -361,8 +366,9 @@ func runTranscriptionOnly(
             }
         }
         phases.transcribeOnlyMs = tMs
+        let firstProgressMs = display.firstTranscriptionProgressMs(since: transcribeStartDate)
         phases.decodingWindows = display.finish()
-        applyWhisperPhaseTimings(from: res, firstProgressMs: nil, to: &phases)
+        applyWhisperPhaseTimings(from: res, firstProgressMs: firstProgressMs, to: &phases)
         results = res
     } else {
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
@@ -398,6 +404,8 @@ func runTranscriptionOnly(
     liveProgressMode: LiveProgressRenderMode? = nil,
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
+    historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
+    liveProgressDisplay: LiveProgressDisplay? = nil,
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     let (preparedAudio, loadMs) = try WallClock.measureMs { try loadPreparedAudio(audioPath: audioPath, logger: logger) }
@@ -413,6 +421,7 @@ func runTranscriptionOnly(
         liveProgressMode: liveProgressMode,
         pipelineStartDate: pipelineStartDate,
         historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+        historicalRatios: historicalRatios,
         logger: logger
     )
     var phases = inner
@@ -432,6 +441,8 @@ func runTranscriptionOnly(
     liveProgressMode: LiveProgressRenderMode? = nil,
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
+    historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
+    liveProgressDisplay: LiveProgressDisplay? = nil,
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     let (preparedAudio, loadMs) = try WallClock.measureMs {
@@ -449,6 +460,7 @@ func runTranscriptionOnly(
         liveProgressMode: liveProgressMode,
         pipelineStartDate: pipelineStartDate,
         historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+        historicalRatios: historicalRatios,
         logger: logger
     )
     var phases = inner
@@ -511,6 +523,7 @@ func runTranscriptionWithDiarization(
     liveProgressMode: LiveProgressRenderMode? = nil,
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
+    historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     let (preparedAudio, loadMs) = try WallClock.measureMs { try loadPreparedAudio(audioPath: audioPath, logger: logger) }
@@ -528,6 +541,7 @@ func runTranscriptionWithDiarization(
         liveProgressMode: liveProgressMode,
         pipelineStartDate: pipelineStartDate,
         historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+        historicalRatios: historicalRatios,
         logger: logger
     )
 }
@@ -546,6 +560,7 @@ func runTranscriptionWithDiarization(
     liveProgressMode: LiveProgressRenderMode? = nil,
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
+    historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     let (preparedAudio, loadMs) = try WallClock.measureMs {
@@ -565,6 +580,7 @@ func runTranscriptionWithDiarization(
         liveProgressMode: liveProgressMode,
         pipelineStartDate: pipelineStartDate,
         historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+        historicalRatios: historicalRatios,
         logger: logger
     )
 }
@@ -585,6 +601,7 @@ private func runTranscriptionWithDiarization(
     liveProgressMode: LiveProgressRenderMode? = nil,
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
+    historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     let loadMs = audioLoadMs
@@ -604,6 +621,7 @@ private func runTranscriptionWithDiarization(
             liveProgressMode: liveProgressMode,
             pipelineStartDate: pipelineStartDate,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+            historicalRatios: historicalRatios,
             logger: logger
         )
         var out = shortOutput
@@ -663,6 +681,7 @@ private func runTranscriptionWithDiarization(
             stderr: .standardError,
             showDiarizationLine: true,
             audioDurationSeconds: durationSeconds,
+            historicalRatios: historicalRatios,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
             renderMode: mode
         )
@@ -676,6 +695,8 @@ private func runTranscriptionWithDiarization(
     let results: [TranscriptionResult]
     let diarizationResult: DiarizationResult
     if let display = liveDisplay {
+        display.start()
+        let transcribeStartDate = Date()
         let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
             async let transTask: [TranscriptionResult] = whisperKit.transcribe(
                 audioArray: audioArray,
@@ -697,10 +718,11 @@ private func runTranscriptionWithDiarization(
             return (r, d)
         }
         phases.parallelMs = pMs
+        let firstProgressMs = display.firstTranscriptionProgressMs(since: transcribeStartDate)
         phases.decodingWindows = display.finish()
         results = pair.0
         diarizationResult = pair.1
-        applyWhisperPhaseTimings(from: results, firstProgressMs: nil, to: &phases)
+        applyWhisperPhaseTimings(from: results, firstProgressMs: firstProgressMs, to: &phases)
         applySpeakerPhaseTimings(from: diarizationResult, to: &phases)
     } else {
         let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
@@ -835,6 +857,8 @@ func runSession(
     liveProgressMode: LiveProgressRenderMode? = nil,
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
+    historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
+    liveProgressDisplay: LiveProgressDisplay? = nil,
     logger: VerboseLogger? = nil
 ) async throws -> (TranscriptionOutput, PhaseTimings) {
     let audioArray = preparedAudio.samples
@@ -854,6 +878,8 @@ func runSession(
             liveProgressMode: liveProgressMode,
             pipelineStartDate: pipelineStartDate,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+            historicalRatios: historicalRatios,
+            liveProgressDisplay: liveProgressDisplay,
             phases: &phases,
             logger: logger
         )
@@ -875,6 +901,8 @@ func runSession(
             liveProgressMode: liveProgressMode,
             pipelineStartDate: pipelineStartDate,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
+            historicalRatios: historicalRatios,
+            liveProgressDisplay: liveProgressDisplay,
             phases: &phases,
             logger: logger
         )
@@ -893,13 +921,14 @@ func runSession(
     }()
     let diarizationOptions = PyannoteDiarizationOptions(numberOfSpeakers: numberOfSpeakers)
 
-    let liveDisplay: LiveProgressDisplay? = {
+    let liveDisplay: LiveProgressDisplay? = liveProgressDisplay ?? {
         guard let mode = liveProgressMode else { return nil }
         return LiveProgressDisplay(
             startDate: pipelineStartDate,
             stderr: .standardError,
             showDiarizationLine: true,
             audioDurationSeconds: durationSeconds,
+            historicalRatios: historicalRatios,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
             renderMode: mode
         )
@@ -913,6 +942,8 @@ func runSession(
     let results: [TranscriptionResult]
     let diarizationResult: DiarizationResult
     if let display = liveDisplay {
+        display.beginEncoding()
+        let transcribeStartDate = Date()
         let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
             async let transTask: [TranscriptionResult] = models.whisperKit.transcribe(
                 audioArray: audioArray,
@@ -933,10 +964,11 @@ func runSession(
             return (try await transTask, try await diarTask)
         }
         phases.parallelMs = pMs
-        phases.decodingWindows = display.finish()
+        let firstProgressMs = display.firstTranscriptionProgressMs(since: transcribeStartDate)
+        phases.decodingWindows = liveProgressDisplay == nil ? display.finish() : display.finishProcessing()
         results = pair.0
         diarizationResult = pair.1
-        applyWhisperPhaseTimings(from: results, firstProgressMs: nil, to: &phases)
+        applyWhisperPhaseTimings(from: results, firstProgressMs: firstProgressMs, to: &phases)
         applySpeakerPhaseTimings(from: diarizationResult, to: &phases)
     } else {
         let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
@@ -1017,19 +1049,22 @@ private func runTranscriptOnlyOnLoadedWhisper(
     liveProgressMode: LiveProgressRenderMode?,
     pipelineStartDate: Date,
     historicalWallSecondsPerAudioSecond: Double?,
+    historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
+    liveProgressDisplay: LiveProgressDisplay? = nil,
     phases: inout PhaseTimings,
     logger: VerboseLogger?
 ) async throws -> TranscriptionOutput {
     var decodeOptions = DecodingOptions(wordTimestamps: wordTimestamps, chunkingStrategy: .vad)
     if let lang = language, !lang.isEmpty { decodeOptions.language = lang }
 
-    let liveDisplay: LiveProgressDisplay? = {
+    let liveDisplay: LiveProgressDisplay? = liveProgressDisplay ?? {
         guard let mode = liveProgressMode else { return nil }
         return LiveProgressDisplay(
             startDate: pipelineStartDate,
             stderr: .standardError,
             showDiarizationLine: false,
             audioDurationSeconds: durationSeconds,
+            historicalRatios: historicalRatios,
             historicalWallSecondsPerAudioSecond: historicalWallSecondsPerAudioSecond,
             renderMode: mode
         )
@@ -1039,6 +1074,8 @@ private func runTranscriptOnlyOnLoadedWhisper(
 
     let results: [TranscriptionResult]
     if let display = liveDisplay {
+        display.beginEncoding()
+        let transcribeStartDate = Date()
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
             try await whisperKit.transcribe(audioArray: audioArray, decodeOptions: decodeOptions) { progress in
                 display.updateTranscription(progress: progress)
@@ -1046,8 +1083,9 @@ private func runTranscriptOnlyOnLoadedWhisper(
             }
         }
         phases.transcribeOnlyMs = tMs
-        phases.decodingWindows = display.finish()
-        applyWhisperPhaseTimings(from: res, firstProgressMs: nil, to: &phases)
+        let firstProgressMs = display.firstTranscriptionProgressMs(since: transcribeStartDate)
+        phases.decodingWindows = liveProgressDisplay == nil ? display.finish() : display.finishProcessing()
+        applyWhisperPhaseTimings(from: res, firstProgressMs: firstProgressMs, to: &phases)
         results = res
     } else {
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
