@@ -4,12 +4,12 @@ PREFIX  ?= $(HOME)
 BINDIR  ?= $(PREFIX)/bin
 TRANSCRIBE_BINARY ?= .build/debug/transcribe
 AUDIO_FORMAT_FIXTURE_DIR ?= Tests/transcribeTests/Fixtures/AudioFormats
-AUDIO_FORMAT_SMOKE_EXTENSIONS ?= $(shell sed -n 's/.*static let audioFormatExtensions = \[\(.*\)\].*/\1/p' Sources/transcribe/AudioLoader.swift | tr -d '",')
+AUDIO_FORMAT_SMOKE_EXTENSIONS ?=
 AUDIO_FORMAT_SMOKE_MODEL ?= openai_whisper-base
 AUDIO_FORMAT_SMOKE_MODEL_DIR ?= $(HOME)/.cache/transcribe
 DIRECTORY_SMOKE_OUTPUT_PREFIX ?= audio-format-dir
 
-.PHONY: build test test-audio-formats test-directory-smoke smoke-audio-formats install tag verify-tag release changelog
+.PHONY: build test test-audio-formats test-directory-smoke smoke-audio-formats shellcheck-scripts install tag verify-tag release changelog
 
 build:
 	swift build -c release
@@ -19,81 +19,34 @@ test:
 
 test-audio-formats:
 	swift build
-	@set -e; \
-	for ext in $(AUDIO_FORMAT_SMOKE_EXTENSIONS); do \
-		fixture="$(AUDIO_FORMAT_FIXTURE_DIR)/smoke.$$ext"; \
-		outdir="$$(mktemp -d "$${TMPDIR:-/tmp}/transcribe-audio-smoke.XXXXXX")"; \
-		printf 'Audio format smoke: %s\n' "$$fixture"; \
-		"$(TRANSCRIBE_BINARY)" \
-			--quiet \
-			--model "$(AUDIO_FORMAT_SMOKE_MODEL)" \
-			--model-dir "$(AUDIO_FORMAT_SMOKE_MODEL_DIR)" \
-			--transcript-only \
-			--format txt \
-			-o "$$outdir" \
-			--stateless \
-			--eta-hints off \
-			--progress-log off \
-			--audio-encoder-compute cpuOnly \
-			--text-decoder-compute cpuOnly \
-			file "$$fixture" >/dev/null; \
-		test -s "$$outdir/smoke.txt"; \
-		rm -rf "$$outdir"; \
-	done
+	TRANSCRIBE_BINARY="$(TRANSCRIBE_BINARY)" \
+	AUDIO_FORMAT_FIXTURE_DIR="$(AUDIO_FORMAT_FIXTURE_DIR)" \
+	AUDIO_FORMAT_SMOKE_EXTENSIONS="$(AUDIO_FORMAT_SMOKE_EXTENSIONS)" \
+	AUDIO_FORMAT_SMOKE_MODEL="$(AUDIO_FORMAT_SMOKE_MODEL)" \
+	AUDIO_FORMAT_SMOKE_MODEL_DIR="$(AUDIO_FORMAT_SMOKE_MODEL_DIR)" \
+	./scripts/test-audio-formats.sh
 
 test-directory-smoke:
 	swift build
-	@set -e; \
-	fixture_dir="$(AUDIO_FORMAT_FIXTURE_DIR)"; \
-	outdir="$$(mktemp -d "$${TMPDIR:-/tmp}/transcribe-dir-smoke.XXXXXX")"; \
-	log="$$(mktemp "$${TMPDIR:-/tmp}/transcribe-dir-smoke.log.XXXXXX")"; \
-	err="$$(mktemp "$${TMPDIR:-/tmp}/transcribe-dir-smoke.err.XXXXXX")"; \
-	printf 'Directory smoke: %s\n' "$$fixture_dir"; \
-	"$(TRANSCRIBE_BINARY)" \
-		--quiet \
-		--model "$(AUDIO_FORMAT_SMOKE_MODEL)" \
-		--model-dir "$(AUDIO_FORMAT_SMOKE_MODEL_DIR)" \
-		--transcript-only \
-		--format txt,json \
-		--output-prefix "$(DIRECTORY_SMOKE_OUTPUT_PREFIX)" \
-		-o "$$outdir" \
-		--stateless \
-		--eta-hints off \
-		--progress-log plain \
-		--audio-encoder-compute cpuOnly \
-		--text-decoder-compute cpuOnly \
-		dir --sort name "$$fixture_dir" >"$$log" 2>"$$err"; \
-	if test -s "$$err"; then \
-		printf 'Unexpected stderr from directory smoke:\n' >&2; \
-		cat "$$err" >&2; \
-		exit 1; \
-	fi; \
-	test -f "$$outdir/$(DIRECTORY_SMOKE_OUTPUT_PREFIX).txt"; \
-	test -s "$$outdir/$(DIRECTORY_SMOKE_OUTPUT_PREFIX).json"; \
-	grep -F '"audio_files"' "$$outdir/$(DIRECTORY_SMOKE_OUTPUT_PREFIX).json" >/dev/null; \
-	grep -F 'event=session_start' "$$log" >/dev/null; \
-	grep -F 'source=directory_session' "$$log" >/dev/null; \
-	grep -F 'session=1/1' "$$log" >/dev/null; \
-	grep -F 'output_basename=$(DIRECTORY_SMOKE_OUTPUT_PREFIX)' "$$log" >/dev/null; \
-	grep -F 'outputs="$(DIRECTORY_SMOKE_OUTPUT_PREFIX).txt,$(DIRECTORY_SMOKE_OUTPUT_PREFIX).json"' "$$log" >/dev/null; \
-	for ext in $(AUDIO_FORMAT_SMOKE_EXTENSIONS); do \
-		grep -F "smoke.$$ext" "$$log" >/dev/null; \
-		grep -F "smoke.$$ext" "$$outdir/$(DIRECTORY_SMOKE_OUTPUT_PREFIX).json" >/dev/null; \
-	done; \
-	grep -F 'event=phase_done' "$$log" | grep -F 'phase=model_loading' >/dev/null; \
-	grep -F 'event=phase_done' "$$log" | grep -F 'phase=audio' >/dev/null; \
-	grep -F 'event=phase_done' "$$log" | grep -F 'phase=output' >/dev/null; \
-	grep -F 'event=session_done' "$$log" >/dev/null; \
-	grep -F 'event=run_done' "$$log" >/dev/null; \
-	if grep -F 'Total:' "$$log" >/dev/null; then \
-		printf 'Plain directory smoke log unexpectedly contained TUI output:\n' >&2; \
-		cat "$$log" >&2; \
-		exit 1; \
-	fi; \
-	rm -rf "$$outdir"; \
-	rm -f "$$log" "$$err"
+	TRANSCRIBE_BINARY="$(TRANSCRIBE_BINARY)" \
+	AUDIO_FORMAT_FIXTURE_DIR="$(AUDIO_FORMAT_FIXTURE_DIR)" \
+	AUDIO_FORMAT_SMOKE_EXTENSIONS="$(AUDIO_FORMAT_SMOKE_EXTENSIONS)" \
+	AUDIO_FORMAT_SMOKE_MODEL="$(AUDIO_FORMAT_SMOKE_MODEL)" \
+	AUDIO_FORMAT_SMOKE_MODEL_DIR="$(AUDIO_FORMAT_SMOKE_MODEL_DIR)" \
+	DIRECTORY_SMOKE_OUTPUT_PREFIX="$(DIRECTORY_SMOKE_OUTPUT_PREFIX)" \
+	./scripts/test-directory-smoke.sh
 
-smoke-audio-formats: test-audio-formats test-directory-smoke
+smoke-audio-formats:
+	$(MAKE) test-audio-formats
+	$(MAKE) test-directory-smoke
+
+shellcheck-scripts:
+	shellcheck \
+		scripts/audio-format-smoke-lib.sh \
+		scripts/folder-action-transcribe.sh \
+		scripts/folder-script.sh \
+		scripts/test-audio-formats.sh \
+		scripts/test-directory-smoke.sh
 
 # Install the release binary to $(BINDIR) (default: $HOME/bin).
 # Override with: make install BINDIR=/usr/local/bin

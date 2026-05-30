@@ -66,6 +66,7 @@ f=""
 start_epoch=""
 REASON=""
 
+# shellcheck disable=SC2329 # Invoked indirectly by trap.
 end_log() {
   local code=$?
   [[ -n "${start_epoch:-}" ]] || return 0

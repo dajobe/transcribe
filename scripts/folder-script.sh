@@ -41,7 +41,7 @@ log_event() {
 }
 
 if [[ -f "$HOME/.transcribe.env" ]]; then
-  # shellcheck disable=SC1090
+  # shellcheck disable=SC1090,SC1091
   . "$HOME/.transcribe.env"
 fi
 
