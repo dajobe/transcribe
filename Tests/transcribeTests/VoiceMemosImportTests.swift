@@ -159,6 +159,30 @@ final class VoiceMemosImportTests: XCTestCase {
         }
     }
 
+    func testRecentlyDeletedRecordingsWithEvictionDateAreSkipped() throws {
+        let dir = try makeTempDir()
+        try sqlite(dir, """
+            CREATE TABLE ZCLOUDRECORDING (
+                Z_PK INTEGER PRIMARY KEY,
+                ZDATE TIMESTAMP,
+                ZEVICTIONDATE TIMESTAMP,
+                ZPATH VARCHAR,
+                ZUNIQUEID VARCHAR
+            );
+            INSERT INTO ZCLOUDRECORDING
+              (Z_PK, ZDATE, ZEVICTIONDATE, ZPATH, ZUNIQUEID)
+            VALUES
+              (22, 789000022, NULL, 'active.m4a', 'active'),
+              (100, 789000023, 801728205.052228, 'recently-deleted.m4a', 'recently-deleted');
+            """)
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("active.m4a"))
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("recently-deleted.m4a"))
+
+        let recordings = try VoiceMemosImport.loadRecordings(recordingsDirectory: dir.path)
+
+        XCTAssertEqual(recordings.map(\.uniqueID), ["active"])
+    }
+
     func testVoiceMemoBasenamesUseDateTitleAndCollisionSuffix() throws {
         let date = Date(timeIntervalSinceReferenceDate: 789_000_000)
         let first = VoiceMemoRecording(

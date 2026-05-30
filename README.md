@@ -329,6 +329,8 @@ files in place. There is no download, copy, or conversion step.
   transcript session; gaps larger than the threshold start a new transcript. Use
   `--session-gap 0` to produce one transcript per recording (any positive
   recorded-at gap starts a new session).
+- **Deleted memos:** recordings marked with `ZEVICTIONDATE` in Apple's Voice
+  Memos database are ignored. Those rows represent memos in `Recently Deleted`.
 - **Baseline import:** `transcribe --mark-imported voice-memos` records the
   planned Voice Memo sessions as imported without writing transcript outputs.
   The same global `--mark-imported` option works for `file` and `dir` inputs.

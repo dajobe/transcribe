@@ -207,6 +207,9 @@ Read `CloudRecordings.db` read-only and query `ZCLOUDRECORDING`:
   `ZENCRYPTEDTITLE`, then `New Recording`; timestamp-shaped placeholder labels
   yield to a non-timestamp sorting or encrypted title
 - optional diagnostics: audio digest, flags, folder id
+- exclusions: ignore recordings with non-null `ZEVICTIONDATE`, which Apple sets
+  for rows in the synthetic `Recently Deleted` view; otherwise include usable
+  recordings with an audio file
 
 Output basename:
 

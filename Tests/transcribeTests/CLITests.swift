@@ -617,6 +617,54 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(err.contains("Using model cache"), "dry run should not load models; stderr: \(err)")
     }
 
+    func testVoiceMemosDryRunExcludesEvictedRecentlyDeletedRecordings() throws {
+        let dir = try makeTempDir()
+        SQLiteTestHelpers.executeScript(
+            at: dir.appendingPathComponent("CloudRecordings.db"),
+            """
+            CREATE TABLE ZCLOUDRECORDING (
+                Z_PK INTEGER PRIMARY KEY,
+                ZDATE TIMESTAMP,
+                ZEVICTIONDATE TIMESTAMP,
+                ZDURATION FLOAT,
+                ZCUSTOMLABEL VARCHAR,
+                ZPATH VARCHAR,
+                ZUNIQUEID VARCHAR
+            );
+            INSERT INTO ZCLOUDRECORDING
+              (Z_PK, ZDATE, ZEVICTIONDATE, ZDURATION, ZCUSTOMLABEL, ZPATH, ZUNIQUEID)
+            VALUES
+              (1, 789000000, NULL, 12.5, 'Keep Me', 'A.m4a', 'keep-me'),
+              (100, 789000001, 801728205.052228, 12.5, 'Deleted Memo', 'B.m4a', 'deleted-memo');
+            """
+        )
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("A.m4a"))
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("B.m4a"))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.transcribePath)
+        process.arguments = [
+            "--dry-run",
+            "--transcript-only",
+            "voice-memos",
+            "--recordings-dir", dir.path,
+        ]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "stderr: \(err)")
+        XCTAssertTrue(out.contains("Dry run: 1 session scanned"), "stdout: \(out)")
+        XCTAssertTrue(out.contains("Keep Me"), "stdout: \(out)")
+        XCTAssertFalse(out.contains("Deleted Memo"), "stdout: \(out)")
+        XCTAssertFalse(out.contains("deleted-memo"), "stdout: \(out)")
+    }
+
     func testVoiceMemosDryRunUsesGroupedTitleBasename() throws {
         let dir = try makeTempDir()
         try createVoiceMemosDB(in: dir, uniqueID: "dry-run-title-a", path: "A.m4a", title: "Design Review part 1")

@@ -46,8 +46,8 @@ enum VoiceMemosImport {
               \(quotedColumnOrNull("ZSKIPSILENCEENABLED")),
               \(quotedColumnOrNull("ZSTUDIOMIXENABLED")),
               \(quotedColumnOrNull("ZSTUDIOMIXLEVEL"))
-            FROM ZCLOUDRECORDING
-            WHERE "ZPATH" IS NOT NULL AND "ZPATH" != '' AND "ZDATE" IS NOT NULL
+            FROM "ZCLOUDRECORDING"
+            WHERE \(usableRecordingPredicate(columns: columns))
             ORDER BY "ZDATE" ASC, "Z_PK" ASC;
             """
         let rawRecordings: [VoiceMemoRecording?] = try database.query(sql) { row in
@@ -214,7 +214,7 @@ enum VoiceMemosImport {
     }
 
     private static func loadColumnNames(database: ReadOnlyDatabase) throws -> Set<String> {
-        let names = try database.query("PRAGMA table_info(ZCLOUDRECORDING);") { row in
+        let names = try database.query(#"PRAGMA table_info("ZCLOUDRECORDING");"#) { row in
             row.text(1) ?? ""
         }
         let filtered = names.filter { !$0.isEmpty }
@@ -225,6 +225,18 @@ enum VoiceMemosImport {
             )
         }
         return Set(filtered)
+    }
+
+    private static func usableRecordingPredicate(columns: Set<String>) -> String {
+        var predicates = [
+            #""ZPATH" IS NOT NULL"#,
+            #""ZPATH" != ''"#,
+            #""ZDATE" IS NOT NULL"#,
+        ]
+        if columns.contains("ZEVICTIONDATE") {
+            predicates.append(#""ZEVICTIONDATE" IS NULL"#)
+        }
+        return predicates.joined(separator: " AND ")
     }
 
     private static func resolveRecordingPath(_ rawPath: String, recordingsDirectory: String) -> String {
