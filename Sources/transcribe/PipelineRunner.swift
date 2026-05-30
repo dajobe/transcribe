@@ -242,13 +242,16 @@ struct PipelineRunner {
             transcribe_version: Transcribe.version
         )
 
-        let historicalRatio: Double? = {
-            guard options.timingStatsEnabled else { return nil }
-            guard let recs = try? TimingStore.loadRecent(model: resolvedModel, diarizationEnabled: options.speakersEnabled) else {
-                return nil
-            }
-            return TimingStore.medianWallSecondsPerAudioSecond(records: recs)
+        let historicalRatios: HistoricalTimingRatios = {
+            guard options.timingStatsEnabled else { return HistoricalTimingRatios() }
+            let totalRecords = (try? TimingStore.loadRecent(
+                model: resolvedModel,
+                diarizationEnabled: options.speakersEnabled
+            )) ?? []
+            let phaseRecords = (try? TimingStore.loadRecent(model: resolvedModel)) ?? []
+            return TimingStore.historicalRatios(totalRecords: totalRecords, phaseRecords: phaseRecords)
         }()
+        let historicalRatio = historicalRatios.totalSecondsPerAudioSecond
 
         var workItems: [PipelineWorkItem] = []
         var skippedItems: [PipelineWorkItem] = []
@@ -288,21 +291,6 @@ struct PipelineRunner {
             return
         }
 
-        for item in workItems {
-            try checkOverwrite(
-                outputDir: options.outputDir,
-                basename: item.plan.basename,
-                formats: options.resolvedFormats,
-                writeTxtFile: options.wantsTxt && !options.stdout,
-                overwrite: options.overwrite
-            )
-        }
-        try preflightAudioDecoding(
-            for: workItems.map(\.plan.session),
-            limits: options.audioLoadLimits,
-            logger: logger
-        )
-
         let liveProgressMode: LiveProgressRenderMode? = {
             switch options.progressLogMode {
             case .plain:
@@ -315,6 +303,37 @@ struct PipelineRunner {
             }
         }()
 
+        let sharedLiveDisplay: LiveProgressDisplay? = {
+            guard workItems.count == 1, let mode = liveProgressMode else { return nil }
+            return LiveProgressDisplay(
+                startDate: startDate,
+                stderr: .standardError,
+                showDiarizationLine: options.speakersEnabled,
+                audioDurationSeconds: estimatedAudioDurationSeconds(for: workItems[0].plan) ?? 0,
+                historicalRatios: historicalRatios,
+                historicalWallSecondsPerAudioSecond: historicalRatio,
+                renderMode: mode
+            )
+        }()
+
+        for item in workItems {
+            try checkOverwrite(
+                outputDir: options.outputDir,
+                basename: item.plan.basename,
+                formats: options.resolvedFormats,
+                writeTxtFile: options.wantsTxt && !options.stdout,
+                overwrite: options.overwrite
+            )
+        }
+        sharedLiveDisplay?.beginAudioChecking()
+        try preflightAudioDecoding(
+            for: workItems.map(\.plan.session),
+            limits: options.audioLoadLimits,
+            logger: logger
+        )
+        sharedLiveDisplay?.finishAudioChecking()
+
+        sharedLiveDisplay?.beginModelLoading()
         let computeOptions = RuntimeComputeOptions.resolve(
             audioEncoder: options.audioEncoderCompute,
             textDecoder: options.textDecoderCompute,
@@ -330,6 +349,7 @@ struct PipelineRunner {
             verbose: options.verbose,
             logger: logger
         )
+        sharedLiveDisplay?.finishModelLoading()
 
         let resolvedDir = resolvedOutputDir(options.outputDir)
 
@@ -343,6 +363,7 @@ struct PipelineRunner {
             }
 
             let (preparedAudio, loadMs): (PreparedAudio, Int64)
+            sharedLiveDisplay?.beginAudioLoading()
             if session.files.count == 1 {
                 (preparedAudio, loadMs) = try WallClock.measureMs {
                     try loadPreparedAudio(
@@ -360,6 +381,7 @@ struct PipelineRunner {
                     )
                 }
             }
+            sharedLiveDisplay?.finishAudioLoading(durationSeconds: preparedAudio.durationSeconds)
 
             let (sessionOutput, sessionPhases) = try await runSession(
                 preparedAudio: preparedAudio,
@@ -373,6 +395,8 @@ struct PipelineRunner {
                 liveProgressMode: liveProgressMode,
                 pipelineStartDate: startDate,
                 historicalWallSecondsPerAudioSecond: historicalRatio,
+                historicalRatios: historicalRatios,
+                liveProgressDisplay: sharedLiveDisplay,
                 logger: logger
             )
 
@@ -385,6 +409,7 @@ struct PipelineRunner {
             let outputFiles = options.resolvedFormats.filter { fmt in fmt != "txt" || !options.stdout }.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
             logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
 
+            sharedLiveDisplay?.beginOutput()
             let (_, writeMs) = try WallClock.measureMs {
                 try writeOutputs(
                     output: out,
@@ -400,6 +425,8 @@ struct PipelineRunner {
                     version: Transcribe.version
                 )
             }
+            sharedLiveDisplay?.finishOutput()
+            _ = sharedLiveDisplay?.finish()
 
             if !options.stateless {
                 try ProcessingStore.append(ProcessingRecord(
@@ -476,6 +503,14 @@ struct PipelineRunner {
                 logger: logger
             )
         }
+    }
+
+    private func estimatedAudioDurationSeconds(for plan: PipelineSessionPlan) -> Double? {
+        guard let recordings = plan.sourceMetadata?.voiceMemos?.recordings else { return nil }
+        let durations = recordings.compactMap(\.durationSeconds).filter { $0 > 0 }
+        guard !durations.isEmpty else { return nil }
+        let paddingSeconds = Double(max(0, recordings.count - 1) * interClipPaddingSamples) / Double(WhisperKit.sampleRate)
+        return durations.reduce(0, +) + paddingSeconds
     }
 
     private func validateSharedUsage() throws {
