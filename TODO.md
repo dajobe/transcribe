@@ -91,3 +91,26 @@ enforces a configurable `--max-audio-mb` hard cap (default 2048; `0` disables).
 - Input validation on CLI arguments (formats, speaker counts, combinations)
 - No secrets in code or git history
 - Dependencies pinned in `Package.resolved`
+
+## Research
+
+Voicebox "The open-source AI voice studio. Clone, dictate, create."
+
+https://github.com/jamiepine/voicebox
+
+### Parakeet v3
+
+Parakeet MLX "An implementation of the Nvidia's Parakeet models for
+Apple Silicon using MLX."
+
+https://github.com/senstella/parakeet-mlx
+
+
+Parakeet.cpp "Ultra fast and portable Parakeet implementation for on-device
+inference in C++ using Axiom with MPS+Unified Memory"
+
+https://github.com/Frikallo/parakeet.cpp
+
+### Qwen3-ASR
+
+No pointer yet
