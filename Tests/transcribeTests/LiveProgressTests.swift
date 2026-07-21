@@ -570,7 +570,7 @@ final class LiveProgressTests: XCTestCase {
         )
     }
 
-    func testTTYRedrawRestoresSavedAnchorForWrappedLines() async throws {
+    func testTTYRedrawCountsWrappedTerminalRows() async throws {
         let pipe = Pipe()
         let writeHandle = pipe.fileHandleForWriting
         let readHandle = pipe.fileHandleForReading
@@ -585,17 +585,25 @@ final class LiveProgressTests: XCTestCase {
                 "Output: a deliberately long output description that wraps on a narrow terminal",
                 "Model: openai_whisper-large-v3_turbo",
             ],
-            renderMode: .tty
+            renderMode: .tty,
+            ttyColumnCountOverride: 40
         )
         display.beginAudioChecking()
-        display.finishAudioChecking()
         _ = display.finish()
         writeHandle.closeFile()
 
         let output = String(data: readHandle.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertEqual(output.components(separatedBy: saveCursorEscape).count - 1, 1, output)
-        XCTAssertGreaterThanOrEqual(output.components(separatedBy: restoreCursorEscape).count - 1, 1, output)
-        XCTAssertFalse(output.contains(cursorUpEscape), "TTY redraw must not depend on logical line counts: \(output)")
+        XCTAssertGreaterThan(
+            output.components(separatedBy: cursorUpEscape).count - 1,
+            7,
+            "TTY redraw should move over physical rows added by wrapping: \(output)"
+        )
+    }
+
+    func testTerminalRowCountUsesDisplayCellsAndTerminalWidth() {
+        XCTAssertEqual(terminalDisplayWidth("✓ Total"), 7)
+        XCTAssertEqual(terminalRowCount(["12345", "123456", ""], columns: 5), 4)
+        XCTAssertEqual(terminalRowCount(["12345", "123456", ""], columns: nil), 3)
     }
 
     func testOverallEtaUsesParallelDiarizationPath() async throws {
@@ -771,6 +779,4 @@ final class LiveProgressTests: XCTestCase {
     }
 
     private var cursorUpEscape: String { "\u{1B}[A" }
-    private var saveCursorEscape: String { "\u{1B}7" }
-    private var restoreCursorEscape: String { "\u{1B}8" }
 }

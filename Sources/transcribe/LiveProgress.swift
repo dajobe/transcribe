@@ -26,13 +26,84 @@ func isStdoutTTY() -> Bool {
 private let esc = "\u{1B}"
 private let clearToEndOfLine = "\(esc)[K"
 private let clearToEndOfScreen = "\(esc)[J"
-private let saveCursor = "\(esc)7"
-private let restoreCursor = "\(esc)8"
+private let cursorUp = "\(esc)[A"
 private let runningIcon = "▶"
 private let doneIcon = "✓"
 private let failedIcon = "✕"
 private let inactiveIcon = " "
 private let maxDiagnosticLines = 5
+
+private func terminalColumnCount(_ fileHandle: FileHandle) -> Int? {
+#if canImport(Darwin)
+    var windowSize = winsize()
+    guard ioctl(fileHandle.fileDescriptor, TIOCGWINSZ, &windowSize) == 0,
+          windowSize.ws_col > 0
+    else { return nil }
+    return Int(windowSize.ws_col)
+#else
+    return nil
+#endif
+}
+
+func terminalDisplayWidth(_ text: String) -> Int {
+    var width = 0
+    for character in text {
+        if character == "\t" {
+            width += 8 - (width % 8)
+            continue
+        }
+        var characterWidth = 0
+        var emojiPresentation = false
+        for scalar in character.unicodeScalars {
+            emojiPresentation = emojiPresentation
+                || scalar.properties.isEmojiPresentation
+                || scalar.value == 0xFE0F
+#if canImport(Darwin)
+            let measuredWidth = Int(wcwidth(wchar_t(scalar.value)))
+            if measuredWidth >= 0 {
+                characterWidth = max(characterWidth, measuredWidth)
+                continue
+            }
+#endif
+            switch scalar.properties.generalCategory {
+            case .control, .enclosingMark, .format, .nonspacingMark:
+                continue
+            default:
+                characterWidth = max(characterWidth, isWideTerminalScalar(scalar.value) ? 2 : 1)
+            }
+        }
+        width += emojiPresentation ? max(characterWidth, 2) : characterWidth
+    }
+    return width
+}
+
+private func isWideTerminalScalar(_ value: UInt32) -> Bool {
+    switch value {
+    case 0x1100 ... 0x115F,
+         0x2329 ... 0x232A,
+         0x2E80 ... 0x303E,
+         0x3040 ... 0xA4CF,
+         0xAC00 ... 0xD7A3,
+         0xF900 ... 0xFAFF,
+         0xFE10 ... 0xFE19,
+         0xFE30 ... 0xFE6F,
+         0xFF00 ... 0xFF60,
+         0xFFE0 ... 0xFFE6,
+         0x1F300 ... 0x1FAFF,
+         0x20000 ... 0x3FFFD:
+        return true
+    default:
+        return false
+    }
+}
+
+func terminalRowCount(_ lines: [String], columns: Int?) -> Int {
+    guard let columns, columns > 0 else { return lines.count }
+    return lines.reduce(0) { count, line in
+        let width = terminalDisplayWidth(line)
+        return count + max(1, (max(width, 1) - 1) / columns + 1)
+    }
+}
 
 private enum LivePhaseState: Equatable {
     case waiting
@@ -59,6 +130,7 @@ final class LiveProgressDisplay {
     private var audioDurationSeconds: Double
     private let historicalRatios: HistoricalTimingRatios
     private let renderMode: LiveProgressRenderMode
+    private let ttyColumnCountOverride: Int?
 
     private var showModelLine: Bool = false
     private var showInputCheckLine: Bool = false
@@ -81,7 +153,7 @@ final class LiveProgressDisplay {
     private var failedAt: Date?
     private var workCompletedAt: Date?
     private var redrawTimer: DispatchSourceTimer?
-    private var ttyAnchorSaved: Bool = false
+    private var drawnTTYLines: [String] = []
     private var lastLineLogEmit: Date?
     private var lastLineLogSignature: String?
     private var diagnosticLines: [String] = []
@@ -101,7 +173,8 @@ final class LiveProgressDisplay {
         historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
         historicalWallSecondsPerAudioSecond: Double? = nil,
         historicalEncodingSecondsPerAudioSecond: Double? = nil,
-        renderMode: LiveProgressRenderMode = .tty
+        renderMode: LiveProgressRenderMode = .tty,
+        ttyColumnCountOverride: Int? = nil
     ) {
         self.startDate = startDate
         self.stderr = stderr
@@ -117,6 +190,7 @@ final class LiveProgressDisplay {
         }
         self.historicalRatios = resolvedRatios
         self.renderMode = renderMode
+        self.ttyColumnCountOverride = ttyColumnCountOverride
     }
 
     /// Emit an immediate encoding snapshot and keep elapsed/ETA moving while waiting for model callbacks.
@@ -788,13 +862,12 @@ final class LiveProgressDisplay {
     }
 
     private func redrawTTY() {
-        // Restore an absolute anchor instead of moving up by logical line count:
-        // long status lines may occupy multiple terminal rows after wrapping.
-        if ttyAnchorSaved {
-            write(restoreCursor)
-        } else {
-            write("\r\(saveCursor)")
-            ttyAnchorSaved = true
+        let columns = ttyColumnCountOverride ?? terminalColumnCount(stderr)
+        let drawnRowCount = terminalRowCount(drawnTTYLines, columns: columns)
+        if drawnRowCount > 0 {
+            for _ in 1 ..< drawnRowCount {
+                write(cursorUp)
+            }
         }
         write("\r\(clearToEndOfScreen)")
 
@@ -806,6 +879,7 @@ final class LiveProgressDisplay {
             }
         }
         write("\r")
+        drawnTTYLines = lines
     }
 
     private func redraw() {
