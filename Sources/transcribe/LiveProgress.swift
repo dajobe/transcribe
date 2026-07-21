@@ -25,7 +25,9 @@ func isStdoutTTY() -> Bool {
 // ANSI escape sequences for terminal cursor control.
 private let esc = "\u{1B}"
 private let clearToEndOfLine = "\(esc)[K"
-private let cursorUp = "\(esc)[A"
+private let clearToEndOfScreen = "\(esc)[J"
+private let saveCursor = "\(esc)7"
+private let restoreCursor = "\(esc)8"
 private let runningIcon = "▶"
 private let doneIcon = "✓"
 private let failedIcon = "✕"
@@ -79,7 +81,7 @@ final class LiveProgressDisplay {
     private var failedAt: Date?
     private var workCompletedAt: Date?
     private var redrawTimer: DispatchSourceTimer?
-    private var drawnLineCount: Int = 0
+    private var ttyAnchorSaved: Bool = false
     private var lastLineLogEmit: Date?
     private var lastLineLogSignature: String?
     private var diagnosticLines: [String] = []
@@ -317,7 +319,7 @@ final class LiveProgressDisplay {
                 stderr.write("\n".data(using: .utf8)!)
             case .tty:
                 if !alreadyRenderedCompletedTTY {
-                    redrawTTY(clearOnly: false)
+                    redrawTTY()
                 }
                 stderr.write("\n".data(using: .utf8)!)
             }
@@ -341,7 +343,7 @@ final class LiveProgressDisplay {
                 emitLineLogSnapshot(throttled: false)
                 stderr.write("\n".data(using: .utf8)!)
             case .tty:
-                redrawTTY(clearOnly: false)
+                redrawTTY()
                 stderr.write("\n".data(using: .utf8)!)
             }
         }
@@ -785,24 +787,16 @@ final class LiveProgressDisplay {
         write(lines.joined(separator: "\n") + "\n")
     }
 
-    private func redrawTTY(clearOnly: Bool = false) {
-        if drawnLineCount > 0 {
-            for _ in 1 ..< drawnLineCount {
-                write(cursorUp)
-            }
+    private func redrawTTY() {
+        // Restore an absolute anchor instead of moving up by logical line count:
+        // long status lines may occupy multiple terminal rows after wrapping.
+        if ttyAnchorSaved {
+            write(restoreCursor)
+        } else {
+            write("\r\(saveCursor)")
+            ttyAnchorSaved = true
         }
-
-        if clearOnly {
-            for idx in 0 ..< drawnLineCount {
-                write("\r\(clearToEndOfLine)")
-                if idx < drawnLineCount - 1 {
-                    write("\n")
-                }
-            }
-            write("\r")
-            drawnLineCount = 0
-            return
-        }
+        write("\r\(clearToEndOfScreen)")
 
         let lines = progressLines()
         for (idx, line) in lines.enumerated() {
@@ -812,7 +806,6 @@ final class LiveProgressDisplay {
             }
         }
         write("\r")
-        drawnLineCount = lines.count
     }
 
     private func redraw() {
@@ -820,7 +813,7 @@ final class LiveProgressDisplay {
         case .lineLog:
             emitLineLogSnapshot(throttled: true)
         case .tty:
-            redrawTTY(clearOnly: false)
+            redrawTTY()
         }
     }
 

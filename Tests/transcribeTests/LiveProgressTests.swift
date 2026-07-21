@@ -570,6 +570,34 @@ final class LiveProgressTests: XCTestCase {
         )
     }
 
+    func testTTYRedrawRestoresSavedAnchorForWrappedLines() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let display = LiveProgressDisplay(
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            contextLines: [
+                "Session: 56/56",
+                "Input: 20260719 173043-BE1F8B9A.qta",
+                "Output: a deliberately long output description that wraps on a narrow terminal",
+                "Model: openai_whisper-large-v3_turbo",
+            ],
+            renderMode: .tty
+        )
+        display.beginAudioChecking()
+        display.finishAudioChecking()
+        _ = display.finish()
+        writeHandle.closeFile()
+
+        let output = String(data: readHandle.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(output.components(separatedBy: saveCursorEscape).count - 1, 1, output)
+        XCTAssertGreaterThanOrEqual(output.components(separatedBy: restoreCursorEscape).count - 1, 1, output)
+        XCTAssertFalse(output.contains(cursorUpEscape), "TTY redraw must not depend on logical line counts: \(output)")
+    }
+
     func testOverallEtaUsesParallelDiarizationPath() async throws {
         let pipe = Pipe()
         let writeHandle = pipe.fileHandleForWriting
@@ -743,4 +771,6 @@ final class LiveProgressTests: XCTestCase {
     }
 
     private var cursorUpEscape: String { "\u{1B}[A" }
+    private var saveCursorEscape: String { "\u{1B}7" }
+    private var restoreCursorEscape: String { "\u{1B}8" }
 }
