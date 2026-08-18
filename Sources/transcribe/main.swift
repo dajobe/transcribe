@@ -5,7 +5,7 @@ struct Transcribe: AsyncParsableCommand {
     // When bumping this, run `make tag` (or `make release`) immediately
     // afterwards so the matching `vX.Y.Z` annotated tag lands with the
     // version-bump commit. See README "Releasing" and AGENTS.md.
-    static let version = "2.5.2"
+    static let version = "2.5.3"
 
     /// Default Whisper model when `--model` is not supplied.
     /// `openai_whisper-large-v3-v20240930_turbo` is the strongest reduced-
