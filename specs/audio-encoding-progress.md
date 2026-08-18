@@ -8,7 +8,7 @@ Status: implemented in this branch; retained as the design/spec record.
 selected model:
 
 ```text
-Auto-selected model: openai_whisper-large-v3_turbo
+Auto-selected model: openai_whisper-large-v3-v20240930_turbo
 <long pause>
 Transcription: encoding..., 8m 59s (~3m 15s left)
 ```
@@ -17,11 +17,11 @@ That silence is confusing because the machine is busy. In the reported case,
 Activity Monitor / `top` showed active Neural Engine work, which points at the
 WhisperKit audio encoder phase rather than idle time.
 
-The current ETA system predicts the whole pipeline from prior total wall time and
-only displays status for the currently visible transcription/diarization lines.
-It does not keep separate predictors for the user-visible `encoding...` phase,
-transcription decoding, or diarization. It also does not show a stable overall
-countdown while individual phase lines change underneath it.
+The current ETA system predicts the whole pipeline from prior total wall time
+and only displays status for the currently visible transcription/diarization
+lines. It does not keep separate predictors for the user-visible `encoding...`
+phase, transcription decoding, or diarization. It also does not show a stable
+overall countdown while individual phase lines change underneath it.
 
 ## Terminology
 
@@ -69,8 +69,8 @@ wait on large inputs.
 
 ## Current Hooks
 
-The local pipeline already records coarse wall phases in
-`PhaseTimings` / `RunTimingRecord`:
+The local pipeline already records coarse wall phases in `PhaseTimings` /
+`RunTimingRecord`:
 
 - `audio_load_ms`
 - `whisper_init_ms`
@@ -94,9 +94,8 @@ WhisperKit also exposes finer transcription timings on
 - `totalEncodingRuns`
 - `totalDecodingWindows`
 
-SpeakerKit exposes final Pyannote timing fields on
-`DiarizationResult.timings` when the result is backed by
-`PyannoteDiarizationTimings`:
+SpeakerKit exposes final Pyannote timing fields on `DiarizationResult.timings`
+when the result is backed by `PyannoteDiarizationTimings`:
 
 - `segmenterTime`
 - `embedderTime`
@@ -110,23 +109,23 @@ Those fields are the source of truth for the phase history.
 
 Extend the timing record with schema v2 fields:
 
-| Field | Unit | Meaning |
-|:------|:-----|:--------|
-| `whisper_audio_processing_ms` | ms | WhisperKit sample window padding / preprocessing |
-| `whisper_logmels_ms` | ms | WhisperKit log-mel feature generation |
-| `whisper_encoding_ms` | ms | WhisperKit audio encoder model time |
-| `whisper_decoding_loop_ms` | ms | WhisperKit decoder loop time |
-| `whisper_total_audio_processing_runs` | count | Number of preprocessing windows |
-| `whisper_total_logmel_runs` | count | Number of log-mel windows |
-| `whisper_total_encoding_runs` | count | Number of encoder windows |
-| `whisper_total_decoding_windows` | count | Number of decoded windows from WhisperKit timings |
-| `whisper_first_progress_ms` | ms | Time from transcribe start until first progress callback, if measured |
-| `speaker_diarization_ms` | ms | SpeakerKit diarization full pipeline time |
-| `speaker_segmenter_ms` | ms | SpeakerKit segmenter model time |
-| `speaker_embedder_ms` | ms | SpeakerKit embedder model time |
-| `speaker_clustering_ms` | ms | Speaker clustering time |
-| `speaker_total_chunks` | count | Segmenter chunk count |
-| `speaker_total_embeddings` | count | Embedding count |
+| Field                                 | Unit  | Meaning                                                               |
+|:--------------------------------------|:------|:----------------------------------------------------------------------|
+| `whisper_audio_processing_ms`         | ms    | WhisperKit sample window padding / preprocessing                      |
+| `whisper_logmels_ms`                  | ms    | WhisperKit log-mel feature generation                                 |
+| `whisper_encoding_ms`                 | ms    | WhisperKit audio encoder model time                                   |
+| `whisper_decoding_loop_ms`            | ms    | WhisperKit decoder loop time                                          |
+| `whisper_total_audio_processing_runs` | count | Number of preprocessing windows                                       |
+| `whisper_total_logmel_runs`           | count | Number of log-mel windows                                             |
+| `whisper_total_encoding_runs`         | count | Number of encoder windows                                             |
+| `whisper_total_decoding_windows`      | count | Number of decoded windows from WhisperKit timings                     |
+| `whisper_first_progress_ms`           | ms    | Time from transcribe start until first progress callback, if measured |
+| `speaker_diarization_ms`              | ms    | SpeakerKit diarization full pipeline time                             |
+| `speaker_segmenter_ms`                | ms    | SpeakerKit segmenter model time                                       |
+| `speaker_embedder_ms`                 | ms    | SpeakerKit embedder model time                                        |
+| `speaker_clustering_ms`               | ms    | Speaker clustering time                                               |
+| `speaker_total_chunks`                | count | Segmenter chunk count                                                 |
+| `speaker_total_embeddings`            | count | Embedding count                                                       |
 
 Implementation choice:
 
@@ -186,13 +185,14 @@ Filtering:
 - Use only rows with positive phase timings for that predictor; migrated v1 rows
   with zero phase timings are ignored for phase predictors.
 - Match at least `model`.
-- Include the effective Whisper compute summary in the key if practical:
-  `mel`, `encoder`, and `decoder`. The encoder predictor should at minimum key
-  by `model` plus the resolved audio encoder compute unit, because ANE, GPU, and
+- Include the effective Whisper compute summary in the key if practical: `mel`,
+  `encoder`, and `decoder`. The encoder predictor should at minimum key by
+  `model` plus the resolved audio encoder compute unit, because ANE, GPU, and
   CPU-only behavior can differ sharply.
 - `diarization_enabled` is useful for whole-pipeline ETA, but encoding itself is
-  mostly independent of diarization. For `r_encoding`, prefer sharing rows across
-  transcript-only and diarization runs once model and encoder compute match.
+  mostly independent of diarization. For `r_encoding`, prefer sharing rows
+  across transcript-only and diarization runs once model and encoder compute
+  match.
 - For `r_diarize`, require `diarization_enabled == true`; match the SpeakerKit
   segmenter/embedder compute settings when they are recorded.
 
@@ -270,37 +270,39 @@ starts immediately after model selection, keeps elapsed time visible through
 audio checking and model/audio setup, shows the decoded or estimated audio
 duration as soon as it is known, shows the encoder phase before WhisperKit's
 first progress callback, and keeps elapsed time moving while the encoder is
-busy. The first redraw can contain only `Total` plus
-`Input Check: checking audio`; additional phase rows appear as that work
-starts. `Input Check` covers the cheap container validation before model
-loading; `Audio` starts later and measures only the actual audio sample load.
+busy. The first redraw can contain only `Total` plus `Input Check: checking
+audio`; additional phase rows appear as that work starts. `Input Check` covers
+the cheap container validation before model loading; `Audio` starts later and
+measures only the actual audio sample load.
 
 TTY display redraws a fixed set of lines, with phase rows indented and labels
 kept in a 16-character column:
 
-- `▶ Total:          elapsed <elapsed>, ETA <remaining>, audio duration <duration>`
-- `  ✓ Input Check:    elapsed <elapsed>`
-- `  ✓ Model Loading:  <phase/status>`
-- `  ✓ Audio:          elapsed <elapsed>`
-- `  ▶ Encoding:       <phase/status>`
-- `  ▶ Diarization:    <phase/status>` only when speaker labels are enabled
-- `    Transcription:  <phase/status>`
-- `  ▶ Output:         <phase/status>` once output writing is explicitly tracked
+- `▶ Total:          elapsed <elapsed>, ETA <remaining>, audio duration
+  <duration>`
+- `✓ Input Check:    elapsed <elapsed>`
+- `✓ Model Loading:  <phase/status>`
+- `✓ Audio:          elapsed <elapsed>`
+- `▶ Encoding:       <phase/status>`
+- `▶ Diarization:    <phase/status>` only when speaker labels are enabled
+- `Transcription:  <phase/status>`
+- `▶ Output:         <phase/status>` once output writing is explicitly tracked
 
 Rows are ordered by phase start order. When phases run in parallel, their lines
 update independently and stay in their first-started order. When a phase is
 running, its line uses `▶` and includes elapsed time plus an ETA. If a running
 phase has no useful substatus yet, it shows only elapsed time and ETA rather
-than filler text such as `starting`. When a phase has not started, its state icon
-column is blank. When a phase is complete, its line uses `✓`, shows only the
-final elapsed time, stops updating, and no longer counts toward the remaining
-ETA. Phase rows are indented under `Total` so the overall countdown scans
-separately from per-phase work. The top line uses the remaining critical path,
-not a serial sum of parallel work. When the session finishes, the final TTY
-snapshot remains visible instead of being cleared; the top line switches to `✓`
-and shows total elapsed runtime plus audio duration. Durations omit zero-valued
-higher units, so a four-second phase renders as `4s`, not `0m 4s`. Positive
-sub-second durations render as `<1s`; `0s` is reserved for exactly zero.
+than filler text such as `starting`. When a phase has not started, its state
+icon column is blank. When a phase is complete, its line uses `✓`, shows only
+the final elapsed time, stops updating, and no longer counts toward the
+remaining ETA. Phase rows are indented under `Total` so the overall countdown
+scans separately from per-phase work. The top line uses the remaining critical
+path, not a serial sum of parallel work. When the session finishes, the final
+TTY snapshot remains visible instead of being cleared; the top line switches to
+`✓` and shows total elapsed runtime plus audio duration. Durations omit
+zero-valued higher units, so a four-second phase renders as `4s`, not `0m 4s`.
+Positive sub-second durations render as `<1s`; `0s` is reserved for exactly
+zero.
 
 Example:
 
@@ -416,7 +418,8 @@ ETA needs audio duration before expensive work begins.
 
 Use these sources, in order:
 
-1. Voice Memos database duration (`ZDURATION` / `ZLOCALDURATION`), already loaded.
+1. Voice Memos database duration (`ZDURATION` / `ZLOCALDURATION`), already
+   loaded.
 2. Directory resolver AVAsset duration, already probed during input resolution.
 3. Cheap single-file duration probe via AudioToolbox or AVFoundation.
 4. Actual decoded sample count once `PreparedAudio` exists.
@@ -463,7 +466,8 @@ Add focused tests:
 
 ## Rollout Steps
 
-1. Add schema-compatible timing fields and tests for reading old and new history.
+1. Add schema-compatible timing fields and tests for reading old and new
+   history.
 2. Capture WhisperKit and SpeakerKit phase timings after transcription and
    diarization complete.
 3. Add `TimingStore` phase predictors and total ETA ingredients.
@@ -479,5 +483,5 @@ Add focused tests:
 
 - Should compute-unit values be added to timing records now, or should the first
   pass key encoding history only by model and accept some noise?
-- Should failed runs append partial timing records with `error_stage`, especially
-  when encoding starts but later decoding fails?
+- Should failed runs append partial timing records with `error_stage`,
+  especially when encoding starts but later decoding fails?

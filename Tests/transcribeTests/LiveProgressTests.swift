@@ -108,7 +108,7 @@ final class LiveProgressTests: XCTestCase {
                 "Session: 1/2",
                 "Input: clip.m4a",
                 "Output: clip (txt,json) -> /tmp/out [clip.txt, clip.json]",
-                "Model: openai_whisper-large-v3_turbo",
+                "Model: openai_whisper-large-v3-v20240930_turbo",
             ]
         )
         display.start()
@@ -119,7 +119,7 @@ final class LiveProgressTests: XCTestCase {
         XCTAssertTrue(output.contains("Session: 1/2"), output)
         XCTAssertTrue(output.contains("Input: clip.m4a"), output)
         XCTAssertTrue(output.contains("Output: clip"), output)
-        XCTAssertTrue(output.contains("Model: openai_whisper-large-v3_turbo"), output)
+        XCTAssertTrue(output.contains("Model: openai_whisper-large-v3-v20240930_turbo"), output)
     }
 
     func testDurationFormattingOmitsZeroHigherUnits() async throws {
@@ -583,7 +583,7 @@ final class LiveProgressTests: XCTestCase {
                 "Session: 56/56",
                 "Input: 20260719 173043-BE1F8B9A.qta",
                 "Output: a deliberately long output description that wraps on a narrow terminal",
-                "Model: openai_whisper-large-v3_turbo",
+                "Model: openai_whisper-large-v3-v20240930_turbo",
             ],
             renderMode: .tty,
             ttyColumnCountOverride: 40

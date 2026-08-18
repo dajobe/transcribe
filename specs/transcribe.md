@@ -263,7 +263,7 @@ Example:
   "metadata": {
     "audio_file": "meeting.mp3",
     "duration_seconds": 1847.3,
-    "model": "openai_whisper-large-v3_turbo",
+    "model": "openai_whisper-large-v3-v20240930_turbo",
     "language": "en",
     "diarization_enabled": true,
     "speaker_strategy": "subsegment",
@@ -342,13 +342,13 @@ still be delivered.
 
 ### Failure Behavior
 
-| Condition                                        | Required behavior                                                           |
-|:-------------------------------------------------|:----------------------------------------------------------------------------|
-| Input file does not exist or is unreadable       | Fail with exit code `3` before model initialization                         |
+| Condition                                        | Required behavior                                                              |
+|:-------------------------------------------------|:-------------------------------------------------------------------------------|
+| Input file does not exist or is unreadable       | Fail with exit code `3` before model initialization                            |
 | Unsupported or undecodable audio                 | Fail with exit code `3`; distinguish candidate extensions from decoder support |
-| Model download fails                             | Retry once, then fail with exit code `4`                                    |
-| Output file already exists without `--overwrite` | Fail with exit code `5` before expensive processing                         |
-| Disk full or partial write                       | Fail with exit code `5`; do not leave truncated final output files in place |
+| Model download fails                             | Retry once, then fail with exit code `4`                                       |
+| Output file already exists without `--overwrite` | Fail with exit code `5` before expensive processing                            |
+| Disk full or partial write                       | Fail with exit code `5`; do not leave truncated final output files in place    |
 
 ## Performance and Caching
 
@@ -382,8 +382,8 @@ Processing output is specified in
 [cli-output-and-batch-logs.md](cli-output-and-batch-logs.md). In short:
 `--progress-log auto` uses a stdout TUI when stdout is a terminal and stdout
 text events otherwise; `plain` always uses stdout text events; `off` suppresses
-processing/status events. Event logs default to `INFO+`; `--log-level debug`
-(or `--verbose`) adds extra timing/cache detail and duplicate-skip diagnostics,
+processing/status events. Event logs default to `INFO+`; `--log-level debug` (or
+`--verbose`) adds extra timing/cache detail and duplicate-skip diagnostics,
 while `--quiet` is shorthand for `--log-level warn`. In interactive TUI mode,
 `--verbose` / `--log-level debug` shows `DEBUG` diagnostics in the TUI
 diagnostics block, and warnings/errors appear there instead of being lost behind
@@ -599,15 +599,15 @@ into the repository and larger manual benchmark files kept out of git.
 Before coding the main implementation, complete the following research and
 confirm or update the spec accordingly.
 
-| Spike item                | Goal                                                                                                                                                                                                 | How to verify                                                                                                                                   |
-|:--------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Package layout**        | Confirm SpeakerKit is part of the WhisperKit repo and learn exact SPM product/library names.                                                                                                         | Clone WhisperKit, inspect `Package.swift` for targets and products; confirm `SpeakerKit` (or equivalent) exists and is consumable.              |
-| **WhisperKit API**        | Learn actual entry points for loading audio, initializing the pipeline, and transcribing.                                                                                                            | Build a minimal Swift app or test that loads audio, creates WhisperKit, runs transcription; note types for audio in/out and segment structure.  |
-| **SpeakerKit API**        | Learn diarization entry points, min/max speaker params, and how results are returned (e.g. labels per segment or per time range).                                                                    | Same minimal app: call diarization on the same audio; confirm how speaker labels map to time ranges or segments.                                |
-| **Merge / strategy**      | Confirm whether "merge speaker info into transcript" is provided by the library (e.g. `addSpeakerInfo(to:strategy:)`) or must be implemented by aligning segment timestamps with diarization output. | Check WhisperKit/SpeakerKit docs and APIs for any built-in merge; if none, design alignment logic and document in spec or Implementation Notes. |
-| **Audio decoding**        | List the containers/codecs WhisperKit actually accepts for its audio loading path, separate from candidate filename extensions.                                                                       | Run or read WhisperKit code for audio loading (e.g. AVFoundation path); update "Candidate Input Extensions" and error text to avoid overclaiming support. |
-| **Model cache location**  | Confirm whether both Whisper and diarization models can be stored under `--model-dir` or if separate or vendor-specific paths apply.                                                                 | Check WhisperKit/SpeakerKit init options and docs for cache/config paths; resolve Open Question on cache and document default.                  |
-| **Word-level timestamps** | Determine if word timestamps are always available for the default model (and others) or only in certain configs.                                                                                     | Run transcription with default model; inspect result type for optional `words`; check docs. Update JSON contract or warnings if conditional.    |
+| Spike item                | Goal                                                                                                                                                                                                 | How to verify                                                                                                                                             |
+|:--------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Package layout**        | Confirm SpeakerKit is part of the WhisperKit repo and learn exact SPM product/library names.                                                                                                         | Clone WhisperKit, inspect `Package.swift` for targets and products; confirm `SpeakerKit` (or equivalent) exists and is consumable.                        |
+| **WhisperKit API**        | Learn actual entry points for loading audio, initializing the pipeline, and transcribing.                                                                                                            | Build a minimal Swift app or test that loads audio, creates WhisperKit, runs transcription; note types for audio in/out and segment structure.            |
+| **SpeakerKit API**        | Learn diarization entry points, min/max speaker params, and how results are returned (e.g. labels per segment or per time range).                                                                    | Same minimal app: call diarization on the same audio; confirm how speaker labels map to time ranges or segments.                                          |
+| **Merge / strategy**      | Confirm whether "merge speaker info into transcript" is provided by the library (e.g. `addSpeakerInfo(to:strategy:)`) or must be implemented by aligning segment timestamps with diarization output. | Check WhisperKit/SpeakerKit docs and APIs for any built-in merge; if none, design alignment logic and document in spec or Implementation Notes.           |
+| **Audio decoding**        | List the containers/codecs WhisperKit actually accepts for its audio loading path, separate from candidate filename extensions.                                                                      | Run or read WhisperKit code for audio loading (e.g. AVFoundation path); update "Candidate Input Extensions" and error text to avoid overclaiming support. |
+| **Model cache location**  | Confirm whether both Whisper and diarization models can be stored under `--model-dir` or if separate or vendor-specific paths apply.                                                                 | Check WhisperKit/SpeakerKit init options and docs for cache/config paths; resolve Open Question on cache and document default.                            |
+| **Word-level timestamps** | Determine if word timestamps are always available for the default model (and others) or only in certain configs.                                                                                     | Run transcription with default model; inspect result type for optional `words`; check docs. Update JSON contract or warnings if conditional.              |
 
 Spike deliverables: short notes or a spike doc (in repo or spec) recording
 actual types, method names, and any spec or Package.swift updates (e.g.

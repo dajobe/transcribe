@@ -53,7 +53,7 @@ objects whose structure matches the **dotted** names used by `config get` /
 
 ```json
 {
-  "model": "openai_whisper-large-v3_turbo",
+  "model": "openai_whisper-large-v3-v20240930_turbo",
   "format": "txt,json,md",
   "language": "en",
   "output": {
@@ -103,10 +103,10 @@ For boolean preferences exposed in the file:
 
 For booleans in the file, **omitted** / **`null`** still mean “fall through
 after CLI.” On the CLI, overlapping preferences use positive pairs where needed
-(e.g. `--with-speakers` / `--transcript-only`); logging accepts
-`--log-level debug|info|warn|error`, with `--verbose` as debug shorthand and
-`--quiet` as warn shorthand. Other settings use explicit values such as
-`--eta-hints on|off` or `--progress-log auto|plain|off`.
+(e.g. `--with-speakers` / `--transcript-only`); logging accepts `--log-level
+debug|info|warn|error`, with `--verbose` as debug shorthand and `--quiet` as
+warn shorthand. Other settings use explicit values such as `--eta-hints on|off`
+or `--progress-log auto|plain|off`.
 
 ## Key catalog (dotted names for CLI; JSON nesting)
 
@@ -178,13 +178,13 @@ after CLI.” On the CLI, overlapping preferences use positive pairs where neede
 
 ## CLI: `transcribe config`
 
-| Subcommand                 | Description                                                                                                                   |
-|:---------------------------|:------------------------------------------------------------------------------------------------------------------------------|
+| Subcommand                 | Description                                                                                                                                                                                                                                                                                                    |
+|:---------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `config show`              | Print effective settings as dotted `key value` lines; annotate overrides with `(default …)` (sorted per group; display only). Optional `# …` lines immediately before a key document unset semantics when the displayed value is `(none)` or `(auto)` (same wording as `transcribe --help` for those options). |
-| `config get <key>`         | Print one **dotted** key’s effective value (e.g. `dir.sessionGap`; same names as `set` / `unset`).                            |
-| `config set <key> <value>` | Validate and write override (atomically).                                                                                     |
-| `config unset <key>`       | Remove key from file (nested keys supported).                                                                                 |
-| `config path`              | Print resolved config file path.                                                                                              |
+| `config get <key>`         | Print one **dotted** key’s effective value (e.g. `dir.sessionGap`; same names as `set` / `unset`).                                                                                                                                                                                                             |
+| `config set <key> <value>` | Validate and write override (atomically).                                                                                                                                                                                                                                                                      |
+| `config unset <key>`       | Remove key from file (nested keys supported).                                                                                                                                                                                                                                                                  |
+| `config path`              | Print resolved config file path.                                                                                                                                                                                                                                                                               |
 
 ## Migration
 
@@ -197,15 +197,15 @@ copy the JSON file to `~/.config/transcribe/config.json` (or
 Example `transcribe config show` shape (dotted keys match `get`/`set`; values
 illustrative; sorted within each group). Lines with **`(default …)`** only
 appear when the effective value differs from the built-in default. **`#` lines**
-(not valid for `config set`) appear only when the displayed value is **`(none)`**
-or **`(auto)`** (for `language`), and explain unset semantics for those keys
-(same wording as global `--help`).
+(not valid for `config set`) appear only when the displayed value is
+**`(none)`** or **`(auto)`** (for `language`), and explain unset semantics for
+those keys (same wording as global `--help`).
 
 ```text
 format txt,json
 # When omitted or (auto), Whisper auto-detects the language.
 language (auto)
-model openai_whisper-large-v3_turbo
+model openai_whisper-large-v3-v20240930_turbo
 
 output.dir .
 # When omitted, the output basename is derived from the input path.

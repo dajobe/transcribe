@@ -23,7 +23,7 @@ phase rows, the block shows stable run context:
 Session: 1/3
 Input: clip.m4a
 Output: clip (txt,json) -> /tmp/out [clip.txt, clip.json]
-Model: openai_whisper-large-v3_turbo
+Model: openai_whisper-large-v3-v20240930_turbo
 ```
 
 The phase rows retain the icon based status display:
@@ -77,17 +77,17 @@ public format is:
 
 Rules:
 
-- Prefix every line with UTC ISO-8601 timestamp and uppercase level
-  (`DEBUG`, `INFO`, `WARN`, or `ERROR`).
+- Prefix every line with UTC ISO-8601 timestamp and uppercase level (`DEBUG`,
+  `INFO`, `WARN`, or `ERROR`).
 - Include `event=<name>` after the level.
 - Use key/value fields for source, session, input, output basename, output
   names, output directory, phase, elapsed seconds, and related metadata when
   known.
-- Quote and escape values containing whitespace, quotes, backslashes, commas,
-  or empty strings.
+- Quote and escape values containing whitespace, quotes, backslashes, commas, or
+  empty strings.
 - Emit completion-style processing events only. `session_start`, `phase_done`,
-  `session_done`, and `run_done` are `INFO`; duplicate `session_skipped`
-  details are `DEBUG`; warnings and handled failures are `WARN`/`ERROR`.
+  `session_done`, and `run_done` are `INFO`; duplicate `session_skipped` details
+  are `DEBUG`; warnings and handled failures are `WARN`/`ERROR`.
 - Do not emit per-second progress snapshots in text event mode.
 - `--log-level debug` and `--verbose` include debug events. `--quiet` is
   shorthand for `--log-level warn`. Normal `INFO` logs summarize skipped work in
@@ -98,9 +98,9 @@ other structured renderer can be added without changing pipeline call sites.
 
 ## Automator and Folder Actions
 
-`scripts/folder-action-transcribe.sh` defaults child runs to
-`--progress-log plain` unless `TRANSCRIBE_EXTRA_ARGS` already supplies a
-`--progress-log` option. It captures child stdout and stderr separately:
+`scripts/folder-action-transcribe.sh` defaults child runs to `--progress-log
+plain` unless `TRANSCRIBE_EXTRA_ARGS` already supplies a `--progress-log`
+option. It captures child stdout and stderr separately:
 
 - Child stdout event lines are appended verbatim to `TRANSCRIBE_LOG`.
 - If `TRANSCRIBE_LOG` is unset, child stdout is forwarded to wrapper stdout.

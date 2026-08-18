@@ -160,6 +160,44 @@ func preflightAudioDecoding(
     }
 }
 
+/// Returns a complete locally cached WhisperKit model folder, if one exists.
+///
+/// WhisperKit's download path performs a remote repository lookup before it
+/// can discover an already downloaded model. Bypass that lookup only when the
+/// cache contains every model bundle required for loading; incomplete caches
+/// must continue through WhisperKit's normal download path.
+func whisperModelCacheFolder(model: String, modelDir: String) -> URL? {
+    let expandedModelDir = (modelDir as NSString).expandingTildeInPath
+    let requiredBundles = ["MelSpectrogram.mlmodelc", "AudioEncoder.mlmodelc", "TextDecoder.mlmodelc"]
+
+    var cacheNames = [model]
+    if model == "openai_whisper-large-v3-v20240930_turbo" {
+        // Older WhisperKit releases stored this same four-layer turbo model
+        // without the `_turbo` suffix. Reuse that cache before downloading a
+        // second copy under the corrected model name.
+        cacheNames.append("openai_whisper-large-v3-v20240930")
+    }
+
+    for cacheName in cacheNames {
+        let modelFolder = URL(fileURLWithPath: expandedModelDir)
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent("argmaxinc", isDirectory: true)
+            .appendingPathComponent("whisperkit-coreml", isDirectory: true)
+            .appendingPathComponent(cacheName, isDirectory: true)
+        let complete = requiredBundles.allSatisfy { bundle in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(
+                atPath: modelFolder.appendingPathComponent(bundle).path,
+                isDirectory: &isDirectory
+            ) && isDirectory.boolValue
+        }
+        if complete {
+            return modelFolder.standardizedFileURL
+        }
+    }
+    return nil
+}
+
 func initializeWhisperKit(
     model: String,
     modelDir: String,
@@ -169,8 +207,20 @@ func initializeWhisperKit(
 ) async throws -> WhisperKit {
     let expandedModelDir = (modelDir as NSString).expandingTildeInPath
     let modelDirURL = URL(fileURLWithPath: expandedModelDir)
+    let cachedModelFolder = whisperModelCacheFolder(model: model, modelDir: modelDir)
+
     func makeConfig(_ selectedCompute: ModelComputeOptions) -> WhisperKitConfig {
-        WhisperKitConfig(
+        if let cachedModelFolder {
+            return WhisperKitConfig(
+                model: model,
+                modelFolder: cachedModelFolder.path,
+                computeOptions: selectedCompute,
+                verbose: verbose,
+                load: true,
+                download: false
+            )
+        }
+        return WhisperKitConfig(
             model: model,
             downloadBase: modelDirURL,
             computeOptions: selectedCompute,
@@ -181,6 +231,11 @@ func initializeWhisperKit(
     }
 
     logger?.log("Using model cache: \(expandedModelDir)")
+    if let cachedModelFolder {
+        logger?.log("Using cached WhisperKit model: \(cachedModelFolder.path)")
+    } else {
+        logger?.log("WhisperKit model is not cached; downloading if needed")
+    }
     let preferredConfig = makeConfig(computeOptions.whisperPreferred)
     do {
         let whisperKit = try await WhisperKit(preferredConfig)

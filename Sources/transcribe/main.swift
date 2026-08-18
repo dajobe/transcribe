@@ -8,12 +8,13 @@ struct Transcribe: AsyncParsableCommand {
     static let version = "2.5.2"
 
     /// Default Whisper model when `--model` is not supplied.
-    /// `openai_whisper-large-v3_turbo` is the strongest model that runs at
-    /// usable speed on Apple Silicon with the Neural Engine; the previously
-    /// auto-selected `openai_whisper-base` produced poor results on real-world
-    /// noisy or far-field audio (meetings, conferences, voice notes).
+    /// `openai_whisper-large-v3-v20240930_turbo` is the strongest reduced-
+    /// decoder model that runs at usable speed on Apple Silicon with the
+    /// Neural Engine; the previously auto-selected `openai_whisper-base`
+    /// produced poor results on real-world noisy or far-field audio
+    /// (meetings, conferences, voice notes).
     /// Override with `--model <name>`.
-    static let defaultModel = "openai_whisper-large-v3_turbo"
+    static let defaultModel = "openai_whisper-large-v3-v20240930_turbo"
 
     static var configuration = CommandConfiguration(
         abstract: "transcribe \(version) — on-device meeting transcription with optional speaker diarization.",

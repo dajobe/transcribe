@@ -4,6 +4,44 @@ import XCTest
 @testable import transcribe
 
 final class TranscriptionPipelineTests: XCTestCase {
+    func testWhisperModelCacheFolderRequiresAllModelBundles() throws {
+        let modelDir = try makeTemporaryDirectory()
+        let modelFolder = modelDir
+            .appendingPathComponent("models/argmaxinc/whisperkit-coreml/cached-model")
+        for bundle in ["MelSpectrogram.mlmodelc", "AudioEncoder.mlmodelc", "TextDecoder.mlmodelc"] {
+            try FileManager.default.createDirectory(
+                at: modelFolder.appendingPathComponent(bundle),
+                withIntermediateDirectories: true
+            )
+        }
+
+        let cachedFolder = try XCTUnwrap(whisperModelCacheFolder(model: "cached-model", modelDir: modelDir.path))
+        XCTAssertEqual(cachedFolder.path, modelFolder.path)
+
+        try FileManager.default.removeItem(at: modelFolder.appendingPathComponent("TextDecoder.mlmodelc"))
+        XCTAssertNil(whisperModelCacheFolder(model: "cached-model", modelDir: modelDir.path))
+    }
+
+    func testWhisperModelCacheFolderReusesLegacyTurboDirectory() throws {
+        let modelDir = try makeTemporaryDirectory()
+        let modelFolder = modelDir
+            .appendingPathComponent("models/argmaxinc/whisperkit-coreml/openai_whisper-large-v3-v20240930")
+        for bundle in ["MelSpectrogram.mlmodelc", "AudioEncoder.mlmodelc", "TextDecoder.mlmodelc"] {
+            try FileManager.default.createDirectory(
+                at: modelFolder.appendingPathComponent(bundle),
+                withIntermediateDirectories: true
+            )
+        }
+
+        let cachedFolder = try XCTUnwrap(
+            whisperModelCacheFolder(
+                model: "openai_whisper-large-v3-v20240930_turbo",
+                modelDir: modelDir.path
+            )
+        )
+        XCTAssertEqual(cachedFolder.path, modelFolder.path)
+    }
+
     func testApplyWhisperPhaseTimingsAggregatesResultTimings() throws {
         let resultA = TranscriptionResult(
             text: "a",
