@@ -97,7 +97,7 @@ GLOBAL OPTIONS:
   -l, --language <code>     Language code such as "en"; default is auto-detect
   -o, --output-dir <path>   Directory for output files (default: current directory)
   -f, --format <fmt>        Output formats, comma-separated (default: txt,json)
-                            Supported: txt, json, srt, vtt, md, all
+                            Supported: txt, json, srt, vtt, md, tsv, all
   --speakers-min <n>        Minimum speaker count hint for diarization
   --speakers-max <n>        Maximum speaker count hint for diarization
   --transcript-only         Skip speaker labels (transcript only)
@@ -155,7 +155,7 @@ and container, and undecodable files must fail with a clear input-file error.
 
 ### Argument Semantics
 
-- `--format all` expands to `txt,json,srt,vtt`.
+- `--format all` expands to `txt,json,srt,vtt,md,tsv`.
 - Transcript content is always written to output files selected by `--format`.
 - Processing status uses the stdout TUI or stdout text events described in
   [cli-output-and-batch-logs.md](cli-output-and-batch-logs.md).
@@ -210,6 +210,7 @@ are:
 - `./out/meeting.json`
 - `./out/meeting.srt`
 - `./out/meeting.vtt`
+- `./out/meeting.tsv`
 
 The basename is derived from the input filename without its extension.
 
@@ -314,6 +315,23 @@ WEBVTT
 00:00:00.000 --> 00:00:12.400
 <v SPEAKER_0>Welcome, thanks for joining. I wanted to start
 by talking about the infrastructure migration timeline.
+```
+
+### TSV (`.tsv`)
+
+TSV output matches whisperx: segment-level rows with three tab-separated columns
+(`start`, `end`, `text`) and times in integer milliseconds. The first line is
+the `start` `end` `text` header, and there is no speaker column even when
+speaker labels are enabled.
+
+The example below writes `<TAB>` where the real output has a literal tab
+character; the repository markdown formatter rewrites hard tabs to spaces, so a
+verbatim sample cannot be shown here.
+
+```text
+start<TAB>end<TAB>text
+229778<TAB>230399<TAB>Hi Dave.
+230899<TAB>231139<TAB>Hi.
 ```
 
 ## Runtime Behavior
@@ -566,7 +584,7 @@ At minimum, the project should cover:
 - Diarization fallback behavior
 - Empty or no-speech audio
 - Short audio where diarization is skipped
-- Golden-file tests for txt, json, srt, and vtt output
+- Golden-file tests for txt, json, srt, vtt, and tsv output
 
 If fixture size is a concern, short deterministic audio clips should be checked
 into the repository and larger manual benchmark files kept out of git.

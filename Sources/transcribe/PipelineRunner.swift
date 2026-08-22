@@ -670,10 +670,10 @@ struct PipelineRunner {
     private func validateSharedUsage() throws {
         let formats = options.resolvedFormats
         if formats.isEmpty {
-            throw TranscribeError(message: "--format must include at least one of: txt, json, srt, vtt, md, all.", exitCode: .invalidUsage)
+            throw TranscribeError(message: "--format must include at least one of: txt, json, srt, vtt, md, tsv, all.", exitCode: .invalidUsage)
         }
         for f in formats where !validOutputFormats.contains(f) {
-            throw TranscribeError(message: "Unsupported format '\(f)'. Supported: txt, json, srt, vtt, md, all.", exitCode: .invalidUsage)
+            throw TranscribeError(message: "Unsupported format '\(f)'. Supported: txt, json, srt, vtt, md, tsv, all.", exitCode: .invalidUsage)
         }
 
         let strategy = options.speakerMerge.lowercased()

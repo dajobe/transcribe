@@ -71,8 +71,8 @@ Valid tokens include **`md`**. Comma-separated lists behave as today
 
 ### `all`
 
-Expands to **`txt`**, **`json`**, **`srt`**, **`vtt`**, **`md`** (in that
-order).
+Expands to **`txt`**, **`json`**, **`srt`**, **`vtt`**, **`md`**, **`tsv`** (in
+that order).
 
 ## Folder Action script
 
@@ -149,12 +149,12 @@ the event log once.
     - **`event=end`** — always logged on exit, with **`path=`**, **`exit=`**,
       **`duration_s=`**, and optionally **`reason=`**.
     - Child stdout event lines are appended verbatim to **`TRANSCRIBE_LOG`**.
-    - When **`transcribe` exits non-zero:** one
-      **`ERROR event=transcribe_failed`** line records **`exit=`**,
-      **`meaning=`**, and **`stderr_summary=`**. Full raw stderr for that run is
-      also appended to **`TRANSCRIBE_STDERR_LOG`** if set, otherwise
-      **`dirname(TRANSCRIBE_LOG)/transcribe.stderr.log`** when **`TRANSCRIBE_LOG`**
-      is set.
+    - When **`transcribe` exits non-zero:** one **`ERROR
+      event=transcribe_failed`** line records **`exit=`**, **`meaning=`**, and
+      **`stderr_summary=`**. Full raw stderr for that run is also appended to
+      **`TRANSCRIBE_STDERR_LOG`** if set, otherwise
+      **`dirname(TRANSCRIBE_LOG)/transcribe.stderr.log`** when
+      **`TRANSCRIBE_LOG`** is set.
 
 ### Exit codes
 

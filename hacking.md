@@ -146,9 +146,9 @@ Important mapping:
 - audio path: `ZPATH`, relative to the recordings directory when needed
 - recorded time: `ZDATE`, converted from Apple reference date
 - duration: `ZDURATION`, then `ZLOCALDURATION`, then later audio probing
-- title: `ZCUSTOMLABEL`, then `ZCUSTOMLABELFORSORTING`, then
-  `ZENCRYPTEDTITLE`, then `New Recording`; timestamp-shaped placeholder labels
-  yield to a non-timestamp sorting or encrypted title
+- title: `ZCUSTOMLABEL`, then `ZCUSTOMLABELFORSORTING`, then `ZENCRYPTEDTITLE`,
+  then `New Recording`; timestamp-shaped placeholder labels yield to a
+  non-timestamp sorting or encrypted title
 
 If macOS denies the folder or database, surface a Full Disk Access hint. Missing
 audio files are warnings and skipped rows, not fatal by themselves.
@@ -216,7 +216,7 @@ read-only viewer over `processing_history.jsonl`.
 ## Outputs
 
 `OutputWriter.swift` owns renderers and write behavior for `txt`, `json`, `srt`,
-`vtt`, and `md`.
+`vtt`, `md`, and `tsv`.
 
 Important conventions:
 

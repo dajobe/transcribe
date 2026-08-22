@@ -305,7 +305,7 @@ struct SharedTranscriptionOptions: ParsableArguments {
 
     @Option(
         name: [.short, .long],
-        help: "Output formats, comma-separated (default: \(TranscriptionDefaults.format)): txt, json, srt, vtt, md, all"
+        help: "Output formats, comma-separated (default: \(TranscriptionDefaults.format)): txt, json, srt, vtt, md, tsv, all"
     )
     var format: String?
 

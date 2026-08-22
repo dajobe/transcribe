@@ -194,32 +194,32 @@ session basename rules, and verbose-log examples — see
 Global options are accepted before `file`, `dir`, `voice-memos`, and the root
 file/directory alias. Run `transcribe --help` to see these options.
 
-| Option                                          | Description                                                                                      |
-|:------------------------------------------------|:-------------------------------------------------------------------------------------------------|
-| `-m, --model <name>`                            | Whisper model (default: `openai_whisper-large-v3-v20240930_turbo`; ~1.5 GB on first run)         |
-| `-l, --language <code>`                         | Language code; when omitted or `(auto)`, Whisper auto-detects (see `transcribe --help`)          |
-| `-o, --output-dir <path>`                       | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                         |
-| `-f, --format <fmt>`                            | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `md`, `all` (default: `txt,json`)  |
-| `--speakers-min <n>`                            | Minimum speaker count hint for diarization                                                       |
-| `--speakers-max <n>`                            | Maximum speaker count hint for diarization                                                       |
-| `--transcript-only`                             | Skip speaker labels (transcript only)                                                            |
-| `--with-speakers`                               | Add speaker labels for this run (overrides config; opposite of `--transcript-only`)              |
-| `--speaker-merge <s>`                           | How segments are merged: `subsegment` or `segment` (default: `subsegment`)                       |
-| `--model-dir <path>`                            | Model cache directory (default: `~/.cache/transcribe`)                                           |
-| `--overwrite`                                   | Replace existing output files                                                                    |
-| `--redo`                                        | Reprocess inputs even when processing history says they already completed                        |
-| `--stateless`                                   | Do not consult or write idempotent processing history                                            |
-| `--mark-imported`                               | Mark planned inputs as already imported without transcribing                                     |
-| `--dry-run` / `--dryrun`                        | Show what would process or skip without loading models, writing outputs, or updating history     |
-| `--verbose`                                     | Include debug-level progress, timing, and cache details in event logs or TUI diagnostics         |
-| `--quiet`                                       | Show only warning and error event logs/diagnostics for this run                                  |
-| `--log-level debug` / `info` / `warn` / `error` | Minimum event log/diagnostic level; `--verbose` is `debug`, `--quiet` is `warn`                  |
-| `--eta-hints on` or `off`                       | Record timing for ETA hints from prior runs (default: on)                                        |
-| `--progress-log auto` / `plain` / `off`         | Processing output: stdout TUI on terminals, stdout event logs for batch, or off                  |
-| `--audio-encoder-compute <units>`               | Whisper audio encoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine` |
-| `--text-decoder-compute <units>`                | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
-| `--segmenter-compute <units>`                   | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`  |
-| `--embedder-compute <units>`                    | SpeakerKit embedder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`   |
+| Option                                          | Description                                                                                            |
+|:------------------------------------------------|:-------------------------------------------------------------------------------------------------------|
+| `-m, --model <name>`                            | Whisper model (default: `openai_whisper-large-v3-v20240930_turbo`; ~1.5 GB on first run)               |
+| `-l, --language <code>`                         | Language code; when omitted or `(auto)`, Whisper auto-detects (see `transcribe --help`)                |
+| `-o, --output-dir <path>`                       | Output directory (default: `.`); `~` is your home directory (not `/tmp`)                               |
+| `-f, --format <fmt>`                            | Output formats, comma-separated: `txt`, `json`, `srt`, `vtt`, `md`, `tsv`, `all` (default: `txt,json`) |
+| `--speakers-min <n>`                            | Minimum speaker count hint for diarization                                                             |
+| `--speakers-max <n>`                            | Maximum speaker count hint for diarization                                                             |
+| `--transcript-only`                             | Skip speaker labels (transcript only)                                                                  |
+| `--with-speakers`                               | Add speaker labels for this run (overrides config; opposite of `--transcript-only`)                    |
+| `--speaker-merge <s>`                           | How segments are merged: `subsegment` or `segment` (default: `subsegment`)                             |
+| `--model-dir <path>`                            | Model cache directory (default: `~/.cache/transcribe`)                                                 |
+| `--overwrite`                                   | Replace existing output files                                                                          |
+| `--redo`                                        | Reprocess inputs even when processing history says they already completed                              |
+| `--stateless`                                   | Do not consult or write idempotent processing history                                                  |
+| `--mark-imported`                               | Mark planned inputs as already imported without transcribing                                           |
+| `--dry-run` / `--dryrun`                        | Show what would process or skip without loading models, writing outputs, or updating history           |
+| `--verbose`                                     | Include debug-level progress, timing, and cache details in event logs or TUI diagnostics               |
+| `--quiet`                                       | Show only warning and error event logs/diagnostics for this run                                        |
+| `--log-level debug` / `info` / `warn` / `error` | Minimum event log/diagnostic level; `--verbose` is `debug`, `--quiet` is `warn`                        |
+| `--eta-hints on` or `off`                       | Record timing for ETA hints from prior runs (default: on)                                              |
+| `--progress-log auto` / `plain` / `off`         | Processing output: stdout TUI on terminals, stdout event logs for batch, or off                        |
+| `--audio-encoder-compute <units>`               | Whisper audio encoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`       |
+| `--text-decoder-compute <units>`                | Whisper text decoder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`        |
+| `--segmenter-compute <units>`                   | SpeakerKit segmenter compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`        |
+| `--embedder-compute <units>`                    | SpeakerKit embedder compute units: `auto`, `all`, `cpuOnly`, `cpuAndGPU`, `cpuAndNeuralEngine`         |
 
 Directory-only options for `transcribe dir`:
 
@@ -429,6 +429,8 @@ Given `meeting.mp3`, the tool writes:
 - `meeting.json` — machine-readable transcript preserving segment boundaries
 - `meeting.srt` — SubRip subtitle format
 - `meeting.vtt` — WebVTT subtitle format
+- `meeting.tsv` — whisperx-compatible tab-separated segments with
+  integer-millisecond times and no speaker column
 - `meeting.md` — Markdown transcript with YAML frontmatter, metadata, and
   headings
 

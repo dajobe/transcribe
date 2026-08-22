@@ -13,11 +13,20 @@ final class OutputFormatTests: XCTestCase {
     }
 
     func testParseOutputFormatsExpandsAll() {
-        XCTAssertEqual(parseOutputFormats("all"), ["txt", "json", "srt", "vtt", "md"])
+        XCTAssertEqual(parseOutputFormats("all"), ["txt", "json", "srt", "vtt", "md", "tsv"])
     }
 
     func testParseOutputFormatsAcceptsMd() {
         XCTAssertEqual(parseOutputFormats("md"), ["md"])
         XCTAssertEqual(parseOutputFormats("txt,md"), ["txt", "md"])
+    }
+
+    func testParseOutputFormatsAcceptsTsv() {
+        XCTAssertEqual(parseOutputFormats("tsv"), ["tsv"])
+        XCTAssertEqual(parseOutputFormats("txt,tsv"), ["txt", "tsv"])
+    }
+
+    func testValidOutputFormatsContainsTsv() {
+        XCTAssertTrue(validOutputFormats.contains("tsv"))
     }
 }

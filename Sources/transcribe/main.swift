@@ -22,7 +22,7 @@ struct Transcribe: AsyncParsableCommand {
         discussion: """
             Transcribes an audio file using WhisperKit and optionally adds speaker \
             labels using SpeakerKit. All processing runs on-device on Apple Silicon. \
-            Output formats: txt, json, srt, vtt, md (use --format to select).
+            Output formats: txt, json, srt, vtt, md, tsv (use --format to select).
 
             Source commands:
               file <audio-file>

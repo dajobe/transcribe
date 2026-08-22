@@ -52,7 +52,7 @@ func checkOverwrite(
 
     guard !overwrite else { return }
     let dir = resolvedOutputDir(outputDir)
-    let extMap = ["txt": "txt", "json": "json", "srt": "srt", "vtt": "vtt", "md": "md"]
+    let extMap = ["txt": "txt", "json": "json", "srt": "srt", "vtt": "vtt", "md": "md", "tsv": "tsv"]
     for f in formats {
         guard let ext = extMap[f] else { continue }
         if f == "txt" && !writeTxtFile { continue }
@@ -73,7 +73,7 @@ func outputPaths(
     writeTxtFile: Bool
 ) -> [String] {
     let dir = resolvedOutputDir(outputDir)
-    let extMap = ["txt": "txt", "json": "json", "srt": "srt", "vtt": "vtt", "md": "md"]
+    let extMap = ["txt": "txt", "json": "json", "srt": "srt", "vtt": "vtt", "md": "md", "tsv": "tsv"]
     return formats.compactMap { format in
         guard let ext = extMap[format] else { return nil }
         if format == "txt" && !writeTxtFile { return nil }
@@ -577,6 +577,27 @@ func renderVTT(output: TranscriptionOutput) -> String {
     return lines.joined(separator: "\n")
 }
 
+// MARK: - TSV
+
+/// Matches whisperx's segment-level TSV: header line, integer milliseconds,
+/// three columns, and no speaker column. Milliseconds use ties-to-even
+/// rounding so exact half-millisecond values match Python's `round()`, which
+/// is what whisperx applies to the same values.
+func renderTSV(output: TranscriptionOutput) -> String {
+    var lines: [String] = ["start\tend\ttext"]
+    for seg in output.segments {
+        let start = Int((seg.start * 1000).rounded(.toNearestOrEven))
+        let end = Int((seg.end * 1000).rounded(.toNearestOrEven))
+        let text = seg.text
+            .replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        lines.append("\(start)\t\(end)\t\(text)")
+    }
+    return lines.joined(separator: "\n")
+}
+
 // MARK: - Write all outputs
 
 /// Writes requested output formats. Uses atomic writes.
@@ -638,6 +659,10 @@ func writeOutputs(
         case "vtt":
             let text = renderVTT(output: output)
             let path = (dir as NSString).appendingPathComponent("\(basename).vtt")
+            try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
+        case "tsv":
+            let text = renderTSV(output: output)
+            let path = (dir as NSString).appendingPathComponent("\(basename).tsv")
             try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
         case "md":
             let text = renderMarkdown(

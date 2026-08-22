@@ -32,24 +32,12 @@ download begins.
   directly: create manager, call `downloadModels(progressCallback:)`, then
   `SpeakerKit(models: manager.models!)`.
 
-## Add TSV output format
-
-WhisperX outputs a TSV format (tab-separated: start, end, text with times in
-milliseconds). Consider adding `tsv` as a supported `--format` option for
-compatibility with whisperx output. The format is simple:
-
-    start end text
-    229778 230399 Hi Dave.
-    230899 231139 Hi.
-
-This would make the supported formats: txt, json, srt, vtt, tsv.
-
 ## Security review (2026-03-22)
 
 Full review of all 31 Swift sources under `Sources/transcribe/`, 14 Swift test
 modules under `Tests/transcribeTests/`, configuration, and git history. No
-critical or high-severity issues found. Attack surface is narrow:
-local-only CLI with no network listeners, web interfaces, or databases.
+critical or high-severity issues found. Attack surface is narrow: local-only CLI
+with no network listeners, web interfaces, or databases.
 
 ### [FIXED] Path traversal via --output-prefix (Low)
 
@@ -96,20 +84,19 @@ enforces a configurable `--max-audio-mb` hard cap (default 2048; `0` disables).
 
 Voicebox "The open-source AI voice studio. Clone, dictate, create."
 
-https://github.com/jamiepine/voicebox
+<https://github.com/jamiepine/voicebox>
 
 ### Parakeet v3
 
-Parakeet MLX "An implementation of the Nvidia's Parakeet models for
-Apple Silicon using MLX."
+Parakeet MLX "An implementation of the Nvidia's Parakeet models for Apple
+Silicon using MLX."
 
-https://github.com/senstella/parakeet-mlx
-
+<https://github.com/senstella/parakeet-mlx>
 
 Parakeet.cpp "Ultra fast and portable Parakeet implementation for on-device
 inference in C++ using Axiom with MPS+Unified Memory"
 
-https://github.com/Frikallo/parakeet.cpp
+<https://github.com/Frikallo/parakeet.cpp>
 
 ### Qwen3-ASR
 

@@ -3,6 +3,141 @@ import XCTest
 @testable import transcribe
 
 final class OutputWriterTests: XCTestCase {
+    func testRenderTSVUsesIntegerMillisecondsAndHeader() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: nil, start: 229.778, end: 230.399, text: "Hi Dave.", words: nil),
+                TranscriptSegment(speaker: nil, start: 230.899, end: 231.139, text: "Hi.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 231.139,
+            diarizationEnabled: false
+        )
+
+        XCTAssertEqual(
+            renderTSV(output: output),
+            "start\tend\ttext\n229778\t230399\tHi Dave.\n230899\t231139\tHi."
+        )
+    }
+
+    func testRenderTSVOmitsSpeakerLabels() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: "SPEAKER_0", start: 1, end: 2, text: "Hello.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 2,
+            diarizationEnabled: true
+        )
+
+        XCTAssertEqual(renderTSV(output: output), "start\tend\ttext\n1000\t2000\tHello.")
+        XCTAssertFalse(renderTSV(output: output).contains("SPEAKER_0"))
+    }
+
+    func testRenderTSVSanitizesTabsAndNewlines() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(
+                    speaker: nil,
+                    start: 0,
+                    end: 1,
+                    text: "  Hello\tthere\nfriend\r  ",
+                    words: nil
+                ),
+            ],
+            language: "en",
+            durationSeconds: 1,
+            diarizationEnabled: false
+        )
+
+        XCTAssertEqual(renderTSV(output: output), "start\tend\ttext\n0\t1000\tHello there friend")
+    }
+
+    func testRenderTSVRoundsHalfMillisecondsToEven() {
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: nil, start: 0.0025, end: 0.0035, text: "Tie.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 0.0035,
+            diarizationEnabled: false
+        )
+
+        // Python's round() (used by whisperx) rounds halves to even:
+        // round(2.5) == 2 and round(3.5) == 4.
+        XCTAssertEqual(renderTSV(output: output), "start\tend\ttext\n2\t4\tTie.")
+    }
+
+    func testRenderTSVWithNoSegmentsEmitsHeaderOnly() {
+        let output = TranscriptionOutput(
+            segments: [],
+            language: "en",
+            durationSeconds: 0,
+            diarizationEnabled: false
+        )
+
+        XCTAssertEqual(renderTSV(output: output), "start\tend\ttext")
+    }
+
+    func testWriteOutputsTSVWithNoSegmentsWritesHeaderOnly() throws {
+        let tempDir = try makeTemporaryDirectory()
+        let output = TranscriptionOutput(
+            segments: [],
+            language: "en",
+            durationSeconds: 0,
+            diarizationEnabled: false
+        )
+
+        try writeOutputs(
+            output: output,
+            audioPath: "/tmp/meeting.wav",
+            outputDir: tempDir.path,
+            basename: "meeting",
+            formats: ["tsv"],
+            overwrite: false,
+            model: "large-v3",
+            version: "1.2.3"
+        )
+
+        let contents = try String(
+            contentsOf: tempDir.appendingPathComponent("meeting.tsv"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(contents, "start\tend\ttext\n")
+    }
+
+    func testOutputPathsIncludesTSV() {
+        let paths = outputPaths(
+            outputDir: "/tmp/out",
+            basename: "meeting",
+            formats: ["tsv"],
+            writeTxtFile: false
+        )
+
+        XCTAssertEqual(paths.map { ($0 as NSString).lastPathComponent }, ["meeting.tsv"])
+    }
+
+    func testCheckOverwriteFailsWhenTSVExists() throws {
+        let tempDir = try makeTemporaryDirectory()
+        let existingFile = tempDir.appendingPathComponent("meeting.tsv")
+        try Data("start\tend\ttext\n".utf8).write(to: existingFile)
+
+        XCTAssertThrowsError(
+            try checkOverwrite(
+                outputDir: tempDir.path,
+                basename: "meeting",
+                formats: ["tsv"],
+                writeTxtFile: false,
+                overwrite: false
+            )
+        ) { error in
+            guard let transcribeError = error as? TranscribeError else {
+                return XCTFail("Unexpected error type: \(error)")
+            }
+            XCTAssertEqual(transcribeError.exitCode, .outputWrite)
+        }
+    }
+
     func testRenderTxtWithoutSpeakerStillShowsTimeRanges() {
         let output = TranscriptionOutput(
             segments: [
@@ -219,6 +354,36 @@ final class OutputWriterTests: XCTestCase {
         let contents = try String(contentsOf: tempDir.appendingPathComponent("meeting.md"), encoding: .utf8)
         XCTAssertTrue(contents.hasSuffix("\n"))
         XCTAssertFalse(contents.hasSuffix("\n\n"))
+    }
+
+    func testWriteOutputsTSVEndsWithSingleTrailingNewlineAndHeader() throws {
+        let tempDir = try makeTemporaryDirectory()
+        let output = TranscriptionOutput(
+            segments: [
+                TranscriptSegment(speaker: nil, start: 0, end: 1, text: "Hello.", words: nil),
+            ],
+            language: "en",
+            durationSeconds: 1,
+            diarizationEnabled: false
+        )
+
+        try writeOutputs(
+            output: output,
+            audioPath: "/tmp/meeting.wav",
+            outputDir: tempDir.path,
+            basename: "meeting",
+            formats: ["tsv"],
+            overwrite: false,
+            model: "large-v3",
+            version: "1.2.3"
+        )
+
+        let outputURL = tempDir.appendingPathComponent("meeting.tsv")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+        let contents = try String(contentsOf: outputURL, encoding: .utf8)
+        XCTAssertTrue(contents.hasSuffix("\n"))
+        XCTAssertFalse(contents.hasSuffix("\n\n"))
+        XCTAssertEqual(contents.components(separatedBy: "\n").first, "start\tend\ttext")
     }
 
     func testWriteAtomicallyReplacesExistingFileContents() throws {

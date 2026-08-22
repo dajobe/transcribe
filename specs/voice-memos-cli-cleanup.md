@@ -226,8 +226,8 @@ Output metadata for Voice Memos:
 - `recording_title`
 - `voice_memos_unique_id`
 - `voice_memos_path`
-- nested `voice_memos` metadata with session title, recording count, and
-  curated per-recording fields
+- nested `voice_memos` metadata with session title, recording count, and curated
+  per-recording fields
 
 If macOS denies the recordings directory or database, report that Full Disk
 Access may be required.
@@ -257,8 +257,8 @@ output directory, following the same overwrite rules as other output formats.
 
 Markdown structure:
 
-- Frontmatter: YAML metadata with the same structured source metadata exposed
-  by JSON.
+- Frontmatter: YAML metadata with the same structured source metadata exposed by
+  JSON.
 - Title: a single `#` heading derived from the input basename, with `#`
   characters stripped. If nothing remains, use `# Transcript`.
 - Metadata: a `## Metadata` section with source filename, duration, model,
@@ -271,7 +271,7 @@ Markdown structure:
 The Markdown transcript body follows the same merge and time-range logic as the
 plain `txt` format. Markdown is always written to a file when requested.
 
-`--format all` expands to `txt`, `json`, `srt`, `vtt`, and `md`.
+`--format all` expands to `txt`, `json`, `srt`, `vtt`, `md`, and `tsv`.
 
 ## Folder Action Automation
 
@@ -308,9 +308,9 @@ Behavior:
   child (legacy: `TRANSCRIBE_TIMING_STATS=0`).
 - If `TRANSCRIBE_LOCK_FILE` is set and `flock` exists, serialize runs under that
   lock.
-- If `TRANSCRIBE_LOG` is set, append text event lines with UTC timestamps,
-  child exit code, duration, and skip/failure reason. Non-zero `transcribe`
-  runs include mapped exit-code meaning and a `stderr_summary` field.
+- If `TRANSCRIBE_LOG` is set, append text event lines with UTC timestamps, child
+  exit code, duration, and skip/failure reason. Non-zero `transcribe` runs
+  include mapped exit-code meaning and a `stderr_summary` field.
 
 The constructed command shape is:
 

@@ -1,11 +1,11 @@
 import Foundation
 
-let validOutputFormats: Set<String> = ["txt", "json", "srt", "vtt", "md"]
+let validOutputFormats: Set<String> = ["txt", "json", "srt", "vtt", "md", "tsv"]
 
 func parseOutputFormats(_ format: String) -> [String] {
     let trimmed = format.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed == "all" {
-        return ["txt", "json", "srt", "vtt", "md"]
+        return ["txt", "json", "srt", "vtt", "md", "tsv"]
     }
 
     var seen: Set<String> = []
