@@ -1,35 +1,38 @@
 # Voice Memos: Read `CloudRecordings.db` Without Shelling Out
 
+Status: implemented in this branch; retained as the design/spec record.
+
 ## Goal
 
-Replace the `Process`-based `/usr/bin/sqlite3` calls in
+The shipped implementation replaced the `Process`-based `/usr/bin/sqlite3` calls
+in
 [`Sources/transcribe/VoiceMemosImport.swift`](../Sources/transcribe/VoiceMemosImport.swift)
-with **in-process, read-only** SQLite access. Keep behavior, schema-tolerance,
-and error reporting identical so existing tests and the
+with **in-process, read-only** SQLite access. It keeps behavior,
+schema-tolerance, and error reporting compatible so existing tests and the
 [voice-memos-cli-cleanup.md](voice-memos-cli-cleanup.md) contract still hold.
 
-This spec documents the design and trade-offs only; the code change is a
-follow-up.
+This spec records the shipped design, implementation, and trade-offs.
 
-## Current state
+## Baseline (before this change)
 
-[`VoiceMemosImport.swift`](../Sources/transcribe/VoiceMemosImport.swift) issues
+Before this change,
+[`VoiceMemosImport.swift`](../Sources/transcribe/VoiceMemosImport.swift) issued
 two queries by spawning the system `sqlite3` binary:
 
-- `runSQLiteQuery` (lines 170-202) runs `/usr/bin/sqlite3 -init /dev/null
-  -readonly -batch -list -separator <US> ...` and parses stdout split by `\n`
+- The historical `runSQLiteQuery` helper ran `/usr/bin/sqlite3 -init /dev/null
+  -readonly -batch -list -separator <US> ...` and parsed stdout split by `\n`
   and `\u{1f}`.
-- `loadColumnNames` (lines 204-210) reuses the same path with `PRAGMA
+- The historical `loadColumnNames` helper reused the same path with `PRAGMA
   table_info(ZCLOUDRECORDING)`.
 
 Consequences:
 
-- Each call is a **fork+exec** of `/usr/bin/sqlite3`.
-- Every value crosses a **text boundary**, so blobs (`ZAUDIODIGEST`) need a SQL
-  `hex(...)` wrapper, and `NULL`s are smuggled through `IFNULL(..., '')` empty
-  strings that the Swift side later disambiguates with `nilIfEmpty`.
-- Errors arrive as a stderr string; the helper attaches a Full Disk Access hint
-  and re-raises a [`TranscribeError`](../Sources/transcribe/Errors.swift).
+- Each call was a **fork+exec** of `/usr/bin/sqlite3`.
+- Every value crossed a **text boundary**, so blobs (`ZAUDIODIGEST`) needed a
+  SQL `hex(...)` wrapper, and `NULL`s were smuggled through `IFNULL(..., '')`
+  empty strings that the Swift side later disambiguated with `nilIfEmpty`.
+- Errors arrived as a stderr string; the helper attached a Full Disk Access hint
+  and re-raised a [`TranscribeError`](../Sources/transcribe/Errors.swift).
 
 ## Options
 
@@ -64,16 +67,15 @@ Mechanics:
 
 #### Cons
 
-- The C API is verbose; we need a small Swift wrapper (a `Database` /
-  `Statement` pair) to keep call sites readable. Estimate ~80-120 lines added in
-  a new file
-  ([`Sources/transcribe/SQLiteReader.swift`](../Sources/transcribe/SQLiteReader.swift)
-  if reused later, otherwise file-private inside `VoiceMemosImport.swift`).
-- Manual lifecycle: every prepared statement needs `sqlite3_finalize` and the
-  connection needs `sqlite3_close_v2`, both via `defer`.
+- The C API is verbose; the implementation uses a small Swift wrapper
+  (`ReadOnlyDatabase` / `Statement`) to keep call sites readable in
+  [`Sources/transcribe/SQLiteReader.swift`](../Sources/transcribe/SQLiteReader.swift).
+- Manual lifecycle: every prepared statement is finalized and the connection is
+  closed through the wrapper lifecycle (`defer` for statements, `deinit` for the
+  connection).
 - `SQLITE_TRANSIENT` discipline applies to any **bound** text. We don't bind
   user input today; if that changes the rule must be documented.
-- Slightly more code than the current shell-out, but with simpler runtime
+- Slightly more code than the shell-out it replaced, but with simpler runtime
   behavior.
 
 ### Option B: add a Swift SQLite wrapper as a SwiftPM dependency
@@ -116,60 +118,60 @@ Leave `Process` in place; centralize separator/encoding handling in one helper.
 null handling, costs no new dependencies, and keeps read-only enforcement at the
 SQLite open flag.
 
-## Implementation sketch (follow-up change)
+## Implementation (as shipped)
 
-1. Introduce a tiny internal helper, either file-private inside
-   [`VoiceMemosImport.swift`](../Sources/transcribe/VoiceMemosImport.swift) or a
-   new `Sources/transcribe/SQLiteReader.swift` if reused later:
-    - `final class ReadOnlyDatabase` whose `init(path:) throws` calls
+1. [`Sources/transcribe/SQLiteReader.swift`](../Sources/transcribe/SQLiteReader.swift)
+   defines the tiny internal helper:
+    - `final class ReadOnlyDatabase` has an `init(path:) throws` that calls
       `sqlite3_open_v2(..., SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)`
       and closes via `sqlite3_close_v2` on `deinit`.
     - `func query<T>(_ sql: String, map: (Statement) throws -> T) throws -> [T]`
-      that prepares, steps, finalizes, and re-throws a `TranscribeError` on
-      failure.
-    - A small `Statement` value type exposing typed accessors:
-      `int(_:)`, `double(_:)`, `text(_:)`, `blob(_:)`, `isNull(_:)`,
-      `columnCount`, and `columnName(_:)`.
-2. Replace `runSQLiteQuery` and `loadColumnNames` in
-   [`VoiceMemosImport.swift`](../Sources/transcribe/VoiceMemosImport.swift):
+      prepares, steps, finalizes, and re-throws a `TranscribeError` on failure.
+    - `Statement` is a small value type exposing typed accessors: `int(_:)`,
+      `double(_:)`, `text(_:)`, `blob(_:)`, `isNull(_:)`, `columnCount`, and
+      `columnName(_:)`.
+2. `VoiceMemosImport.swift` uses `ReadOnlyDatabase` for both the main query and
+   `loadColumnNames`:
     - `loadColumnNames` runs `PRAGMA table_info(ZCLOUDRECORDING)` and collects
       the `name` column into a `Set<String>`.
-    - The main query drops every `IFNULL(..., '')` wrapper in favor of
-      Swift-side `isNull` checks. It drops `hex(ZAUDIODIGEST)`; the blob is
-      hex-encoded in Swift to populate `audioDigestHex`.
-3. Map SQLite errors to existing
+    - The main query has no `IFNULL(..., '')` wrappers or `hex(ZAUDIODIGEST)`
+      expression. Typed optional accessors, backed by `Statement.isNull`, keep
+      nulls distinct, and the blob is hex-encoded in Swift to populate
+      `audioDigestHex`.
+3. SQLite open and query failures map to existing
    [`TranscribeError`](../Sources/transcribe/Errors.swift) values with the same
-   wording (Full Disk Access hint preserved). Distinguish "file does not exist"
-   (already handled before opening) from "cannot open / authorization denied"
-   (`SQLITE_CANTOPEN`, `SQLITE_AUTH`).
-4. Keep all public API of `VoiceMemosImport` unchanged. Behavior must match for
-   both the happy path and the missing-required-column / missing-audio-file
-   branches that the existing tests exercise.
-5. In the test target, add `SQLiteTestHelpers.executeScript(at:_:)` that opens
-   the fixture file with `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE` and runs
-   multi-statement SQL via `sqlite3_exec`, then route both fixture helpers
-   (`VoiceMemosImportTests.sqlite(_:_:)` and `CLITests.createVoiceMemosDB(...)`)
-   through it. Drop the `XCTSkipIf` guards on `/usr/bin/sqlite3` since nothing
-   in the suite needs the CLI.
+   wording and preserve the Full Disk Access hint. The file existence check
+   remains before opening; `SQLITE_CANTOPEN` and `SQLITE_AUTH` both use the same
+   generic cannot-open error path rather than separate messages.
+4. The public API of `VoiceMemosImport` remains unchanged, including the happy
+   path and the missing-required-column / missing-audio-file branches exercised
+   by the existing tests.
+5. The test target added `SQLiteTestHelpers.executeScript(at:_:)`, which opens
+   fixture files with `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+   SQLITE_OPEN_NOMUTEX` and runs multi-statement SQL via `sqlite3_exec`. Both
+   fixture helpers (`VoiceMemosImportTests.sqlite(_:_:)` and
+   `CLITests.createVoiceMemosDB(...)`) use it, and the `XCTSkipIf` guards on
+   `/usr/bin/sqlite3` were removed because the suite no longer needs the CLI.
 
 ## Test impact
 
-Test fixtures are also moved off the `/usr/bin/sqlite3` subprocess so the suite
+Test fixtures were also moved off the `/usr/bin/sqlite3` subprocess so the suite
 has zero dependency on the system CLI:
 
-- New file
+- The added file
   [`Tests/transcribeTests/SQLiteTestHelpers.swift`](../Tests/transcribeTests/SQLiteTestHelpers.swift)
   exposes `SQLiteTestHelpers.executeScript(at:_:)`, which opens with
-  `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE` and runs multi-statement SQL via
-  `sqlite3_exec`. This helper is **test-only**; production stays read-only.
+  `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX` and runs
+  multi-statement SQL via `sqlite3_exec`. This helper is **test-only**;
+  production stays read-only.
 - The fixture helpers in
   [`Tests/transcribeTests/VoiceMemosImportTests.swift`](../Tests/transcribeTests/VoiceMemosImportTests.swift)
   and
   [`Tests/transcribeTests/CLITests.swift`](../Tests/transcribeTests/CLITests.swift)
   delegate to `SQLiteTestHelpers.executeScript` instead of spawning
   `/usr/bin/sqlite3`.
-- All `XCTSkipIf(!isExecutableFile("/usr/bin/sqlite3"))` guards are removed (7
-  in `VoiceMemosImportTests`, 2 in `CLITests`).
+- All `XCTSkipIf(!isExecutableFile("/usr/bin/sqlite3"))` guards were removed;
+  neither test file requires the CLI.
 - New tests exercise blob retrieval through the new code path:
   `testAudioDigestBlobIsHexEncodedInSwift` (writes `x'DEADBEEF'`, expects
   `"DEADBEEF"`) and `testAudioDigestNullBlobYieldsNil`.
