@@ -128,6 +128,19 @@ quits after applying the decisions already made. With piped or redirected
 output, review keeps its read-only table; `--interactive` and `--no-interactive`
 force the mode.
 
+To grow the speaker recognizer from recordings that were already transcribed and
+hand-edited, re-run them with `--no-outputs`: the full pipeline runs and the
+canonical transcript (with voice embeddings) is saved, but no output files are
+written and processing history is untouched, so edited transcripts stay as they
+are and future normal runs are unaffected. Re-running the same audio replaces
+its canonical document rather than duplicating it, and cannot inflate a
+speaker's independent-example count.
+
+```bash
+transcribe --no-outputs dir ~/old-recordings/
+transcribe speakers review
+```
+
 The scripted commands remain for specific corrections:
 
 ```bash

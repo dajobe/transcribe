@@ -273,7 +273,7 @@ struct PipelineRunner {
             for (idx, plan) in sessionPlans.enumerated() {
                 let fingerprint = try ProcessingStore.fingerprint(files: plan.session.files)
                 let decision = try ProcessingStore.importedBaselineDecision(sourceID: plan.sourceID, fingerprint: fingerprint)
-                if decision.shouldSkip {
+                if decision.shouldSkip && !options.noOutputs {
                     let item = PipelineWorkItem(
                         plan: plan,
                         sessionIndex: idx,
@@ -332,7 +332,9 @@ struct PipelineRunner {
         var skippedItems: [PipelineWorkItem] = []
         for (idx, plan) in sessionPlans.enumerated() {
             let fingerprint = try ProcessingStore.fingerprint(files: plan.session.files)
-            let paths = outputPaths(
+            // No output file is planned under --no-outputs, so nothing downstream
+            // (events, progress lines, dry-run listings) may name one.
+            let paths = options.noOutputs ? [] : outputPaths(
                 outputDir: options.outputDir,
                 basename: plan.basename,
                 formats: options.resolvedFormats,
@@ -402,7 +404,7 @@ struct PipelineRunner {
                 contextLines: progressContextLines(
                     item: workItems[0],
                     model: resolvedModel,
-                    outputDir: resolvedOutputDir(options.outputDir)
+                    outputDir: options.noOutputs ? nil : resolvedOutputDir(options.outputDir)
                 ),
                 audioDurationSeconds: estimatedAudioDurationSeconds(for: workItems[0].plan) ?? 0,
                 historicalRatios: historicalRatios,
@@ -430,14 +432,16 @@ struct PipelineRunner {
 
         emitModelSelection(model: resolvedModel, source: modelSelectionSource, reporter: activeReporter)
 
-        for item in workItems {
-            try checkOverwrite(
-                outputDir: options.outputDir,
-                basename: item.plan.basename,
-                formats: options.resolvedFormats,
-                writeTxtFile: options.wantsTxt,
-                overwrite: options.overwrite
-            )
+        if !options.noOutputs {
+            for item in workItems {
+                try checkOverwrite(
+                    outputDir: options.outputDir,
+                    basename: item.plan.basename,
+                    formats: options.resolvedFormats,
+                    writeTxtFile: options.wantsTxt,
+                    overwrite: options.overwrite
+                )
+            }
         }
         sharedLiveDisplay?.beginAudioChecking()
         let inputCheckStart = Date()
@@ -485,6 +489,9 @@ struct PipelineRunner {
         )
 
         let resolvedDir = resolvedOutputDir(options.outputDir)
+        // Nothing lands in the output directory under --no-outputs, so events
+        // must not report one.
+        let eventOutputDir: String? = options.noOutputs ? nil : resolvedDir
 
         for (processedIndex, item) in workItems.enumerated() {
             let plan = item.plan
@@ -495,7 +502,7 @@ struct PipelineRunner {
                 "session_start",
                 fields: sessionFields(
                     item: item,
-                    outputDir: resolvedDir
+                    outputDir: eventOutputDir
                 ),
                 message: "session started"
             )
@@ -527,7 +534,7 @@ struct PipelineRunner {
                 "phase_done",
                 fields: sessionFields(
                     item: item,
-                    outputDir: resolvedDir,
+                    outputDir: eventOutputDir,
                     extra: [
                         TranscribeEventField("phase", .string("audio")),
                         TranscribeEventField("elapsed_s", .double(Double(loadMs) / 1000.0)),
@@ -553,7 +560,7 @@ struct PipelineRunner {
                 liveProgressContextLines: progressContextLines(
                     item: item,
                     model: resolvedModel,
-                    outputDir: resolvedDir
+                    outputDir: eventOutputDir
                 ),
                 liveProgressDisplay: sharedLiveDisplay,
                 logger: logger
@@ -561,7 +568,7 @@ struct PipelineRunner {
             emitProcessingPhaseEvents(
                 phases: sessionPhases,
                 item: item,
-                outputDir: resolvedDir,
+                outputDir: eventOutputDir,
                 reporter: activeReporter
             )
 
@@ -571,8 +578,12 @@ struct PipelineRunner {
                 emitWarning(warning)
             }
 
-            let outputFiles = options.resolvedFormats.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
-            logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
+            if options.noOutputs {
+                logger.log("Skipping output files for \(basename) (--no-outputs); saving canonical transcript only")
+            } else {
+                let outputFiles = options.resolvedFormats.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
+                logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
+            }
 
             if let canonical = try prepareCanonicalTranscript(
                 stateless: options.stateless,
@@ -587,9 +598,11 @@ struct PipelineRunner {
                 for warning in canonical.output.warnings where !out.warnings.contains(warning) {
                     emitWarning(warning)
                 }
-                // Persisting the reusable transcript is best effort: a state directory
-                // write failure or a strict validation rejection must never discard a
-                // finished transcription or abort the remaining batch work.
+                // Persisting the reusable transcript is best effort on a normal run:
+                // a state directory write failure or a strict validation rejection
+                // must never discard a finished transcription or abort the remaining
+                // batch work. Under --no-outputs the canonical transcript is the only
+                // product of the run, so the same failure is fatal instead.
                 do {
                     let canonicalURL = try CanonicalTranscriptStore.save(canonical)
                     out = canonical.renderedOutput()
@@ -599,7 +612,7 @@ struct PipelineRunner {
                         "canonical_saved",
                         fields: sessionFields(
                             item: item,
-                            outputDir: resolvedDir,
+                            outputDir: eventOutputDir,
                             extra: [
                                 TranscribeEventField("path", .string(canonicalURL.path)),
                                 TranscribeEventField("suggested_matches", .int(suggested)),
@@ -609,41 +622,65 @@ struct PipelineRunner {
                         message: "canonical transcript saved"
                     )
                 } catch {
+                    if options.noOutputs {
+                        throw TranscribeError(
+                            message: "Canonical transcript not saved for \(basename): \(error.localizedDescription). --no-outputs writes no transcript files, so this run produced nothing.",
+                            exitCode: .outputWrite
+                        )
+                    }
                     emitWarning("Canonical transcript not saved: \(error.localizedDescription). Transcript outputs are still written and local speaker labels were retained.")
                 }
             }
 
-            sharedLiveDisplay?.beginOutput()
-            let (_, writeMs) = try WallClock.measureMs {
-                try writeOutputs(
-                    output: out,
-                    audioPath: plan.audioPathForOutput,
-                    audioFiles: plan.audioFilesForOutput,
-                    sourceMetadata: plan.sourceMetadata,
-                    outputDir: options.outputDir,
-                    basename: basename,
-                    formats: options.resolvedFormats,
-                    overwrite: options.overwrite,
-                    model: resolvedModel,
-                    version: Transcribe.version
+            let writeMs: Int64
+            if options.noOutputs {
+                writeMs = 0
+                activeReporter?.info(
+                    "phase_done",
+                    fields: sessionFields(
+                        item: item,
+                        outputDir: eventOutputDir,
+                        extra: [
+                            TranscribeEventField("phase", .string("output")),
+                            TranscribeEventField("elapsed_s", .double(0)),
+                        ]
+                    ),
+                    message: "outputs skipped (--no-outputs)"
+                )
+            } else {
+                sharedLiveDisplay?.beginOutput()
+                let (_, elapsedMs) = try WallClock.measureMs {
+                    try writeOutputs(
+                        output: out,
+                        audioPath: plan.audioPathForOutput,
+                        audioFiles: plan.audioFilesForOutput,
+                        sourceMetadata: plan.sourceMetadata,
+                        outputDir: options.outputDir,
+                        basename: basename,
+                        formats: options.resolvedFormats,
+                        overwrite: options.overwrite,
+                        model: resolvedModel,
+                        version: Transcribe.version
+                    )
+                }
+                sharedLiveDisplay?.finishOutput()
+                writeMs = elapsedMs
+                activeReporter?.info(
+                    "phase_done",
+                    fields: sessionFields(
+                        item: item,
+                        outputDir: eventOutputDir,
+                        extra: [
+                            TranscribeEventField("phase", .string("output")),
+                            TranscribeEventField("elapsed_s", .double(Double(elapsedMs) / 1000.0)),
+                        ]
+                    ),
+                    message: "outputs written"
                 )
             }
-            sharedLiveDisplay?.finishOutput()
-            activeReporter?.info(
-                "phase_done",
-                fields: sessionFields(
-                    item: item,
-                    outputDir: resolvedDir,
-                    extra: [
-                        TranscribeEventField("phase", .string("output")),
-                        TranscribeEventField("elapsed_s", .double(Double(writeMs) / 1000.0)),
-                    ]
-                ),
-                message: "outputs written"
-            )
             _ = sharedLiveDisplay?.finish()
 
-            if !options.stateless {
+            if recordsProcessingHistory {
                 try ProcessingStore.append(ProcessingRecord(
                     completed_at: iso8601String(Date()),
                     history_reason: item.historyReason,
@@ -697,7 +734,7 @@ struct PipelineRunner {
                 "session_done",
                 fields: sessionFields(
                     item: item,
-                    outputDir: resolvedDir,
+                    outputDir: eventOutputDir,
                     extra: [
                         TranscribeEventField("elapsed_s", .double(Date().timeIntervalSince(sessionStartDate))),
                         TranscribeEventField("audio_duration_s", .double(out.durationSeconds)),
@@ -797,7 +834,12 @@ struct PipelineRunner {
         }
     }
 
-    private func processingDecision(
+    /// True when this run may append to the processing-history ledger.
+    var recordsProcessingHistory: Bool {
+        !options.stateless && !options.noOutputs
+    }
+
+    func processingDecision(
         plan: PipelineSessionPlan,
         fingerprint: SourceFingerprint,
         settings: ProcessingSettingsSignature,
@@ -805,6 +847,11 @@ struct PipelineRunner {
     ) throws -> ProcessingDecision {
         if options.stateless {
             return ProcessingDecision(action: .process, reason: .firstRun)
+        }
+        // --no-outputs re-runs already-processed audio to collect speaker
+        // evidence, so history must not skip it and --redo must not be needed.
+        if options.noOutputs {
+            return ProcessingDecision(action: .process, reason: .redo)
         }
         if options.redo {
             return ProcessingDecision(action: .process, reason: .redo)
@@ -866,6 +913,7 @@ struct PipelineRunner {
     private func markPlannedInputsImported(workItems: [PipelineWorkItem], reporter: TranscribeEventReporter?) throws {
         var marked = 0
         for item in workItems {
+            guard recordsProcessingHistory else { continue }
             let plan = item.plan
             // Tag Voice Memos imports with their own baseline kind so the
             // history command (and any future tooling) can tell them apart
@@ -912,7 +960,7 @@ struct PipelineRunner {
     }
 
     private func appendSkipRecords(workItems: [PipelineWorkItem], settings: ProcessingSettingsSignature?) throws {
-        guard !options.stateless else { return }
+        guard recordsProcessingHistory else { return }
         for item in workItems where item.recordsSkipHistory {
             let plan = item.plan
             let outputDir = item.outputPaths.isEmpty ? nil : resolvedOutputDir(options.outputDir)
@@ -953,7 +1001,7 @@ struct PipelineRunner {
     private func emitProcessingPhaseEvents(
         phases: PhaseTimings,
         item: PipelineWorkItem,
-        outputDir: String,
+        outputDir: String?,
         reporter: TranscribeEventReporter?
     ) {
         let encodingMs = phases.whisperAudioProcessingMs
@@ -989,7 +1037,7 @@ struct PipelineRunner {
         _ phase: String,
         milliseconds: Int64,
         item: PipelineWorkItem,
-        outputDir: String,
+        outputDir: String?,
         reporter: TranscribeEventReporter?,
         message: String
     ) {
@@ -1034,15 +1082,21 @@ struct PipelineRunner {
     private func progressContextLines(
         item: PipelineWorkItem,
         model: String,
-        outputDir: String
+        outputDir: String?
     ) -> [String] {
         let inputNames = item.plan.session.files.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
         let outputNames = item.outputPaths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+        let outputLine: String
+        if let outputDir {
+            outputLine = "Output: \(item.plan.basename) (\(options.resolvedFormats.joined(separator: ","))) -> \(outputDir)"
+                + (outputNames.isEmpty ? "" : " [\(outputNames)]")
+        } else {
+            outputLine = "Output: none (--no-outputs); canonical transcript only"
+        }
         return [
             "Session: \(item.sessionIndex + 1)/\(max(item.sessionTotal, 1))",
             "Input: \(inputNames)",
-            "Output: \(item.plan.basename) (\(options.resolvedFormats.joined(separator: ","))) -> \(outputDir)"
-                + (outputNames.isEmpty ? "" : " [\(outputNames)]"),
+            outputLine,
             "Model: \(model)",
         ]
     }
@@ -1072,7 +1126,8 @@ struct PipelineRunner {
     private func dryRunLine(status: String, item: PipelineWorkItem) -> String {
         let source = item.plan.sourceMetadata?.source ?? item.plan.sourceKind.rawValue
         let files = item.plan.session.files.map { ($0 as NSString).lastPathComponent }.joined(separator: ",")
-        let outputs = item.outputPaths.map { ($0 as NSString).lastPathComponent }.joined(separator: ",")
+        let names = item.outputPaths.map { ($0 as NSString).lastPathComponent }.joined(separator: ",")
+        let outputs = names.isEmpty ? "none" : names
         return "\(status)\t\(source)\t\(item.plan.basename)\tfiles=\(files)\toutputs=\(outputs)"
     }
 }

@@ -33,6 +33,7 @@ struct ResolvedSharedOptions {
     let overwrite: Bool
     let redo: Bool
     let stateless: Bool
+    let noOutputs: Bool
     let markImported: Bool
     let dryRun: Bool
     let maxAudioMB: Int
@@ -89,6 +90,23 @@ enum ConfigMerge {
 
     static func mergeShared(cli: SharedTranscriptionOptions, file: UserConfigFile) throws -> ResolvedSharedOptions {
         try cli.validateTriStatePairs()
+        // The canonical transcript is the entire product of a --no-outputs run,
+        // and --stateless is what disables canonical persistence, so the pair
+        // would run inference and produce nothing at all.
+        if cli.noOutputs && cli.stateless {
+            throw TranscribeError(
+                message: "--no-outputs cannot be combined with --stateless: --no-outputs saves only the canonical transcript, which --stateless disables, so the run would produce nothing.",
+                exitCode: .invalidUsage
+            )
+        }
+        // --mark-imported only writes processing history, which --no-outputs
+        // never records, so the pair would silently do nothing.
+        if cli.noOutputs && cli.markImported {
+            throw TranscribeError(
+                message: "--no-outputs cannot be combined with --mark-imported: --mark-imported only records processing history, which --no-outputs never writes.",
+                exitCode: .invalidUsage
+            )
+        }
 
         let (model, modelSource): (String, ConfigModelSource) = {
             if let m = cli.model { return (m, .cli) }
@@ -168,6 +186,7 @@ enum ConfigMerge {
             overwrite: cli.overwrite,
             redo: cli.redo,
             stateless: cli.stateless,
+            noOutputs: cli.noOutputs,
             markImported: cli.markImported,
             dryRun: cli.dryRun,
             maxAudioMB: maxAudioMB

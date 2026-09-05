@@ -160,9 +160,12 @@ struct SourceCommandDispatcher {
             return
         }
         let source = try parse(FileSourceArguments.self, args)
-        try SourcePlanner.validateFilePath(source.audioFile)
+        // Merge (and its usage validation) runs before the input check so
+        // contradictory global options are reported as usage errors rather than
+        // being masked by a missing input path.
         let userFile = try ConfigMerge.loadUserFile()
         let merged = try ConfigMerge.mergeShared(cli: options, file: userFile)
+        try SourcePlanner.validateFilePath(source.audioFile)
         try await PipelineRunner(
             request: .file(path: source.audioFile),
             options: merged
@@ -175,10 +178,10 @@ struct SourceCommandDispatcher {
             return
         }
         let source = try parse(DirSourceArguments.self, args)
-        try SourcePlanner.validateDirectoryPath(source.directory)
         let userFile = try ConfigMerge.loadUserFile()
         let mergedShared = try ConfigMerge.mergeShared(cli: options, file: userFile)
         let mergedDir = try ConfigMerge.mergeDirectory(cli: source.options, file: userFile)
+        try SourcePlanner.validateDirectoryPath(source.directory)
         try await PipelineRunner(
             request: .directory(path: source.directory, options: mergedDir),
             options: mergedShared
@@ -221,9 +224,9 @@ struct SourceCommandDispatcher {
             )
         }
 
-        let mode = try SourcePlanner.modeForAliasPath(path)
         let userFile = try ConfigMerge.loadUserFile()
         let mergedShared = try ConfigMerge.mergeShared(cli: options, file: userFile)
+        let mode = try SourcePlanner.modeForAliasPath(path)
         let request: PipelineRequest
         switch mode {
         case .file:
@@ -394,6 +397,16 @@ struct SharedTranscriptionOptions: ParsableArguments {
 
     @Flag(name: .long, help: "Do not read or write processing history (fully non-idempotent)")
     var stateless: Bool = false
+
+    @Flag(
+        name: .long,
+        help: """
+            Transcribe and save the reusable canonical transcript (for `speakers review` enrollment) without \
+            writing output files or recording processing history. Already-processed inputs are reprocessed \
+            without --redo, and existing transcript files are left untouched.
+            """
+    )
+    var noOutputs: Bool = false
 
     @Flag(
         name: .long,

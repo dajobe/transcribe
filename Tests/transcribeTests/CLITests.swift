@@ -1278,6 +1278,79 @@ final class CLITests: XCTestCase {
         try body()
     }
 
+    func testNoOutputsListedInRootHelp() throws {
+        let result = try runCommand(["--help"])
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        XCTAssertTrue(result.stdout.contains("--no-outputs"), "root help should list --no-outputs; stdout: \(result.stdout)")
+    }
+
+    func testNoOutputsWithStatelessExitsTwoBeforeInputCheck() throws {
+        let result = try runCommand(["--stateless", "--no-outputs", "file", "whatever.m4a"])
+
+        XCTAssertEqual(result.status, 2, "stdout: \(result.stdout), stderr: \(result.stderr)")
+        XCTAssertTrue(
+            result.stderr.contains("--no-outputs cannot be combined with --stateless"),
+            "stderr: \(result.stderr)"
+        )
+        XCTAssertFalse(result.stderr.contains("does not exist"), "stderr: \(result.stderr)")
+    }
+
+    func testNoOutputsAcceptedForNormalInput() throws {
+        let result = try runCommand(["--no-outputs", "--transcript-only", "/nonexistent/path"])
+        XCTAssertEqual(result.status, 3, "flag should parse; exit 3 comes from the missing input. stderr: \(result.stderr)")
+    }
+
+    /// --no-outputs re-runs already-completed audio without --redo, and records
+    /// nothing, so the state store is left exactly as the previous run left it.
+    func testNoOutputsBypassesCompletedHistoryAndRecordsNothing() throws {
+        let fixture = try makeSkippedFileFixture()
+        let plan = SourcePlanner.filePlan(path: fixture.audio.path, outputPrefix: nil)[0]
+        let fingerprint = try ProcessingStore.fingerprint(files: [fixture.audio.path])
+        let settings = ProcessingSettingsSignature(
+            model: Transcribe.defaultModel,
+            language: nil,
+            diarization_enabled: false,
+            speaker_strategy: TranscriptionDefaults.speakerMerge,
+            min_speakers: nil,
+            max_speakers: nil,
+            formats: ["txt"],
+            transcribe_version: Transcribe.version
+        )
+        let outputPaths = [fixture.output.appendingPathComponent("clip.txt").path]
+
+        func runner(_ args: [String]) throws -> PipelineRunner {
+            PipelineRunner(
+                request: .file(path: fixture.audio.path),
+                options: try ConfigMerge.mergeShared(
+                    cli: try SharedTranscriptionOptions.parse(args + ["--transcript-only", "--format", "txt"]),
+                    file: UserConfigFile()
+                )
+            )
+        }
+
+        try withXDGStateHome(fixture.state.path) {
+            let normal = try runner([]).processingDecision(
+                plan: plan,
+                fingerprint: fingerprint,
+                settings: settings,
+                outputPaths: outputPaths
+            )
+            XCTAssertTrue(normal.shouldSkip, "baseline run should skip the completed input")
+
+            let bypassed = try runner(["--no-outputs"]).processingDecision(
+                plan: plan,
+                fingerprint: fingerprint,
+                settings: settings,
+                outputPaths: outputPaths
+            )
+            XCTAssertFalse(bypassed.shouldSkip, "--no-outputs should reprocess without --redo")
+        }
+
+        XCTAssertTrue(try runner([]).recordsProcessingHistory)
+        XCTAssertFalse(try runner(["--no-outputs"]).recordsProcessingHistory)
+        XCTAssertFalse(try runner(["--stateless"]).recordsProcessingHistory)
+    }
+
     func testNegativeMaxSpeakersExitTwo() throws {
         let file = try makeTempAudioFile()
         let process = Process()

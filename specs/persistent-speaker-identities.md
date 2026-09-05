@@ -211,6 +211,24 @@ have no canonical artifact until explicitly rerun with the existing redo and
 overwrite options. New format selection during an ordinary transcription is not
 yet an automatic canonical-cache lookup: use `export` for guaranteed reuse.
 
+## Enrollment runs (--no-outputs)
+
+`--no-outputs` reruns existing audio purely to grow the speaker recognizer: the
+full pipeline runs and the canonical transcript is saved, but no output files
+are written, so previously edited transcripts are never touched. Such a run
+neither consults nor appends processing history — it processes inputs that
+history would skip (no `--redo` needed) and leaves no record that could make a
+later normal run skip as a duplicate, including the Voice Memos imported
+baseline. Because the canonical document is the run's entire product, a
+canonical save failure is an error for `--no-outputs`, not the warning ordinary
+runs degrade to. `--stateless --no-outputs` is rejected as contradictory.
+
+Managed-store saves deduplicate by `evidenceID`: re-saving the same source
+replaces the existing canonical document in place, carrying forward confirmed
+speaker assignments for speakers the new run still detects. Rerunning the same
+audio therefore cannot duplicate `transcripts` listings, and — since evidence is
+keyed by source hash — cannot inflate a speaker's independent-example count.
+
 ## Verification and acceptance
 
 - Synthetic vector tests cover suggestions, independent strong matches,

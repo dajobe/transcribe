@@ -76,6 +76,51 @@ final class ConfigMergeTests: XCTestCase {
         )
     }
 
+    func testNoOutputsDefaultsOffAndPlumbsThroughMerge() throws {
+        let off = try ConfigMerge.mergeShared(
+            cli: try SharedTranscriptionOptions.parse([]),
+            file: UserConfigFile()
+        )
+        XCTAssertFalse(off.noOutputs)
+
+        let on = try ConfigMerge.mergeShared(
+            cli: try SharedTranscriptionOptions.parse(["--no-outputs"]),
+            file: UserConfigFile()
+        )
+        XCTAssertTrue(on.noOutputs)
+        XCTAssertFalse(on.stateless)
+    }
+
+    func testNoOutputsWithStatelessIsRejected() throws {
+        XCTAssertThrowsError(
+            try ConfigMerge.mergeShared(
+                cli: try SharedTranscriptionOptions.parse(["--stateless", "--no-outputs"]),
+                file: UserConfigFile()
+            )
+        ) { error in
+            guard let error = error as? TranscribeError else {
+                return XCTFail("expected TranscribeError, got \(error)")
+            }
+            XCTAssertEqual(error.exitCode, .invalidUsage)
+            XCTAssertTrue(error.message.contains("--no-outputs cannot be combined with --stateless"), error.message)
+        }
+    }
+
+    func testNoOutputsWithMarkImportedIsRejected() throws {
+        XCTAssertThrowsError(
+            try ConfigMerge.mergeShared(
+                cli: try SharedTranscriptionOptions.parse(["--mark-imported", "--no-outputs"]),
+                file: UserConfigFile()
+            )
+        ) { error in
+            guard let error = error as? TranscribeError else {
+                return XCTFail("expected TranscribeError, got \(error)")
+            }
+            XCTAssertEqual(error.exitCode, .invalidUsage)
+            XCTAssertTrue(error.message.contains("--no-outputs cannot be combined with --mark-imported"), error.message)
+        }
+    }
+
     func testMergeDirectoryUsesDefaultsWhenEmpty() throws {
         let cli = try DirectoryInputOptions.parse([])
         let merged = try ConfigMerge.mergeDirectory(cli: cli, file: UserConfigFile())
