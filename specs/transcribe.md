@@ -336,6 +336,19 @@ start<TAB>end<TAB>text
 
 ## Runtime Behavior
 
+### Canonical transcripts and persistent identities (2.6.0)
+
+Stateful transcription saves a canonical document before exporting. The
+`transcripts`, `inspect`, `export`, and `speakers` commands support locating
+results, assigning human-confirmed identities, and regenerating exports without
+inference. `--stateless` bypasses identity lookup and canonical persistence.
+Ordinary JSON output remains the existing export contract without embeddings.
+The authoritative schema, matching thresholds, privacy boundaries, and CLI
+examples are in [Persistent speaker
+identities](persistent-speaker-identities.md). Automatic lookup of saved
+inference results during ordinary runs remains future work; explicit `export`
+provides reuse in this version.
+
 ### Default Behavior
 
 - The tool attempts speaker labels unless `--transcript-only` is set (or config
@@ -557,7 +570,7 @@ let package = Package(
     name: "transcribe",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.0.0"),
+        .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
     ],
     targets: [

@@ -103,6 +103,51 @@ transcribe \
   file meeting.mp3
 ```
 
+### Saved transcripts and persistent speaker names
+
+Stateful runs save a private canonical transcript before writing exports. Run
+`transcribe transcripts` to find its path; plain logs also include a
+`canonical_saved` event. These files preserve local speaker labels and voice
+embeddings independently of output formats.
+
+```bash
+transcribe transcripts
+transcribe inspect /path/to/result.transcript.json
+transcribe speakers review /path/to/result.transcript.json
+transcribe speakers confirm /path/to/result.transcript.json SPEAKER_0 --name "Dave"
+transcribe speakers list
+
+# Confirm another recording using the profile ID printed above.
+transcribe speakers confirm /path/to/second.transcript.json SPEAKER_1 --profile PROFILE_ID
+
+# Refresh an older result and export it without audio or model loading.
+transcribe speakers review /path/to/result.transcript.json --apply
+transcribe export /path/to/result.transcript.json --format md,srt -o ./notes
+```
+
+Automatic naming requires two strong, explicitly confirmed examples from
+independent recordings and a clear margin over competing profiles. Automatic
+matches never train profiles. Thresholds are heuristics, not identity
+probabilities; uncertain speakers keep their local IDs. Confirming a different
+name/profile corrects an assignment.
+
+Use `speakers clear <document> <SPEAKER_n>` to remove an assignment and its
+confirmed example, `speakers rename <profile-id> <name>` to rename a profile,
+and `speakers delete <profile-id>` to remove it. Saved name snapshots and old
+exports are not rewritten automatically. `review --apply` refreshes a document;
+export it again to update rendered files, using `--overwrite` when appropriate.
+
+Canonical files live under the application's state directory in `transcripts/`;
+profiles live in `speaker_profiles.json`. Both use owner-only permissions and
+contain identifying voice data. Ordinary JSON exports contain no embeddings.
+`--stateless` disables profile lookup, automatic naming, and canonical storage.
+Model acquisition may use the network; identity matching stays local.
+
+Existing completed runs need an explicit redo to create canonical documents. Use
+`export` for reuse: automatic inference-cache lookup is not yet implemented. The
+[speaker identity spec](specs/persistent-speaker-identities.md) documents the
+schema, matching policy, correction behavior, and limitations.
+
 ### Directory input
 
 Use `transcribe dir <directory>` for directories of sequential audio clips. The

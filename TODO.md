@@ -121,7 +121,13 @@ sets match. Update the documented skip contract and history reasons.
 
 ### R6: Persist a canonical transcript and export without inference
 
-- [ ] Separate inference results from requested presentation formats.
+- [x] Save canonical transcripts and provide explicit inference-free export
+  (2.6.0; see [speaker identity spec](specs/persistent-speaker-identities.md)).
+- [ ] Complete automatic inference-result lookup and split inference/export
+  compatibility; preserve ordered timeline and full recipe provenance.
+
+The first increment also stores speaker centroids and user-confirmed profiles.
+Speaker matching thresholds still need evaluation with real recordings (R10).
 
 **Problem:** Formats are part of `ProcessingSettingsSignature`. Adding Markdown
 or changing the format list can rerun inference even when the recognized speech

@@ -29,6 +29,13 @@ The Swift package currently has one executable target:
 - `Sources/transcribe/OutputWriter.swift`: output basenames, overwrite checks,
   renderers, and atomic writes.
 - `Sources/transcribe/ProcessingStore.swift`: append-only idempotency ledger.
+- `Sources/transcribe/CanonicalTranscript.swift`: versioned private inference
+  documents, validation, and accepted-name export views.
+- `Sources/transcribe/SpeakerProfiles.swift`: locked profile persistence and
+  conservative centroid matching using explicit human confirmations.
+- `Sources/transcribe/SpeakerCommands.swift`: transcript listing/inspection,
+  inference-free export, and speaker review/confirmation commands. See
+  `specs/persistent-speaker-identities.md` for schema and policy details.
 - `Sources/transcribe/HistoryCommand.swift`: `transcribe history` command and
   `HistoryFormatter` (relative-time and column rendering).
 - `Sources/transcribe/TimingStore.swift`: append-only timing history used for
