@@ -37,6 +37,51 @@ struct PipelineWorkItem {
     let recordsSkipHistory: Bool
 }
 
+/// Builds the durable inference result and performs profile matching only when state is enabled.
+/// The injectable matcher keeps the stateless privacy boundary directly testable.
+func prepareCanonicalTranscript(
+    stateless: Bool,
+    model: String,
+    audioPath: String,
+    audioFiles: [String]?,
+    basename: String,
+    sourceMetadata: OutputSourceMetadata?,
+    output: TranscriptionOutput,
+    sourceHashes: [String],
+    id: UUID = UUID(),
+    createdAt: Date = Date(),
+    matcher: ([String: [Float]], String, String, [String]) throws -> [String: SpeakerMatch] = {
+        try SpeakerProfileStore.matches(
+            embeddings: $0, modelID: $1, excludingTranscriptID: $2, excludingSourceHashes: $3
+        )
+    }
+) throws -> CanonicalTranscript? {
+    guard !stateless else { return nil }
+    let evidenceID = CanonicalTranscript.evidenceID(forSourceHashes: sourceHashes)
+    var savedOutput = output
+    let matches: [String: SpeakerMatch]
+    do {
+        matches = try matcher(output.speakerEmbeddings, CanonicalTranscript.speakerEmbeddingModelID, evidenceID, sourceHashes)
+    } catch {
+        matches = [:]
+        savedOutput.warnings.append("Speaker identity matching unavailable: \(error.localizedDescription). Local speaker labels were retained.")
+    }
+    return CanonicalTranscript(
+        id: id,
+        evidenceID: evidenceID,
+        sourceHashes: sourceHashes,
+        createdAt: createdAt,
+        model: model,
+        transcribeVersion: Transcribe.version,
+        audioPath: audioPath,
+        audioFiles: audioFiles,
+        basename: basename,
+        sourceMetadata: sourceMetadata,
+        output: savedOutput,
+        speakerMatches: matches
+    )
+}
+
 private enum PipelineOutputMode {
     case tui
     case eventLog
@@ -528,6 +573,45 @@ struct PipelineRunner {
 
             let outputFiles = options.resolvedFormats.map { fmt in "\(basename).\(fmt)" }.joined(separator: ", ")
             logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
+
+            if let canonical = try prepareCanonicalTranscript(
+                stateless: options.stateless,
+                model: resolvedModel,
+                audioPath: plan.audioPathForOutput,
+                audioFiles: plan.audioFilesForOutput,
+                basename: basename,
+                sourceMetadata: plan.sourceMetadata,
+                output: out,
+                sourceHashes: CanonicalTranscript.sourceHashes(for: item.fingerprint)
+            ) {
+                for warning in canonical.output.warnings where !out.warnings.contains(warning) {
+                    emitWarning(warning)
+                }
+                // Persisting the reusable transcript is best effort: a state directory
+                // write failure or a strict validation rejection must never discard a
+                // finished transcription or abort the remaining batch work.
+                do {
+                    let canonicalURL = try CanonicalTranscriptStore.save(canonical)
+                    out = canonical.renderedOutput()
+                    let suggested = canonical.speakerMatches.values.filter { $0.status == .suggested }.count
+                    let automatic = canonical.speakerMatches.values.filter { $0.status == .automatic }.count
+                    activeReporter?.info(
+                        "canonical_saved",
+                        fields: sessionFields(
+                            item: item,
+                            outputDir: resolvedDir,
+                            extra: [
+                                TranscribeEventField("path", .string(canonicalURL.path)),
+                                TranscribeEventField("suggested_matches", .int(suggested)),
+                                TranscribeEventField("automatic_matches", .int(automatic)),
+                            ]
+                        ),
+                        message: "canonical transcript saved"
+                    )
+                } catch {
+                    emitWarning("Canonical transcript not saved: \(error.localizedDescription). Transcript outputs are still written and local speaker labels were retained.")
+                }
+            }
 
             sharedLiveDisplay?.beginOutput()
             let (_, writeMs) = try WallClock.measureMs {

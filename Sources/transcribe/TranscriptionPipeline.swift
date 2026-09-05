@@ -1,3 +1,6 @@
+// ArgmaxCore declares ModelInfo, which SpeakerKit extends with the Pyannote
+// defaults read by speakerKitEmbeddingModelID().
+import ArgmaxCore
 import Foundation
 import SpeakerKit
 import WhisperKit
@@ -270,12 +273,44 @@ func initializeWhisperKit(
     }
 }
 
+/// Reads the embedder identity from the SDK rather than trusting the stamped
+/// literal alone. This is the same `ModelInfo` the diarizer below is configured
+/// with, so its name, version and variant are whatever the pinned SpeakerKit
+/// defaults to; only the compute units differ and those do not change weights.
+func speakerKitEmbeddingModelID() -> String {
+    let embedder = ModelInfo.embedder()
+    return CanonicalTranscript.makeSpeakerEmbeddingModelID(
+        embedderName: embedder.name,
+        embedderVersion: embedder.version,
+        embedderVariant: embedder.variant
+    )
+}
+
+/// Refuses to produce embeddings once the SDK's embedder no longer matches the
+/// ID stamped into saved documents and profiles. Continuing would compare new
+/// vectors against confirmed examples from a different model, whose cosine
+/// distances are meaningless and can still clear the automatic thresholds.
+func verifySpeakerEmbeddingModelID(_ derivedID: String = speakerKitEmbeddingModelID()) throws {
+    guard derivedID == CanonicalTranscript.speakerEmbeddingModelID else {
+        throw TranscribeError(
+            message: """
+                SpeakerKit embedder identity changed: expected \
+                \(CanonicalTranscript.speakerEmbeddingModelID), found \(derivedID). \
+                Update CanonicalTranscript.speakerEmbeddingModelID and speakerKitVersion \
+                so existing speaker profiles are not matched against incompatible embeddings.
+                """,
+            exitCode: .modelFailure
+        )
+    }
+}
+
 func initializeSpeakerKit(
     modelDir: String,
     computeOptions: RuntimeComputeOptions,
     verbose: Bool,
     logger: VerboseLogger? = nil
 ) async throws -> SpeakerKit {
+    try verifySpeakerEmbeddingModelID()
     let expandedModelDir = (modelDir as NSString).expandingTildeInPath
 
     func loadSpeakerKit(using selectedCompute: RuntimeComputeOptions.SpeakerComputeOptions) async throws -> SpeakerKit {
@@ -576,6 +611,27 @@ func formatSpeakerLabel(_ info: SpeakerInfo) -> String? {
         return "SPEAKER_\(id)"
     }
     return nil
+}
+
+/// Build the persisted speaker embedding map from diarization centroids.
+///
+/// Keys use `formatSpeakerLabel` so the stored IDs always match the labels
+/// written onto segments (and the "SPEAKER_<digits>" form the canonical
+/// transcript store validates). Centroids for clusters that survived merging
+/// but label no output segment are dropped. The set of labels present in the
+/// segments is built once, so the filter stays linear in speakers + segments.
+func speakerEmbeddings(
+    centroids: [Int: [Float]],
+    forSegments segments: [TranscriptSegment]
+) -> [String: [Float]] {
+    let labelsInSegments = Set(segments.compactMap(\.speaker))
+    var embeddings: [String: [Float]] = [:]
+    for (clusterID, vector) in centroids {
+        guard let label = formatSpeakerLabel(.speakerId(clusterID)),
+              labelsInSegments.contains(label) else { continue }
+        embeddings[label] = vector
+    }
+    return embeddings
 }
 
 /// Convert merged [[SpeakerSegment]] to [TranscriptSegment].
@@ -880,7 +936,11 @@ private func runTranscriptionWithDiarization(
         diarizationEnabled: true,
         speakersDetected: speakersDetected > 0 ? speakersDetected : nil,
         speakerStrategy: speakerStrategy == .segment ? "segment" : "subsegment",
-        warnings: warnings
+        warnings: warnings,
+        speakerEmbeddings: speakerEmbeddings(
+            centroids: diarizationResult.speakerCentroidEmbeddings,
+            forSegments: segments
+        )
     )
     return (output, phases)
 }
@@ -1128,7 +1188,11 @@ func runSession(
         diarizationEnabled: true,
         speakersDetected: speakersDetected > 0 ? speakersDetected : nil,
         speakerStrategy: speakerStrategy == .segment ? "segment" : "subsegment",
-        warnings: warnings
+        warnings: warnings,
+        speakerEmbeddings: speakerEmbeddings(
+            centroids: diarizationResult.speakerCentroidEmbeddings,
+            forSegments: segments
+        )
     )
     return (output, phases)
 }

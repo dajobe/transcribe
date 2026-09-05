@@ -103,6 +103,44 @@ final class TranscriptionPipelineTests: XCTestCase {
         }
     }
 
+    func testSpeakerEmbeddingsKeepsOnlyCentroidsLabellingSegments() throws {
+        let segments = [
+            TranscriptSegment(speaker: "SPEAKER_0", start: 0, end: 1, text: "a", words: nil),
+            TranscriptSegment(speaker: "SPEAKER_2", start: 1, end: 2, text: "b", words: nil),
+            TranscriptSegment(speaker: nil, start: 2, end: 3, text: "c", words: nil)
+        ]
+        let centroids: [Int: [Float]] = [0: [1, 0], 1: [0, 1], 2: [0.5, 0.5]]
+
+        let embeddings = speakerEmbeddings(centroids: centroids, forSegments: segments)
+
+        XCTAssertEqual(Set(embeddings.keys), ["SPEAKER_0", "SPEAKER_2"])
+        XCTAssertEqual(embeddings["SPEAKER_0"], [1, 0])
+        XCTAssertEqual(embeddings["SPEAKER_2"], [0.5, 0.5])
+    }
+
+    func testSpeakerEmbeddingsKeysMatchSegmentLabelFormat() throws {
+        let segments = [TranscriptSegment(speaker: formatSpeakerLabel(.speakerId(7)), start: 0, end: 1, text: "a", words: nil)]
+
+        let embeddings = speakerEmbeddings(centroids: [7: [1, 0]], forSegments: segments)
+
+        XCTAssertEqual(Array(embeddings.keys), ["SPEAKER_7"])
+        // Keys must satisfy the canonical store's local-speaker-ID form.
+        for key in embeddings.keys {
+            XCTAssertTrue(key.hasPrefix("SPEAKER_"))
+            XCTAssertTrue(key.dropFirst("SPEAKER_".count).allSatisfy(\.isNumber))
+        }
+    }
+
+    func testSpeakerEmbeddingsIsEmptyWithoutMatchingSegments() throws {
+        XCTAssertTrue(speakerEmbeddings(centroids: [0: [1, 0]], forSegments: []).isEmpty)
+        XCTAssertTrue(
+            speakerEmbeddings(
+                centroids: [:],
+                forSegments: [TranscriptSegment(speaker: "SPEAKER_0", start: 0, end: 1, text: "a", words: nil)]
+            ).isEmpty
+        )
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
