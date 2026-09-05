@@ -91,6 +91,19 @@ struct CanonicalTranscript: Codable, Equatable {
         return "sha256:" + digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Returns a copy carrying another document's identity and speaker matches.
+    /// Managed store filenames embed the document id, so replacing a stored
+    /// file means adopting the id encoded in its name.
+    func adopting(id: UUID, speakerMatches: [String: SpeakerMatch]) -> CanonicalTranscript {
+        CanonicalTranscript(
+            schemaVersion: schemaVersion, id: id, evidenceID: evidenceID, sourceHashes: sourceHashes,
+            createdAt: createdAt, model: model, transcribeVersion: transcribeVersion,
+            audioPath: audioPath, audioFiles: audioFiles, basename: basename,
+            sourceMetadata: sourceMetadata, output: output, embeddingModelID: embeddingModelID,
+            speakerMatches: speakerMatches
+        )
+    }
+
     /// Returns an export view with accepted profile names substituted for local speaker IDs.
     /// The stored output remains unchanged so profile decisions can be reviewed or reversed.
     func renderedOutput() -> TranscriptionOutput {
@@ -123,10 +136,35 @@ enum CanonicalTranscriptStore {
         }
     }
 
+    /// The only field the duplicate scan compares. Decoding this instead of the
+    /// whole canonical document keeps one damaged, truncated or newer-schema
+    /// file from failing every later save, and avoids reading stored embedding
+    /// vectors just to compare one identity string.
+    private struct EvidenceListing: Decodable {
+        let evidenceID: String
+    }
+
     static func save(_ document: CanonicalTranscript, to url: URL? = nil) throws -> URL {
         try validate(document)
         let isManagedDestination = url == nil
-        let destination = try url ?? defaultURL(for: document.id)
+        // Evidence IDs are derived from the source audio, so re-running the
+        // same recording produces the same one. A managed save replaces the
+        // stored document for that evidence instead of adding a second file,
+        // which would grow the transcripts listing without end. An explicit
+        // destination is a portable copy the caller placed, so it is written
+        // as asked and never deduped.
+        var document = document
+        var destination: URL
+        if let url {
+            destination = url
+        } else if let existing = existingManagedFile(forEvidenceID: document.evidenceID) {
+            document = document.adopting(
+                id: existing.id, speakerMatches: confirmedMatchesCarriedForward(to: document, from: existing.url)
+            )
+            destination = existing.url
+        } else {
+            destination = try defaultURL(for: document.id)
+        }
         let directory = destination.deletingLastPathComponent()
         // Only a managed directory this store creates is tightened; an
         // existing one keeps the permissions the user chose for it.
@@ -155,9 +193,55 @@ enum CanonicalTranscriptStore {
         return document
     }
 
+    /// Returns the stored file already holding `evidenceID`, with the id its
+    /// name encodes. Only files this store named are candidates: replacing a
+    /// file in place keeps the filename, so the replacement has to adopt that
+    /// id, which a foreign filename cannot supply. Anything unreadable at this
+    /// depth is skipped rather than failing the save it was scanned for.
+    private static func existingManagedFile(forEvidenceID evidenceID: String) -> (url: URL, id: UUID)? {
+        guard let directory = try? transcriptsDirectoryURL(),
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: directory, includingPropertiesForKeys: nil
+              ) else { return nil }
+        let suffix = ".transcript.json"
+        // Sorted so a directory that somehow holds several files for one
+        // evidence ID collapses onto the same one on every run.
+        for file in files.sorted(by: { $0.path < $1.path }) where file.lastPathComponent.hasSuffix(suffix) {
+            guard let id = UUID(uuidString: String(file.lastPathComponent.dropLast(suffix.count))),
+                  let data = try? Data(contentsOf: file),
+                  let listing = try? JSONDecoder().decode(EvidenceListing.self, from: data),
+                  listing.evidenceID == evidenceID else { continue }
+            return (file, id)
+        }
+        return nil
+    }
+
+    /// Merges the confirmed assignments of the document at `url` into the
+    /// matches of a new run over the same evidence. Confirmations are keyed by
+    /// (evidence ID, speaker ID) in the profile store, so they stay valid
+    /// across a re-run of the same audio, but only where the new run still
+    /// produced an embedding for that speaker: a speaker the new diarization
+    /// did not emit has nothing to attach the decision to. Everything else
+    /// keeps the fresh suggested or automatic match. A stored file that no
+    /// longer loads in full is still replaced, only without its confirmations.
+    private static func confirmedMatchesCarriedForward(
+        to document: CanonicalTranscript, from url: URL
+    ) -> [String: SpeakerMatch] {
+        guard let previous = try? load(from: url) else { return document.speakerMatches }
+        var matches = document.speakerMatches
+        for (speakerID, match) in previous.speakerMatches
+        where match.status == .confirmed && document.output.speakerEmbeddings[speakerID] != nil {
+            matches[speakerID] = match
+        }
+        return matches
+    }
+
+    private static func transcriptsDirectoryURL() throws -> URL {
+        try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts", isDirectory: true)
+    }
+
     private static func defaultURL(for id: UUID) throws -> URL {
-        try StatePaths.stateDirectoryURL()
-            .appendingPathComponent("transcripts", isDirectory: true)
+        try transcriptsDirectoryURL()
             .appendingPathComponent("\(id.uuidString.lowercased()).transcript.json", isDirectory: false)
     }
 

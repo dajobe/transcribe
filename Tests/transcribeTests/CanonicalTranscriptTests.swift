@@ -3,6 +3,24 @@ import XCTest
 @testable import transcribe
 
 final class CanonicalTranscriptTests: XCTestCase {
+    private var state: URL!
+    private var previousState: String?
+
+    override func setUpWithError() throws {
+        // The managed store is addressed through XDG_STATE_HOME, so every test
+        // that saves without an explicit destination gets its own directory.
+        previousState = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+        state = FileManager.default.temporaryDirectory.appendingPathComponent("canonical-transcript-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+        setenv("XDG_STATE_HOME", state.path, 1)
+    }
+
+    override func tearDownWithError() throws {
+        if let previousState { setenv("XDG_STATE_HOME", previousState, 1) }
+        else { unsetenv("XDG_STATE_HOME") }
+        try? FileManager.default.removeItem(at: state)
+    }
+
     private func output() -> TranscriptionOutput {
         TranscriptionOutput(
             segments: [
@@ -19,15 +37,26 @@ final class CanonicalTranscriptTests: XCTestCase {
         )
     }
 
+    /// The fixture output plus a second diarized speaker carrying an embedding.
+    private func twoSpeakerOutput() -> TranscriptionOutput {
+        var output = self.output()
+        output.segments.append(TranscriptSegment(speaker: "SPEAKER_1", start: 2, end: 3, text: "There", words: nil))
+        output.speakerEmbeddings["SPEAKER_1"] = [0.5, 0.5]
+        output.speakersDetected = 2
+        return output
+    }
+
     private func document(
         schemaVersion: Int = CanonicalTranscript.currentSchemaVersion,
+        id: UUID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+        hash: Character = "a",
         output: TranscriptionOutput? = nil,
         matches: [String: SpeakerMatch] = [:]
     ) -> CanonicalTranscript {
-        let sourceHashes = [String(repeating: "a", count: 64)]
+        let sourceHashes = [String(repeating: String(hash), count: 64)]
         return CanonicalTranscript(
             schemaVersion: schemaVersion,
-            id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+            id: id,
             evidenceID: CanonicalTranscript.evidenceID(forSourceHashes: sourceHashes),
             sourceHashes: sourceHashes,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
@@ -145,5 +174,105 @@ final class CanonicalTranscriptTests: XCTestCase {
         )
         XCTAssertNil(result)
         XCTAssertFalse(matcherCalled)
+    }
+
+    private func storedFiles() throws -> [String] {
+        let directory = try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts")
+        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasSuffix(".transcript.json") }.map(path(of:)).sorted()
+    }
+
+    /// The temporary directory is reached through a symlink, so saved and
+    /// enumerated URLs for one file differ textually until they are resolved.
+    private func path(of url: URL) -> String { url.resolvingSymlinksInPath().path }
+
+    /// Returns the fixture output with the first segment's text replaced, so
+    /// two saves of the same evidence are distinguishable on disk.
+    private func output(saying text: String) -> TranscriptionOutput {
+        var output = self.output()
+        output.segments[0] = TranscriptSegment(speaker: "SPEAKER_0", start: 0, end: 1.5, text: text, words: nil)
+        return output
+    }
+
+    func testManagedSaveReplacesTheStoredDocumentWithTheSameEvidenceID() throws {
+        let first = try CanonicalTranscriptStore.save(document(output: output(saying: "First")))
+        let second = try CanonicalTranscriptStore.save(
+            document(id: UUID(), output: output(saying: "Second"))
+        )
+
+        XCTAssertEqual(try storedFiles(), [path(of: first)])
+        XCTAssertEqual(path(of: second), path(of: first))
+        let stored = try CanonicalTranscriptStore.load(from: second)
+        XCTAssertEqual(stored.output.segments.map(\.text), ["Second"])
+        // Managed filenames encode the document id, so the replacement keeps
+        // the id already in the filename rather than the fresh run's id.
+        XCTAssertEqual(second.lastPathComponent, "\(stored.id.uuidString.lowercased()).transcript.json")
+        let mode = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: second.path)[.posixPermissions] as? NSNumber
+        )
+        XCTAssertEqual(mode.intValue & 0o777, 0o600)
+    }
+
+    func testReplacementKeepsConfirmedMatchesForSpeakersTheNewRunStillHas() throws {
+        let confirmed = SpeakerMatch(profileID: "a", name: "Alice", distance: 0.1, margin: nil, confirmedExampleCount: 2, status: .confirmed)
+        let suggested = SpeakerMatch(profileID: "b", name: "Bob", distance: 0.4, margin: nil, confirmedExampleCount: 1, status: .suggested)
+        _ = try CanonicalTranscriptStore.save(
+            document(output: twoSpeakerOutput(), matches: ["SPEAKER_0": confirmed])
+        )
+
+        let url = try CanonicalTranscriptStore.save(
+            document(id: UUID(), output: twoSpeakerOutput(), matches: ["SPEAKER_1": suggested])
+        )
+
+        let stored = try CanonicalTranscriptStore.load(from: url)
+        XCTAssertEqual(stored.speakerMatches, ["SPEAKER_0": confirmed, "SPEAKER_1": suggested])
+    }
+
+    func testReplacementDropsConfirmedMatchesForSpeakersTheNewRunNoLongerHas() throws {
+        let confirmed = SpeakerMatch(profileID: "a", name: "Alice", distance: 0.1, margin: nil, confirmedExampleCount: 2, status: .confirmed)
+        _ = try CanonicalTranscriptStore.save(
+            document(output: twoSpeakerOutput(), matches: ["SPEAKER_1": confirmed])
+        )
+
+        // The second run diarized only SPEAKER_0, so nothing carries the
+        // SPEAKER_1 decision and validation would reject a dangling match.
+        let url = try CanonicalTranscriptStore.save(document(id: UUID()))
+
+        XCTAssertEqual(try storedFiles().count, 1)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).speakerMatches, [:])
+    }
+
+    func testSavesWithDifferentEvidenceIDsKeepSeparateFiles() throws {
+        let first = try CanonicalTranscriptStore.save(document())
+        let second = try CanonicalTranscriptStore.save(document(id: UUID(), hash: "b"))
+
+        XCTAssertNotEqual(path(of: second), path(of: first))
+        XCTAssertEqual(try storedFiles().count, 2)
+    }
+
+    func testUnreadableStoredFileIsNeitherADuplicateNorASaveFailure() throws {
+        let directory = try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let corrupt = directory.appendingPathComponent("\(UUID().uuidString.lowercased()).transcript.json")
+        try Data("{ not json".utf8).write(to: corrupt)
+
+        let url = try CanonicalTranscriptStore.save(document())
+
+        XCTAssertNotEqual(path(of: url), path(of: corrupt))
+        XCTAssertEqual(try storedFiles().count, 2)
+        XCTAssertEqual(try Data(contentsOf: corrupt), Data("{ not json".utf8))
+    }
+
+    func testExplicitDestinationSaveDoesNotTouchTheManagedStore() throws {
+        let managed = try CanonicalTranscriptStore.save(document(output: output(saying: "Managed")))
+        let external = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("copy.transcript.json")
+
+        let written = try CanonicalTranscriptStore.save(document(output: output(saying: "Copy")), to: external)
+
+        XCTAssertEqual(written, external)
+        XCTAssertEqual(try storedFiles(), [path(of: managed)])
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: managed).output.segments.map(\.text), ["Managed"])
     }
 }
