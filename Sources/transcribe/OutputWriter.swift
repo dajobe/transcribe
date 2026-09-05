@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Basename of the input file without extension (e.g. "meeting.mp3" -> "meeting").
@@ -43,6 +44,12 @@ func checkOverwrite(
     writeTxtFile: Bool,
     overwrite: Bool
 ) throws {
+    if basename.trimmingCharacters(in: .whitespaces).isEmpty {
+        throw TranscribeError(
+            message: "Output filename prefix cannot be empty.",
+            exitCode: .invalidUsage
+        )
+    }
     if basename.contains("/") || basename.contains("..") {
         throw TranscribeError(
             message: "Output filename prefix cannot contain '/' or '..'",
@@ -99,6 +106,86 @@ func writeAtomically(content: Data, to path: String) throws {
         try? FileManager.default.removeItem(atPath: tempPath)
         throw TranscribeError(message: "Failed to write output: \(error.localizedDescription)", exitCode: .outputWrite)
     }
+}
+
+// MARK: - Private state files
+
+/// Owner-only mode for state files this tool creates.
+let privateFileMode: mode_t = 0o600
+/// Owner-only mode for state directories this tool creates.
+let privateDirectoryMode: mode_t = 0o700
+
+/// Writes `data` to `url` atomically and privately: the content is written to
+/// a temporary file created with `O_EXCL` in the destination directory, forced
+/// to disk, then renamed over the destination. POSIX rename replaces the
+/// destination atomically and carries the mode of the temporary file, so a
+/// reader never sees a partial file and the result never inherits a wider mode
+/// from an older copy. Used for state the tool owns (speaker profiles,
+/// canonical transcripts); user-facing outputs keep `writeAtomically`, whose
+/// files are meant to follow the user's umask.
+func writePrivateAtomically(data: Data, to url: URL, mode: mode_t = privateFileMode) throws {
+    let directory = url.deletingLastPathComponent()
+    let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+    defer { try? FileManager.default.removeItem(at: temporary) }
+
+    let fd = open(temporary.path, O_CREAT | O_EXCL | O_WRONLY, mode)
+    guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    do {
+        // open() masks the requested mode with the process umask, so restore it.
+        try tightenPermissions(ofFileDescriptor: fd, at: temporary.path, to: mode)
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+        try handle.close()
+    } catch {
+        try? handle.close()
+        throw error
+    }
+
+    guard Darwin.rename(temporary.path, url.path) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    syncDirectory(directory)
+}
+
+/// Flushes the directory entry so a crash cannot lose a completed rename.
+/// Best effort: filesystems that reject the open or the fsync still hold a
+/// correctly renamed file, only without the durability guarantee.
+private func syncDirectory(_ directory: URL) {
+    let fd = open(directory.path, O_RDONLY)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+    _ = fsync(fd)
+}
+
+/// Sets `path` to `mode` unless it already has exactly that mode.
+func tightenPermissions(ofPath path: String, to mode: mode_t) throws {
+    var info = stat()
+    if stat(path, &info) == 0, info.st_mode & 0o7777 == mode { return }
+    guard chmod(path, mode) != 0 else { return }
+    try handlePermissionFailure(code: errno, path: path)
+}
+
+/// Sets an open file to `mode` unless it already has exactly that mode.
+func tightenPermissions(ofFileDescriptor fd: Int32, at path: String, to mode: mode_t) throws {
+    var info = stat()
+    if fstat(fd, &info) == 0, info.st_mode & 0o7777 == mode { return }
+    guard fchmod(fd, mode) != 0 else { return }
+    try handlePermissionFailure(code: errno, path: path)
+}
+
+/// Network and FUSE mounts reject chmod with ENOTSUP, or EPERM when the mount
+/// maps ownership to another user. Files there cannot be made owner-only, but
+/// refusing to read or update state at all is worse than saying so once and
+/// continuing. Any other errno is a real failure and is reported as itself.
+func handlePermissionFailure(code: Int32, path: String) throws {
+    guard code == ENOTSUP || code == EPERM else {
+        throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+    }
+    emitWarning(
+        "Cannot set owner-only permissions on \(path): \(String(cString: strerror(code))). "
+            + "Continuing; other users may be able to read it."
+    )
 }
 
 /// Format seconds as HH:MM:SS for plain text.

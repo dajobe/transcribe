@@ -231,6 +231,25 @@ final class OutputWriterTests: XCTestCase {
         }
     }
 
+    func testCheckOverwriteFailsOnEmptyPrefix() throws {
+        for basename in ["", "   "] {
+            XCTAssertThrowsError(
+                try checkOverwrite(
+                    outputDir: "/tmp",
+                    basename: basename,
+                    formats: ["txt"],
+                    writeTxtFile: true,
+                    overwrite: true
+                )
+            ) { error in
+                guard let transcribeError = error as? TranscribeError else {
+                    return XCTFail("Unexpected error type: \(error)")
+                }
+                XCTAssertEqual(transcribeError.exitCode, .invalidUsage)
+            }
+        }
+    }
+
     func testCheckOverwriteFailsWhenOutputExists() throws {
         let tempDir = try makeTemporaryDirectory()
         let existingFile = tempDir.appendingPathComponent("meeting.json")
@@ -604,6 +623,50 @@ final class OutputWriterTests: XCTestCase {
         XCTAssertTrue(md.contains("- **Recorded:** 2026-05-08T10:00:00Z"))
         XCTAssertTrue(md.contains("- **Recording title:** `Meeting`"))
         XCTAssertTrue(md.contains("- **Voice Memos ID:** `abc`"))
+    }
+
+    func testWritePrivateAtomicallyCreatesOwnerOnlyFileWithoutLeftovers() throws {
+        let directory = try makeTemporaryDirectory()
+        let url = directory.appendingPathComponent("state.json")
+
+        try writePrivateAtomically(data: Data("{\"ok\":true}".utf8), to: url)
+
+        XCTAssertEqual(try Data(contentsOf: url), Data("{\"ok\":true}".utf8))
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: url.path)) & 0o777, 0o600)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["state.json"])
+    }
+
+    func testWritePrivateAtomicallyAppliesRequestedModeAndReplacesWiderOne() throws {
+        let directory = try makeTemporaryDirectory()
+        let url = directory.appendingPathComponent("state.json")
+        try Data("old".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+
+        try writePrivateAtomically(data: Data("new".utf8), to: url, mode: 0o400)
+
+        XCTAssertEqual(try Data(contentsOf: url), Data("new".utf8))
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: url.path)) & 0o777, 0o400)
+    }
+
+    func testWritePrivateAtomicallyReportsRealErrnoForMissingDirectory() throws {
+        let url = try makeTemporaryDirectory()
+            .appendingPathComponent("absent", isDirectory: true)
+            .appendingPathComponent("state.json")
+
+        XCTAssertThrowsError(try writePrivateAtomically(data: Data("x".utf8), to: url)) { error in
+            XCTAssertEqual((error as? POSIXError)?.code, .ENOENT)
+        }
+    }
+
+    func testWritePrivateAtomicallyRemovesTemporaryFileWhenRenameFails() throws {
+        let directory = try makeTemporaryDirectory()
+        // Renaming a file over an existing directory always fails, so the
+        // temporary file exists when the failure happens.
+        let url = directory.appendingPathComponent("occupied", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+
+        XCTAssertThrowsError(try writePrivateAtomically(data: Data("x".utf8), to: url))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["occupied"])
     }
 
     private func makeTemporaryDirectory() throws -> URL {
