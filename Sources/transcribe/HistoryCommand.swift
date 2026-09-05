@@ -37,7 +37,10 @@ enum HistoryFormatter {
     static let recordedColumnWidth = 12
 
     static func format(records: [ProcessingRecord], now: Date) -> String {
-        ([header()] + records.map { line(for: $0, now: now) }).joined(separator: "\n")
+        // Style the header as one whole line: ANSI codes inside padded
+        // columns would not change visible alignment, but styling after
+        // padding keeps the width arithmetic obviously untouched.
+        ([Terminal.stdout.bold(header())] + records.map { line(for: $0, now: now) }).joined(separator: "\n")
     }
 
     static func header() -> String {

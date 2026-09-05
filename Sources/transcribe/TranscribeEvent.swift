@@ -109,10 +109,19 @@ enum TranscribeEventTextRenderer {
         return formatter
     }()
 
-    static func render(_ event: TranscribeEvent) -> String {
+    /// Colors only the level token: field consumers split on whitespace and
+    /// `key=value`, and a styled WARN/ERROR still round-trips through both.
+    static func render(_ event: TranscribeEvent, color: TerminalColor = .disabled) -> String {
+        let level: String
+        switch event.level {
+        case .warn: level = color.yellow(event.level.rendered)
+        case .error: level = color.red(event.level.rendered)
+        case .debug: level = color.dim(event.level.rendered)
+        case .info: level = event.level.rendered
+        }
         var parts = [
             formatter.string(from: event.timestamp),
-            event.level.rendered,
+            level,
             "event=\(event.name)",
         ]
         parts.append(contentsOf: event.fields.map { "\($0.name)=\($0.value.rendered)" })
@@ -158,6 +167,7 @@ final class TranscribeEventReporter {
     let statusEnabled: Bool
     let minimumLevel: TranscribeEventLevel
     private let handle: FileHandle
+    private let color: TerminalColor
     private let textOutputEnabled: Bool
     private let diagnosticsSink: ((TranscribeEvent) -> Void)?
     private let failureSink: ((TranscribeEvent) -> Void)?
@@ -173,6 +183,7 @@ final class TranscribeEventReporter {
         self.statusEnabled = statusEnabled
         self.minimumLevel = minimumLevel
         self.handle = handle
+        self.color = TerminalColor.detect(fileDescriptor: handle.fileDescriptor)
         self.textOutputEnabled = textOutputEnabled
         self.diagnosticsSink = diagnosticsSink
         self.failureSink = failureSink
@@ -206,7 +217,7 @@ final class TranscribeEventReporter {
         guard event.level >= minimumLevel else { return }
         let shouldWriteText = textOutputEnabled && (statusEnabled || event.level >= .warn)
         if shouldWriteText {
-            let line = TranscribeEventTextRenderer.render(event) + "\n"
+            let line = TranscribeEventTextRenderer.render(event, color: color) + "\n"
             handle.write(Data(line.utf8))
         }
         if event.level != .info {

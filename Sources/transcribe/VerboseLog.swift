@@ -16,6 +16,6 @@ func emitWarning(_ message: String) {
     if TranscribeEventReporter.emitWarning(message) {
         return
     }
-    let line = "Warning: \(message)\n"
+    let line = "\(Terminal.stderr.yellow("Warning:")) \(message)\n"
     FileHandle.standardError.write(line.data(using: .utf8)!)
 }

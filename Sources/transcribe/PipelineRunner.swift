@@ -1079,22 +1079,19 @@ struct PipelineRunner {
 
 func runAndExitOnError(_ body: () async throws -> Void) async {
     defer { TranscribeEventReporter.setCurrent(nil) }
+    func fail(_ message: String, exitCode: Int32) -> Never {
+        if !TranscribeEventReporter.emitError(message, exitCode: exitCode) {
+            FileHandle.standardError.write((Terminal.stderr.red(message) + "\n").data(using: .utf8)!)
+        }
+        Darwin.exit(exitCode)
+    }
     do {
         try await body()
     } catch let e as TranscribeError {
-        if !TranscribeEventReporter.emitError(e.message, exitCode: e.exitCode.rawValue) {
-            FileHandle.standardError.write((e.message + "\n").data(using: .utf8)!)
-        }
-        Darwin.exit(e.exitCode.rawValue)
+        fail(e.message, exitCode: e.exitCode.rawValue)
     } catch let e as WhisperError {
-        if !TranscribeEventReporter.emitError(e.localizedDescription, exitCode: ExitCode.modelFailure.rawValue) {
-            FileHandle.standardError.write((e.localizedDescription + "\n").data(using: .utf8)!)
-        }
-        Darwin.exit(ExitCode.modelFailure.rawValue)
+        fail(e.localizedDescription, exitCode: ExitCode.modelFailure.rawValue)
     } catch {
-        if !TranscribeEventReporter.emitError(error.localizedDescription, exitCode: ExitCode.runtimeFailure.rawValue) {
-            FileHandle.standardError.write((error.localizedDescription + "\n").data(using: .utf8)!)
-        }
-        Darwin.exit(ExitCode.runtimeFailure.rawValue)
+        fail(error.localizedDescription, exitCode: ExitCode.runtimeFailure.rawValue)
     }
 }

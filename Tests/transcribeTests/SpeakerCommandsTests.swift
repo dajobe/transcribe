@@ -36,18 +36,34 @@ final class SpeakerCommandsTests: XCTestCase {
         return url
     }
 
-    private func run(_ args: [String]) throws -> (Int32, String) {
+    private func run(
+        _ args: [String], input: String? = nil, environment extra: [String: String] = [:]
+    ) throws -> (Int32, String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: CLITests.transcribePath)
         process.arguments = args
         var environment = ProcessInfo.processInfo.environment
         environment["XDG_STATE_HOME"] = directory.path
         environment["TRANSCRIBE_CONFIG"] = directory.appendingPathComponent("missing-config.json").path
+        // The surrounding shell or CI may set color variables; drop them so
+        // assertions about styled output hold everywhere. Tests opt back in
+        // through `extra`.
+        environment["NO_COLOR"] = nil
+        environment["CLICOLOR_FORCE"] = nil
+        for (key, value) in extra { environment[key] = value }
         process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
+        let stdin = Pipe()
+        process.standardInput = stdin
         try process.run()
+        // Replies fit comfortably in the pipe buffer, so write them up front;
+        // closing signals end of input, which the session treats as quit.
+        if let input {
+            stdin.fileHandleForWriting.write(Data(input.utf8))
+        }
+        stdin.fileHandleForWriting.closeFile()
         let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         process.waitUntilExit()
         return (process.terminationStatus, text)
@@ -247,5 +263,61 @@ final class SpeakerCommandsTests: XCTestCase {
             XCTAssertEqual(process.terminationStatus, 0)
         }
         XCTAssertEqual(Set(try SpeakerProfileStore.profiles().map(\.name)), ["Alice", "Bob"])
+    }
+
+    func testInteractiveReviewConfirmsFromPipedReplies() throws {
+        let one = try document("one", hash: "a")
+        let result = try run(["speakers", "review", one.path, "--interactive"], input: "Dave\n")
+        XCTAssertEqual(result.0, 0, result.1)
+        XCTAssertTrue(result.1.contains("Hello world."), "shows a speech sample")
+        XCTAssertTrue(result.1.contains("Confirmed SPEAKER_0 as Dave"), result.1)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: one).speakerMatches["SPEAKER_0"]?.status, .confirmed)
+        XCTAssertEqual(try SpeakerProfileStore.profiles().map(\.name), ["Dave"])
+    }
+
+    func testReviewOnPipesKeepsTheReadOnlyTable() throws {
+        let one = try document("one", hash: "a")
+        let before = try Data(contentsOf: one)
+        let result = try run(["speakers", "review", one.path], input: "Dave\n")
+        XCTAssertEqual(result.0, 0, result.1)
+        XCTAssertTrue(result.1.contains("SPEAKER_0\tunidentified"), result.1)
+        XCTAssertEqual(try Data(contentsOf: one), before, "piped review must not prompt or write")
+        XCTAssertTrue(try SpeakerProfileStore.profiles().isEmpty)
+    }
+
+    func testReviewWithoutTranscriptSpansAllSavedDocuments() throws {
+        let one = try CanonicalTranscriptStore.save(CanonicalTranscriptStore.load(from: document("one", hash: "a")))
+        let table = try run(["speakers", "review"])
+        XCTAssertEqual(table.0, 0, table.1)
+        XCTAssertTrue(table.1.contains("meeting"), table.1)
+        XCTAssertTrue(table.1.contains("SPEAKER_0\tunidentified"), table.1)
+
+        let interactive = try run(["speakers", "review", "--interactive"], input: "Dave\n")
+        XCTAssertEqual(interactive.0, 0, interactive.1)
+        XCTAssertTrue(interactive.1.contains("Confirmed SPEAKER_0 as Dave"), interactive.1)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: one).speakerMatches["SPEAKER_0"]?.name, "Dave")
+
+        let settled = try run(["speakers", "review", "--interactive"], input: "")
+        XCTAssertEqual(settled.0, 0, settled.1)
+        XCTAssertTrue(settled.1.contains("run with --all to revisit"), settled.1)
+    }
+
+    func testReviewFlagValidation() throws {
+        let one = try document("one", hash: "a")
+        XCTAssertEqual(try run(["speakers", "review", one.path, "--apply", "--interactive"]).0, 2)
+        XCTAssertEqual(try run(["speakers", "review", "--apply"]).0, 2, "--apply needs a transcript")
+    }
+
+    func testColorAppearsOnlyWhenForcedOntoPipes() throws {
+        let original = try CanonicalTranscriptStore.load(from: document("one", hash: "a"))
+        _ = try CanonicalTranscriptStore.save(original)
+        let plain = try run(["transcripts"])
+        XCTAssertEqual(plain.0, 0, plain.1)
+        XCTAssertFalse(plain.1.contains("\u{1B}["), "piped output stays plain")
+        let forced = try run(["transcripts"], environment: ["CLICOLOR_FORCE": "1"])
+        XCTAssertEqual(forced.0, 0, forced.1)
+        XCTAssertTrue(forced.1.contains("\u{1B}[1m"), "forced color emits ANSI sequences")
+        let suppressed = try run(["transcripts"], environment: ["CLICOLOR_FORCE": "1", "NO_COLOR": "1"])
+        XCTAssertFalse(suppressed.1.contains("\u{1B}["), "NO_COLOR wins over forcing")
     }
 }

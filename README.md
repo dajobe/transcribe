@@ -110,10 +110,29 @@ Stateful runs save a private canonical transcript before writing exports. Run
 `canonical_saved` event. These files preserve local speaker labels and voice
 embeddings independently of output formats.
 
+The fastest way to name speakers is the interactive review. On a terminal it
+walks every saved transcript that still needs attention (or one document when
+given a path), shows speech samples for each speaker drawn from the beginning,
+middle, and end of the recording, and prompts for a name:
+
+```bash
+transcribe speakers review            # all saved transcripts needing attention
+transcribe speakers review /path/to/result.transcript.json
+transcribe speakers review --all      # also revisit confirmed speakers
+```
+
+At the prompt, Enter accepts the bracketed suggestion when one is shown, any
+other text is a name (matching an existing profile case-insensitively before
+creating a new one), `l` lists profiles as a numbered menu, `s` skips, and `q`
+quits after applying the decisions already made. With piped or redirected
+output, review keeps its read-only table; `--interactive` and `--no-interactive`
+force the mode.
+
+The scripted commands remain for specific corrections:
+
 ```bash
 transcribe transcripts
 transcribe inspect /path/to/result.transcript.json
-transcribe speakers review /path/to/result.transcript.json
 transcribe speakers confirm /path/to/result.transcript.json SPEAKER_0 --name "Dave"
 transcribe speakers list
 
@@ -481,6 +500,12 @@ Given `meeting.mp3`, the tool writes:
 
 Which files are written depends on `--format`. Markdown details:
 **[specs/folder-action-markdown.md](specs/folder-action-markdown.md)**.
+
+Terminal output uses ANSI color when writing to a terminal. Color follows the
+usual conventions: `NO_COLOR` (any value) disables it, `TERM=dumb` disables it,
+and `CLICOLOR_FORCE=1` forces it onto pipes. Transcript files and JSON output
+are never styled, and structured log lines style only the level token, so `grep`
+and `awk` field parsing keep working.
 
 ### Text output
 

@@ -16,9 +16,14 @@ struct TranscriptExportArguments: ParsableArguments {
 }
 
 struct SpeakerReviewArguments: ParsableArguments {
-    @Argument var transcript: String
-    @Flag(help: "Save refreshed suggestions and strong automatic matches to this document.")
+    @Argument(help: "Path to a saved .transcript.json document; omit to review all saved transcripts.")
+    var transcript: String?
+    @Flag(help: "Save refreshed suggestions and strong automatic matches to this document without prompting.")
     var apply: Bool = false
+    @Flag(help: "Also revisit speakers that are already confirmed.")
+    var all: Bool = false
+    @Flag(inversion: .prefixedNo, help: "Force or disable the interactive session (default: interactive on a terminal).")
+    var interactive: Bool?
 }
 
 struct SpeakerConfirmArguments: ParsableArguments {
@@ -29,6 +34,8 @@ struct SpeakerConfirmArguments: ParsableArguments {
 }
 
 enum SpeakerCommands {
+    private static let color = Terminal.stdout
+
     /// The only fields the listing prints. Decoding this instead of the whole
     /// canonical document keeps one damaged, truncated or newer-schema file
     /// from hiding every other saved transcript, and avoids reading embedding
@@ -58,9 +65,9 @@ enum SpeakerCommands {
                 let listing = try JSONDecoder().decode(TranscriptListing.self, from: Data(contentsOf: file))
                 let basename = listing.basename.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !basename.isEmpty else { throw CanonicalTranscriptStore.StoreError.invalidData("basename is empty") }
-                print("\(safeText(listing.basename))\t\(file.path)")
+                print("\(Terminal.stdout.bold(safeText(listing.basename)))\t\(Terminal.stdout.dim(file.path))")
             } catch {
-                print("(unreadable)\t\(file.path)\t\(safeText(errorText(error)))")
+                print("\(Terminal.stdout.red("(unreadable)"))\t\(Terminal.stdout.dim(file.path))\t\(safeText(errorText(error)))")
             }
         }
     }
@@ -70,15 +77,19 @@ enum SpeakerCommands {
         USAGE: transcribe speakers <subcommand>
 
           list
-          review <transcript.json> [--apply]
+          review [transcript.json] [--all] [--apply] [--[no-]interactive]
           confirm <transcript.json> <SPEAKER_n> --name <name>
           confirm <transcript.json> <SPEAKER_n> --profile <profile-id>
           clear <transcript.json> <SPEAKER_n>
           rename <profile-id> <name>
           delete <profile-id>
 
-        Review suggests identities without changing the document unless --apply
-        is supplied. Only explicit confirmation adds a voice example to a profile.
+        On a terminal, review is an interactive session showing speech samples
+        for each speaker needing attention and prompting for a name; without a
+        transcript it walks every saved document. --all also revisits confirmed
+        speakers. Piped output keeps the read-only table, and --apply saves
+        refreshed suggestions and strong automatic matches without prompting.
+        Only explicit confirmation adds a voice example to a profile.
         Automatic names require two independent confirmed recordings and a clear
         matching margin. Distances are heuristics, not identity probabilities.
         Clear removes this document's assignment and confirmed example. Delete
@@ -113,21 +124,10 @@ enum SpeakerCommands {
             let profiles = try SpeakerProfileStore.profiles()
             if profiles.isEmpty { print("No confirmed speaker profiles.") }
             for profile in profiles {
-                print("\(profile.id)\t\(safeText(profile.name))\texamples=\(profile.examples.count)")
+                print("\(color.dim(profile.id))\t\(color.bold(safeText(profile.name)))\texamples=\(profile.examples.count)")
             }
         case "review":
-            let options = try parse(SpeakerReviewArguments.self, args)
-            let url = transcriptURL(options.transcript)
-            guard options.apply else {
-                printReview(try refreshedDocument(at: url))
-                return
-            }
-            try withDocumentLock(at: url) {
-                let document = try refreshedDocument(at: url)
-                printReview(document)
-                _ = try CanonicalTranscriptStore.save(document, to: url)
-                print("Saved assignments to \(url.path). Export again to update rendered files.")
-            }
+            try review(parse(SpeakerReviewArguments.self, args))
         case "confirm":
             let options = try parse(SpeakerConfirmArguments.self, args)
             try require((options.name != nil) != (options.profile != nil), "Use exactly one of --name or --profile.")
@@ -160,7 +160,7 @@ enum SpeakerCommands {
                         exitCode: .outputWrite
                     )
                 }
-                print("Confirmed \(options.speaker) as \(safeText(match.name)) (\(match.profileID)). Export again to update rendered files.")
+                print(color.green("Confirmed \(options.speaker) as \(safeText(match.name)) (\(match.profileID)).") + " Export again to update rendered files.")
             }
         case "clear":
             try require(args.count == 2, "Usage: transcribe speakers clear <transcript.json> <SPEAKER_n>")
@@ -173,7 +173,7 @@ enum SpeakerCommands {
                 try SpeakerProfileStore.clearExamples(transcriptID: document.evidenceID, speakerID: args[1])
                 document.speakerMatches.removeValue(forKey: args[1])
                 _ = try CanonicalTranscriptStore.save(document, to: url)
-                print("Cleared \(safeText(args[1])). Future explicit review can suggest matches again.")
+                print(color.green("Cleared \(safeText(args[1])).") + " Future explicit review can suggest matches again.")
             }
         case "rename":
             try require(args.count == 2, "Usage: transcribe speakers rename <profile-id> <name>")
@@ -227,7 +227,7 @@ enum SpeakerCommands {
             formats: formats, overwrite: options.overwrite,
             model: document.model, version: document.transcribeVersion
         )
-        print("Exported \(formats.joined(separator: ",")) to \(resolvedOutputDir(options.outputDir)).")
+        print(color.green("Exported \(formats.joined(separator: ",")) to \(resolvedOutputDir(options.outputDir))."))
     }
 
     static func inspect(_ args: [String]) throws {
@@ -241,10 +241,102 @@ enum SpeakerCommands {
         printReview(document)
     }
 
+    /// Routes `speakers review`. On a terminal this is an interactive
+    /// identification session; scripts keep the 2.6.0 read-only table
+    /// (piped streams) and `--apply` semantics. Without a transcript
+    /// argument the review spans every saved canonical document.
+    private static func review(_ options: SpeakerReviewArguments) throws {
+        try require(!(options.apply && options.interactive == true), "Use --apply or --interactive, not both.")
+        if options.apply {
+            guard let transcript = options.transcript else {
+                throw usage("--apply needs a transcript path; run transcribe transcripts to list them.")
+            }
+            let url = transcriptURL(transcript)
+            try withDocumentLock(at: url) {
+                let document = try refreshedDocument(at: url)
+                printReview(document)
+                _ = try CanonicalTranscriptStore.save(document, to: url)
+                print(color.green("Saved assignments to \(url.path).") + " Export again to update rendered files.")
+            }
+            return
+        }
+        let interactive = options.interactive ?? Terminal.isInteractive
+        let session = SpeakerReview.Session(includeConfirmed: options.all)
+        if let transcript = options.transcript {
+            let url = transcriptURL(transcript)
+            guard interactive else {
+                printReview(try refreshedDocument(at: url))
+                return
+            }
+            let document = try refreshedDocument(at: url)
+            guard session.needsAttention(document) else {
+                print(idleMessage(for: document, all: options.all))
+                return
+            }
+            try session.run(documents: [url])
+            return
+        }
+        let urls = try savedTranscriptURLs()
+        guard !urls.isEmpty else {
+            print("No saved canonical transcripts.")
+            return
+        }
+        guard interactive else {
+            for url in urls {
+                do {
+                    let document = try refreshedDocument(at: url)
+                    print("\(color.bold(safeText(document.basename)))\t\(color.dim(url.path))")
+                    printReview(document)
+                } catch {
+                    print("\(color.red("(unreadable)"))\t\(color.dim(url.path))\t\(safeText(errorText(error)))")
+                }
+            }
+            return
+        }
+        var reviewable: [URL] = []
+        for url in urls {
+            do {
+                if session.needsAttention(try refreshedDocument(at: url)) { reviewable.append(url) }
+            } catch {
+                print("\(color.red("(unreadable)"))\t\(color.dim(url.path))\t\(safeText(errorText(error)))")
+            }
+        }
+        guard !reviewable.isEmpty else {
+            print(options.all
+                ? "No saved transcripts with diarized speakers."
+                : "All speakers in saved transcripts are confirmed; run with --all to revisit them.")
+            return
+        }
+        try session.run(documents: reviewable)
+    }
+
+    private static func idleMessage(for document: CanonicalTranscript, all: Bool) -> String {
+        if document.output.speakerEmbeddings.isEmpty {
+            return "No diarized speakers in this transcript."
+        }
+        return all
+            ? "No diarized speakers to revisit in this transcript."
+            : "All speakers are confirmed; run with --all to revisit them."
+    }
+
+    /// Saved canonical documents, newest first, so an all-documents review
+    /// reaches recent recordings before the backlog.
+    private static func savedTranscriptURLs() throws -> [URL] {
+        let directory = try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts")
+        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        let key = URLResourceKey.contentModificationDateKey
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [key])
+            .filter { $0.lastPathComponent.hasSuffix(".transcript.json") }
+        func modified(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [key]).contentModificationDate) ?? .distantPast
+        }
+        return files.sorted { (modified($0), $0.path) > (modified($1), $1.path) }
+    }
+
     /// Loads a document and returns it with its speaker matches recomputed
     /// against the current profile store. The result is not saved; only
     /// review --apply writes it back.
-    private static func refreshedDocument(at url: URL) throws -> CanonicalTranscript {
+    static func refreshedDocument(at url: URL) throws -> CanonicalTranscript {
         var document = try CanonicalTranscriptStore.load(from: url)
         let matches = try SpeakerProfileStore.matches(
             embeddings: document.output.speakerEmbeddings,
@@ -277,7 +369,7 @@ enum SpeakerCommands {
     /// would silently drop the earlier one's assignment. The lock file sits
     /// beside the document; the profile store takes its own lock inside this
     /// one, so document-then-profile is the single lock order in this tool.
-    private static func withDocumentLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
+    static func withDocumentLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
         // A path with no document needs no lock; running the body unlocked
         // reports the missing file instead of leaving a lock beside a typo.
         guard FileManager.default.fileExists(atPath: url.path) else { return try body() }
@@ -307,9 +399,15 @@ enum SpeakerCommands {
         for speaker in speakers {
             if let match = document.speakerMatches[speaker] {
                 let distance = String(format: "%.3f", match.distance)
-                print("\(safeText(speaker))\t\(match.status.rawValue)\t\(safeText(match.name))\tprofile=\(match.profileID)\tdistance=\(distance)\texamples=\(match.confirmedExampleCount)")
+                let status: String
+                switch match.status {
+                case .confirmed: status = color.green(match.status.rawValue)
+                case .automatic: status = color.cyan(match.status.rawValue)
+                case .suggested: status = color.yellow(match.status.rawValue)
+                }
+                print("\(safeText(speaker))\t\(status)\t\(color.bold(safeText(match.name)))\tprofile=\(match.profileID)\tdistance=\(distance)\texamples=\(match.confirmedExampleCount)")
             } else {
-                print("\(safeText(speaker))\tunidentified")
+                print("\(safeText(speaker))\t\(color.red("unidentified"))")
             }
         }
     }
