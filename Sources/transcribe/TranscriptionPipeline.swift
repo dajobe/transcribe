@@ -526,7 +526,7 @@ func runTranscriptionOnly(
 }
 
 /// Result of transcription (and optionally diarization).
-struct TranscriptionOutput {
+struct TranscriptionOutput: Codable, Equatable {
     var segments: [TranscriptSegment]
     var language: String?
     var durationSeconds: Double
@@ -534,6 +534,40 @@ struct TranscriptionOutput {
     var speakersDetected: Int? = nil
     var speakerStrategy: String = "subsegment"
     var warnings: [String] = []
+    var speakerEmbeddings: [String: [Float]] = [:]
+
+    private enum CodingKeys: String, CodingKey {
+        case segments, language, durationSeconds, diarizationEnabled, speakersDetected
+        case speakerStrategy, warnings, speakerEmbeddings
+    }
+
+    init(
+        segments: [TranscriptSegment], language: String?, durationSeconds: Double,
+        diarizationEnabled: Bool = false, speakersDetected: Int? = nil,
+        speakerStrategy: String = "subsegment", warnings: [String] = [],
+        speakerEmbeddings: [String: [Float]] = [:]
+    ) {
+        self.segments = segments
+        self.language = language
+        self.durationSeconds = durationSeconds
+        self.diarizationEnabled = diarizationEnabled
+        self.speakersDetected = speakersDetected
+        self.speakerStrategy = speakerStrategy
+        self.warnings = warnings
+        self.speakerEmbeddings = speakerEmbeddings
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        segments = try c.decode([TranscriptSegment].self, forKey: .segments)
+        language = try c.decodeIfPresent(String.self, forKey: .language)
+        durationSeconds = try c.decode(Double.self, forKey: .durationSeconds)
+        diarizationEnabled = try c.decodeIfPresent(Bool.self, forKey: .diarizationEnabled) ?? false
+        speakersDetected = try c.decodeIfPresent(Int.self, forKey: .speakersDetected)
+        speakerStrategy = try c.decodeIfPresent(String.self, forKey: .speakerStrategy) ?? "subsegment"
+        warnings = try c.decodeIfPresent([String].self, forKey: .warnings) ?? []
+        speakerEmbeddings = try c.decodeIfPresent([String: [Float]].self, forKey: .speakerEmbeddings) ?? [:]
+    }
 }
 
 /// Format SpeakerInfo as "SPEAKER_0", "SPEAKER_1", or nil.

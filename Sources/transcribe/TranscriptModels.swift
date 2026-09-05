@@ -1,7 +1,7 @@
 import Foundation
 
 /// A single word with timing (for optional word-level output).
-public struct WordSegment: Sendable {
+public struct WordSegment: Sendable, Codable, Equatable {
     public let word: String
     public let start: Double
     public let end: Double
@@ -14,7 +14,7 @@ public struct WordSegment: Sendable {
 }
 
 /// A transcript segment: speaker (optional), time range, text, optional words.
-public struct TranscriptSegment: Sendable {
+public struct TranscriptSegment: Sendable, Codable, Equatable {
     public var speaker: String?
     public let start: Double
     public let end: Double
