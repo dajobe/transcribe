@@ -91,6 +91,7 @@ struct SourceCommandDispatcher {
         }
 
         let args = Array(sourceArgs.dropFirst())
+        warnIfCommandShadowsPath(source: source, remaining: args)
         switch source {
         case "help":
             try printSourceHelp(args)
@@ -104,6 +105,14 @@ struct SourceCommandDispatcher {
             try await runVoiceMemos(args)
         case "history":
             try runHistory(args)
+        case "speakers":
+            try SpeakerCommands.run(args)
+        case "export":
+            try SpeakerCommands.export(args)
+        case "inspect":
+            try SpeakerCommands.inspect(args)
+        case "transcripts":
+            try SpeakerCommands.transcripts(args)
         default:
             // Anything starting with `-` at the source position is an
             // unrecognised global flag/option that ArgumentParser couldn't
@@ -118,6 +127,31 @@ struct SourceCommandDispatcher {
             }
             try await runRootAlias(path: source, remaining: args)
         }
+    }
+
+    /// Bare-word command names recognised at the source position. Each one
+    /// shadows a root path alias (`transcribe <path>`) of the same name.
+    static let commandNames: Set<String> = [
+        "help", "config", "file", "dir", "voice-memos", "history",
+        "speakers", "export", "inspect", "transcripts",
+    ]
+
+    /// Commands win over the root path alias, so `transcribe transcripts` in a
+    /// directory that also contains a `transcripts` file or directory silently
+    /// does something other than transcribing that path. Say once, on stderr,
+    /// which reading was used and how to ask for the other one.
+    ///
+    /// Only an argument-free bare word is ambiguous: with trailing arguments
+    /// the root path alias would have rejected the invocation anyway.
+    private func warnIfCommandShadowsPath(source: String, remaining: [String]) {
+        guard remaining.isEmpty, Self.commandNames.contains(source) else { return }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: source, isDirectory: &isDir) else { return }
+        let kind = isDir.boolValue ? "directory" : "file"
+        let command = isDir.boolValue ? "dir" : "file"
+        emitWarning(
+            "`\(source)` is a built-in command, so the \(kind) ./\(source) was not transcribed; run `transcribe \(command) ./\(source)` to transcribe that path instead."
+        )
     }
 
     private func runFile(_ args: [String]) async throws {
@@ -221,6 +255,14 @@ struct SourceCommandDispatcher {
             printHelp(HistoryArguments.helpMessage())
         case "config":
             printHelp(ConfigCommand.helpText())
+        case "speakers":
+            printHelp(SpeakerCommands.helpText())
+        case "export":
+            printHelp(SpeakerCommands.exportHelpText())
+        case "inspect":
+            try SpeakerCommands.inspect(["--help"])
+        case "transcripts":
+            try SpeakerCommands.transcripts(["--help"])
         default:
             throw TranscribeError(message: "Unknown source command '\(args[0])'.", exitCode: .invalidUsage)
         }
@@ -257,6 +299,10 @@ struct SourceCommandDispatcher {
           voice-memos [<options>]       Import synced Apple Voice Memos.
 
         Other commands:
+          speakers <subcommand>        Review and confirm persistent speaker identities.
+          export <transcript.json>     Render a saved transcript without inference.
+          inspect <transcript.json>    Show saved transcript metadata and speakers.
+          transcripts                  List paths to saved canonical transcripts.
           history [--count <n>]         Show recent transcription/import history.
           config <subcommand>           View or edit JSON-backed user defaults (see `transcribe config --help`).
 

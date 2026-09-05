@@ -1059,13 +1059,101 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(stderr, "")
     }
 
+    func testBareCommandShadowingLocalPathWarnsOnStderr() throws {
+        let state = try makeTempDir()
+        let workDir = try makeTempDir()
+        try FileManager.default.createDirectory(
+            at: workDir.appendingPathComponent("transcripts"),
+            withIntermediateDirectories: true
+        )
+
+        let result = try runCommand(
+            ["transcripts"],
+            environment: ["XDG_STATE_HOME": state.path],
+            workingDirectory: workDir
+        )
+
+        XCTAssertEqual(result.status, 0, "command precedence should be unchanged; stderr: \(result.stderr)")
+        XCTAssertTrue(
+            result.stdout.contains("No saved canonical transcripts."),
+            "stdout should still be the transcripts listing; got: \(result.stdout)"
+        )
+        XCTAssertFalse(result.stdout.contains("built-in command"), "notice must not go to stdout: \(result.stdout)")
+        XCTAssertTrue(
+            result.stderr.contains("`transcripts` is a built-in command"),
+            "stderr should name the shadowed path; got: \(result.stderr)"
+        )
+        XCTAssertTrue(
+            result.stderr.contains("transcribe dir ./transcripts"),
+            "stderr should suggest the directory invocation; got: \(result.stderr)"
+        )
+    }
+
+    func testBareCommandWithoutShadowingPathIsSilent() throws {
+        let state = try makeTempDir()
+        let workDir = try makeTempDir()
+
+        let result = try runCommand(
+            ["transcripts"],
+            environment: ["XDG_STATE_HOME": state.path],
+            workingDirectory: workDir
+        )
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        XCTAssertEqual(result.stderr, "", "no shadowing path means no notice")
+    }
+
+    func testBareCommandShadowedByFileSuggestsFileInvocation() throws {
+        let state = try makeTempDir()
+        let workDir = try makeTempDir()
+        try Data("audio".utf8).write(to: workDir.appendingPathComponent("transcripts"))
+
+        let result = try runCommand(
+            ["transcripts"],
+            environment: ["XDG_STATE_HOME": state.path],
+            workingDirectory: workDir
+        )
+
+        XCTAssertEqual(result.status, 0, "stderr: \(result.stderr)")
+        XCTAssertTrue(
+            result.stderr.contains("transcribe file ./transcripts"),
+            "stderr should suggest the file invocation; got: \(result.stderr)"
+        )
+    }
+
+    func testCommandWithArgumentsDoesNotWarnAboutShadowedPath() throws {
+        let state = try makeTempDir()
+        let workDir = try makeTempDir()
+        try FileManager.default.createDirectory(
+            at: workDir.appendingPathComponent("speakers"),
+            withIntermediateDirectories: true
+        )
+
+        let result = try runCommand(
+            ["speakers", "list"],
+            environment: ["XDG_STATE_HOME": state.path],
+            workingDirectory: workDir
+        )
+
+        XCTAssertFalse(
+            result.stderr.contains("built-in command"),
+            "trailing arguments are unambiguous; got: \(result.stderr)"
+        )
+    }
+
     private func runCommand(
         _ arguments: [String],
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        workingDirectory: URL? = nil
     ) throws -> (status: Int32, stdout: String, stderr: String) {
         let process = Process()
+        // URL(fileURLWithPath:) absolutises against the test process working
+        // directory, so overriding currentDirectoryURL still finds the binary.
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
         process.arguments = arguments
+        if let workingDirectory {
+            process.currentDirectoryURL = workingDirectory
+        }
         if !environment.isEmpty {
             process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
         }
