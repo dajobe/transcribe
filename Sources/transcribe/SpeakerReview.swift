@@ -94,6 +94,9 @@ enum SpeakerReview {
         var color: TerminalColor = Terminal.stdout
         /// With --all, speakers that are already confirmed are revisited too.
         var includeConfirmed: Bool = false
+        /// When on, each document's recorded exports are regenerated right
+        /// after its decisions are applied, inside the same lock.
+        var refreshExports: Bool = true
 
         /// Walks the documents in order, prompting for each speaker that
         /// needs attention. Returns after the last document or when the user
@@ -105,7 +108,7 @@ enum SpeakerReview {
                 confirmedAnything = confirmedAnything || outcome.confirmed
                 if outcome.quit { break }
             }
-            if confirmedAnything {
+            if confirmedAnything && !refreshExports {
                 io.write("Export again to update rendered files.\n")
             }
         }
@@ -142,7 +145,9 @@ enum SpeakerReview {
                 }
                 if quit { break }
             }
-            let confirmed = try SpeakerReview.apply(decisions, to: url, io: io, color: color)
+            let confirmed = try SpeakerReview.apply(
+                decisions, to: url, io: io, color: color, refreshExports: refreshExports
+            )
             return (confirmed, quit)
         }
 
@@ -264,7 +269,8 @@ enum SpeakerReview {
     /// profile lock order. Returns whether anything was confirmed.
     static func apply(
         _ decisions: [(speaker: String, decision: SpeakerDecision)],
-        to url: URL, io: InteractiveIO, color: TerminalColor
+        to url: URL, io: InteractiveIO, color: TerminalColor,
+        refreshExports: Bool = false
     ) throws -> Bool {
         guard !decisions.isEmpty else { return false }
         return try SpeakerCommands.withDocumentLock(at: url) {
@@ -300,6 +306,9 @@ enum SpeakerReview {
             }
             if confirmedAny {
                 _ = try CanonicalTranscriptStore.save(document, to: url)
+                if refreshExports {
+                    ExportRefresh.run(document: document, at: url, io: io, color: color)
+                }
             }
             return confirmedAny
         }

@@ -165,9 +165,20 @@ name/profile corrects an assignment.
 
 Use `speakers clear <document> <SPEAKER_n>` to remove an assignment and its
 confirmed example, `speakers rename <profile-id> <name>` to rename a profile,
-and `speakers delete <profile-id>` to remove it. Saved name snapshots and old
-exports are not rewritten automatically. `review --apply` refreshes a document;
-export it again to update rendered files, using `--overwrite` when appropriate.
+and `speakers delete <profile-id>` to remove it. Renaming or deleting a profile
+does not rewrite saved name snapshots; `review --apply` refreshes a document's
+matches against the current profiles.
+
+Each canonical document records the output files it produced, so after a review,
+confirm, clear, or `review --apply`, those files are regenerated with the new
+names automatically. Files edited or deleted since transcribe wrote them are
+never overwritten or resurrected; refresh reports and skips them. Disable the
+behavior per command with `--no-refresh-exports`, per environment with
+`TRANSCRIBE_REFRESH_EXPORTS=0`, or persistently with `transcribe config set
+speakers.refreshExports false`. `transcribe export <document> --refresh` reruns
+the same regeneration on demand (without a document it walks every saved
+transcript), and documents exported before this feature print the exact `export
+--overwrite` command that seeds their records.
 
 Canonical files live under the application's state directory in `transcripts/`;
 profiles live in `speaker_profiles.json`. Both use owner-only permissions and

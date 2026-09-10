@@ -28,6 +28,8 @@ struct UserConfigFile: Codable, Equatable {
         var merge: String?
         var min: Int?
         var max: Int?
+        /// Whether speaker changes regenerate a document's recorded exports.
+        var refreshExports: Bool?
     }
 
     var compute: ComputeSection?

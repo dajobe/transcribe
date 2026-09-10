@@ -244,6 +244,9 @@ enum ConfigCommand {
         r("compute.segmenter", shared.segmenterCompute.rawValue, TranscriptionDefaults.segmenterCompute.rawValue)
         r("compute.embedder", shared.embedderCompute.rawValue, TranscriptionDefaults.embedderCompute.rawValue)
         r("speakers.enabled", boolStr(shared.speakersEnabled), boolStr(TranscriptionDefaults.speakersEnabled))
+        // Consumed by the speaker commands rather than the transcription
+        // pipeline, so its effective value resolves outside the shared merge.
+        r("speakers.refreshExports", boolStr(ExportRefresh.enabled(flag: nil)), boolStr(true))
         r("logging.level", shared.logLevel.rawValue, TranscriptionDefaults.logLevel.rawValue)
         r("logging.verbose", boolStr(shared.verbose), boolStr(TranscriptionDefaults.verbose))
         r("logging.etaHints", boolStr(shared.timingStatsPreference), boolStr(TranscriptionDefaults.etaHintsEnabled))
@@ -311,6 +314,10 @@ enum ConfigCommand {
         case "speakers.max":
             guard var s = cfg.speakers else { return true }
             s.max = nil
+            cfg.speakers = pruneSpeakersSection(s)
+        case "speakers.refreshExports":
+            guard var s = cfg.speakers else { return true }
+            s.refreshExports = nil
             cfg.speakers = pruneSpeakersSection(s)
         case "compute.audioEncoder":
             guard var c = cfg.compute else { return true }
@@ -398,7 +405,7 @@ enum ConfigCommand {
     }
 
     private static func pruneSpeakersSection(_ s: UserConfigFile.SpeakersSection) -> UserConfigFile.SpeakersSection? {
-        if s.enabled == nil && s.merge == nil && s.min == nil && s.max == nil { return nil }
+        if s.enabled == nil && s.merge == nil && s.min == nil && s.max == nil && s.refreshExports == nil { return nil }
         return s
     }
 
@@ -456,6 +463,10 @@ enum ConfigCommand {
         case "speakers.max":
             var s = cfg.speakers ?? UserConfigFile.SpeakersSection()
             s.max = try parseOptionalInt(v)
+            cfg.speakers = s
+        case "speakers.refreshExports":
+            var s = cfg.speakers ?? UserConfigFile.SpeakersSection()
+            s.refreshExports = try parseTriBool(v)
             cfg.speakers = s
         case "compute.audioEncoder":
             var c = cfg.compute ?? UserConfigFile.ComputeSection()

@@ -3,16 +3,18 @@ import Darwin
 import Foundation
 
 struct TranscriptExportArguments: ParsableArguments {
-    @Argument(help: "Path to a saved .transcript.json document.")
-    var transcript: String
+    @Argument(help: "Path to a saved .transcript.json document; omit with --refresh to walk every saved transcript.")
+    var transcript: String?
     @Option(name: [.short, .long], help: "Comma-separated formats, or all.")
-    var format: String = "txt,json"
+    var format: String?
     @Option(name: [.customShort("o"), .long], help: "Destination directory.")
-    var outputDir: String = "."
+    var outputDir: String?
     @Option(name: .long, help: "Override the saved output basename.")
     var outputPrefix: String?
     @Flag(name: .long, help: "Replace existing exports.")
     var overwrite: Bool = false
+    @Flag(name: .long, help: "Rewrite the document's recorded exports with current speaker names; files edited or deleted since transcribe wrote them are left alone.")
+    var refresh: Bool = false
 }
 
 struct SpeakerReviewArguments: ParsableArguments {
@@ -24,6 +26,8 @@ struct SpeakerReviewArguments: ParsableArguments {
     var all: Bool = false
     @Flag(inversion: .prefixedNo, help: "Force or disable the interactive session (default: interactive on a terminal).")
     var interactive: Bool?
+    @Flag(inversion: .prefixedNo, help: "Regenerate this document's recorded exports after saving changed speakers (default: on).")
+    var refreshExports: Bool?
 }
 
 struct SpeakerConfirmArguments: ParsableArguments {
@@ -31,6 +35,15 @@ struct SpeakerConfirmArguments: ParsableArguments {
     @Argument(help: "Local speaker ID, for example SPEAKER_0.") var speaker: String
     @Option(help: "Name for a new profile; quote names containing spaces.") var name: String?
     @Option(help: "Existing profile ID printed by speakers list or review.") var profile: String?
+    @Flag(inversion: .prefixedNo, help: "Regenerate this document's recorded exports after confirming (default: on).")
+    var refreshExports: Bool?
+}
+
+struct SpeakerClearArguments: ParsableArguments {
+    @Argument var transcript: String
+    @Argument(help: "Local speaker ID, for example SPEAKER_0.") var speaker: String
+    @Flag(inversion: .prefixedNo, help: "Regenerate this document's recorded exports after clearing (default: on).")
+    var refreshExports: Bool?
 }
 
 enum SpeakerCommands {
@@ -84,6 +97,8 @@ enum SpeakerCommands {
           rename <profile-id> <name>
           delete <profile-id>
 
+        review, confirm, and clear take --[no-]refresh-exports (default on).
+
         On a terminal, review is an interactive session showing speech samples
         for each speaker needing attention and prompting for a name; without a
         transcript it walks every saved document. --all also revisits confirmed
@@ -94,6 +109,11 @@ enum SpeakerCommands {
         matching margin. Distances are heuristics, not identity probabilities.
         Clear removes this document's assignment and confirmed example. Delete
         removes a profile and its examples; saved transcript name snapshots remain.
+        After a change, exports the document has on record are regenerated so
+        rendered files pick up the new names; files edited or deleted since
+        transcribe wrote them are left alone. Disable with --no-refresh-exports,
+        TRANSCRIBE_REFRESH_EXPORTS=0, or:
+        transcribe config set speakers.refreshExports false
         """
     }
 
@@ -101,10 +121,15 @@ enum SpeakerCommands {
         """
         USAGE: transcribe export <transcript.json> [--format txt,json,srt,vtt,md,tsv,all]
                                  [-o <directory>] [--output-prefix <name>] [--overwrite]
+               transcribe export [transcript.json] --refresh
 
         Renders a saved canonical transcript without audio, models, or downloads.
         Saved confirmed and automatic names are used; suggestions remain local IDs.
         Existing JSON exports retain their prior schema and contain no embeddings.
+        --refresh rewrites the files the document has on record with current
+        speaker names instead of taking a format list; files edited or deleted
+        since transcribe wrote them are left alone. Without a transcript it
+        walks every saved document.
         """
     }
 
@@ -160,20 +185,28 @@ enum SpeakerCommands {
                         exitCode: .outputWrite
                     )
                 }
-                print(color.green("Confirmed \(options.speaker) as \(safeText(match.name)) (\(match.profileID)).") + " Export again to update rendered files.")
+                if ExportRefresh.enabled(flag: options.refreshExports) {
+                    print(color.green("Confirmed \(options.speaker) as \(safeText(match.name)) (\(match.profileID))."))
+                    ExportRefresh.run(document: document, at: url, color: color)
+                } else {
+                    print(color.green("Confirmed \(options.speaker) as \(safeText(match.name)) (\(match.profileID)).") + " Export again to update rendered files.")
+                }
             }
         case "clear":
-            try require(args.count == 2, "Usage: transcribe speakers clear <transcript.json> <SPEAKER_n>")
-            let url = transcriptURL(args[0])
+            let options = try parse(SpeakerClearArguments.self, args)
+            let url = transcriptURL(options.transcript)
             try withDocumentLock(at: url) {
                 var document = try CanonicalTranscriptStore.load(from: url)
-                try require(document.output.speakerEmbeddings[args[1]] != nil, "Unknown local speaker '\(args[1])'.")
+                try require(document.output.speakerEmbeddings[options.speaker] != nil, "Unknown local speaker '\(options.speaker)'.")
                 // Remove any confirmed example, including a confirmation whose
                 // document save previously failed.
-                try SpeakerProfileStore.clearExamples(transcriptID: document.evidenceID, speakerID: args[1])
-                document.speakerMatches.removeValue(forKey: args[1])
+                try SpeakerProfileStore.clearExamples(transcriptID: document.evidenceID, speakerID: options.speaker)
+                document.speakerMatches.removeValue(forKey: options.speaker)
                 _ = try CanonicalTranscriptStore.save(document, to: url)
-                print(color.green("Cleared \(safeText(args[1])).") + " Future explicit review can suggest matches again.")
+                print(color.green("Cleared \(safeText(options.speaker)).") + " Future explicit review can suggest matches again.")
+                if ExportRefresh.enabled(flag: options.refreshExports) {
+                    ExportRefresh.run(document: document, at: url, color: color)
+                }
             }
         case "rename":
             try require(args.count == 2, "Usage: transcribe speakers rename <profile-id> <name>")
@@ -194,40 +227,127 @@ enum SpeakerCommands {
             return
         }
         let options = try parse(TranscriptExportArguments.self, args)
+        if options.refresh {
+            try require(
+                options.format == nil && options.outputDir == nil
+                    && options.outputPrefix == nil && !options.overwrite,
+                "--refresh regenerates the document's recorded exports; it does not take --format, -o, --output-prefix, or --overwrite."
+            )
+            try refreshRecordedExports(transcript: options.transcript)
+            return
+        }
+        guard let transcript = options.transcript else {
+            throw usage("Missing transcript path. Run transcribe transcripts to list saved documents.")
+        }
         if let prefix = options.outputPrefix {
             try require(
                 !prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 "Output filename prefix cannot be empty."
             )
         }
-        let document = try CanonicalTranscriptStore.load(from: transcriptURL(options.transcript))
-        let formats = parseOutputFormats(options.format)
-        try require(!formats.isEmpty && formats.allSatisfy(validOutputFormats.contains), "Unsupported or empty output format list.")
-        let basename = options.outputPrefix ?? document.basename
-        let inputPath = transcriptURL(options.transcript).standardizedFileURL.resolvingSymlinksInPath().path
-        let inputIdentity = fileIdentity(inputPath)
-        let destinations = outputPaths(
-            outputDir: options.outputDir, basename: basename,
-            formats: formats, writeTxtFile: formats.contains("txt")
-        )
-        // String equality alone misses a destination that names the input by
-        // another spelling: a case-flipped prefix on a case-insensitive
-        // volume, or a symlink. Compare on-disk identity whenever the
-        // destination already exists, since only an existing file can be
-        // replaced by the export.
-        for destination in destinations {
-            let sameFile = destination == inputPath
-                || (inputIdentity != nil && fileIdentity(destination) == inputIdentity)
-            try require(!sameFile, "An export cannot replace its canonical transcript. Choose another output prefix or directory.")
+        let outputDir = options.outputDir ?? "."
+        let url = transcriptURL(transcript)
+        // Load, render, write, and record under one document lock, so a
+        // concurrent speaker change cannot slip between the render and the
+        // record merge and leave a record whose hash describes files rendered
+        // from an older document.
+        try withDocumentLock(at: url) {
+            var document = try CanonicalTranscriptStore.load(from: url)
+            let formats = parseOutputFormats(options.format ?? "txt,json")
+            try require(!formats.isEmpty && formats.allSatisfy(validOutputFormats.contains), "Unsupported or empty output format list.")
+            let basename = options.outputPrefix ?? document.basename
+            let inputPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+            let inputIdentity = fileIdentity(inputPath)
+            let destinations = outputPaths(
+                outputDir: outputDir, basename: basename,
+                formats: formats, writeTxtFile: formats.contains("txt")
+            )
+            // String equality alone misses a destination that names the input by
+            // another spelling: a case-flipped prefix on a case-insensitive
+            // volume, or a symlink. Compare on-disk identity whenever the
+            // destination already exists, since only an existing file can be
+            // replaced by the export.
+            for destination in destinations {
+                let sameFile = destination == inputPath
+                    || (inputIdentity != nil && fileIdentity(destination) == inputIdentity)
+                try require(!sameFile, "An export cannot replace its canonical transcript. Choose another output prefix or directory.")
+            }
+            let records = try writeOutputs(
+                output: document.renderedOutput(), audioPath: document.audioPath,
+                audioFiles: document.audioFiles, sourceMetadata: document.sourceMetadata,
+                outputDir: outputDir, basename: basename,
+                formats: formats, overwrite: options.overwrite,
+                model: document.model, version: document.transcribeVersion,
+                createdAt: document.createdAt
+            )
+            print(color.green("Exported \(formats.joined(separator: ",")) to \(resolvedOutputDir(outputDir))."))
+            document.exports = merging(records, into: document.exports)
+            do {
+                _ = try CanonicalTranscriptStore.save(document, to: url)
+            } catch {
+                emitWarning("Export records not saved to \(url.path): \(error.localizedDescription). Speaker changes will not auto-refresh these files until a later export records them.")
+            }
         }
-        try writeOutputs(
-            output: document.renderedOutput(), audioPath: document.audioPath,
-            audioFiles: document.audioFiles, sourceMetadata: document.sourceMetadata,
-            outputDir: options.outputDir, basename: basename,
-            formats: formats, overwrite: options.overwrite,
-            model: document.model, version: document.transcribeVersion
-        )
-        print(color.green("Exported \(formats.joined(separator: ",")) to \(resolvedOutputDir(options.outputDir))."))
+    }
+
+    /// Records merge by path: writing the same destination again replaces its
+    /// entry, a new destination adds one.
+    private static func merging(_ records: [ExportRecord], into existing: [ExportRecord]?) -> [ExportRecord] {
+        var merged = existing ?? []
+        for record in records {
+            if let index = merged.firstIndex(where: { $0.path == record.path }) {
+                merged[index] = record
+            } else {
+                merged.append(record)
+            }
+        }
+        return merged
+    }
+
+    /// Remembers what a pipeline run just wrote, so later speaker changes can
+    /// regenerate the same files. The document is reloaded under its lock —
+    /// the render ran unlocked. Failure is a warning: the files the user
+    /// asked for were written.
+    static func updateExportRecords(at url: URL, adding records: [ExportRecord]) {
+        guard !records.isEmpty else { return }
+        do {
+            try withDocumentLock(at: url) {
+                var document = try CanonicalTranscriptStore.load(from: url)
+                document.exports = merging(records, into: document.exports)
+                _ = try CanonicalTranscriptStore.save(document, to: url)
+            }
+        } catch {
+            emitWarning("Export records not saved to \(url.path): \(error.localizedDescription). Speaker changes will not auto-refresh these files until a later export records them.")
+        }
+    }
+
+    /// `export --refresh`: reruns the refresh routine outside any speaker
+    /// change, for one document or across every saved transcript. Documents
+    /// whose recorded exports are all current print nothing.
+    private static func refreshRecordedExports(transcript: String?) throws {
+        if let transcript {
+            let url = transcriptURL(transcript)
+            try withDocumentLock(at: url) {
+                let document = try CanonicalTranscriptStore.load(from: url)
+                ExportRefresh.run(document: document, at: url, color: color)
+            }
+            return
+        }
+        let urls = try savedTranscriptURLs()
+        guard !urls.isEmpty else {
+            print("No saved canonical transcripts.")
+            return
+        }
+        for url in urls {
+            do {
+                try withDocumentLock(at: url) {
+                    let document = try CanonicalTranscriptStore.load(from: url)
+                    ExportRefresh.run(document: document, at: url, color: color)
+                }
+            } catch {
+                print("\(color.red("(unreadable)"))\t\(color.dim(url.path))\t\(safeText(errorText(error)))")
+            }
+        }
     }
 
     static func inspect(_ args: [String]) throws {
@@ -256,12 +376,20 @@ enum SpeakerCommands {
                 let document = try refreshedDocument(at: url)
                 printReview(document)
                 _ = try CanonicalTranscriptStore.save(document, to: url)
-                print(color.green("Saved assignments to \(url.path).") + " Export again to update rendered files.")
+                if ExportRefresh.enabled(flag: options.refreshExports) {
+                    print(color.green("Saved assignments to \(url.path)."))
+                    ExportRefresh.run(document: document, at: url, color: color)
+                } else {
+                    print(color.green("Saved assignments to \(url.path).") + " Export again to update rendered files.")
+                }
             }
             return
         }
         let interactive = options.interactive ?? Terminal.isInteractive
-        let session = SpeakerReview.Session(includeConfirmed: options.all)
+        let session = SpeakerReview.Session(
+            includeConfirmed: options.all,
+            refreshExports: ExportRefresh.enabled(flag: options.refreshExports)
+        )
         if let transcript = options.transcript {
             let url = transcriptURL(transcript)
             guard interactive else {
@@ -381,15 +509,6 @@ enum SpeakerCommands {
         guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { _ = flock(fd, LOCK_UN) }
         return try body()
-    }
-
-    /// Device and inode of an existing file, or nil when it does not exist.
-    /// Two paths naming the same identity are the same file whatever the
-    /// spelling: a case-insensitive volume, a symlink, or a hard link.
-    private static func fileIdentity(_ path: String) -> String? {
-        var info = stat()
-        guard stat(path, &info) == 0 else { return nil }
-        return "\(info.st_dev):\(info.st_ino)"
     }
 
     private static func printReview(_ document: CanonicalTranscript) {

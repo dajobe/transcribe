@@ -59,8 +59,29 @@ final class SpeakerReviewTests: XCTestCase {
         }
     }
 
-    private func session(_ io: ScriptedIO, includeConfirmed: Bool = false) -> SpeakerReview.Session {
-        SpeakerReview.Session(io: io.io, color: .disabled, includeConfirmed: includeConfirmed)
+    private func session(
+        _ io: ScriptedIO, includeConfirmed: Bool = false, refreshExports: Bool = true
+    ) -> SpeakerReview.Session {
+        SpeakerReview.Session(
+            io: io.io, color: .disabled,
+            includeConfirmed: includeConfirmed, refreshExports: refreshExports
+        )
+    }
+
+    /// Exports the document's txt beside the test directory and re-saves the
+    /// document with the matching export record, as a real export would.
+    private func seedTxtExport(at url: URL) throws -> URL {
+        var document = try CanonicalTranscriptStore.load(from: url)
+        let out = directory.appendingPathComponent("exports-\(document.basename)")
+        let records = try writeOutputs(
+            output: document.output, audioPath: document.audioPath,
+            outputDir: out.path, basename: document.basename, formats: ["txt"],
+            overwrite: true, model: document.model, version: document.transcribeVersion,
+            createdAt: document.createdAt
+        )
+        document.exports = records
+        _ = try CanonicalTranscriptStore.save(document, to: url)
+        return out.appendingPathComponent("\(document.basename).txt")
     }
 
     // MARK: - Reply parsing
@@ -195,6 +216,32 @@ final class SpeakerReviewTests: XCTestCase {
         let url = try document("one", hash: "a")
         try session(ScriptedIO([])).run(documents: [url])
         XCTAssertNil(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"])
+    }
+
+    // MARK: - Export refresh
+
+    func testSessionRefreshesRecordedExportsAfterConfirmation() throws {
+        let url = try document("one", hash: "a")
+        let txt = try seedTxtExport(at: url)
+        XCTAssertTrue(try String(contentsOf: txt).contains("SPEAKER_0"))
+
+        let scripted = ScriptedIO(["Siva"])
+        try session(scripted).run(documents: [url])
+
+        XCTAssertTrue(try String(contentsOf: txt).contains("Siva"), "recorded export picks up the new name")
+        XCTAssertTrue(scripted.output.contains("Refreshed 1 export"), scripted.output)
+        XCTAssertFalse(scripted.output.contains("Export again to update rendered files."), scripted.output)
+    }
+
+    func testSessionWithoutRefreshKeepsFilesAndClosingHint() throws {
+        let url = try document("one", hash: "a")
+        let txt = try seedTxtExport(at: url)
+
+        let scripted = ScriptedIO(["Siva"])
+        try session(scripted, refreshExports: false).run(documents: [url])
+
+        XCTAssertFalse(try String(contentsOf: txt).contains("Siva"), "disabled refresh leaves files stale")
+        XCTAssertTrue(scripted.output.contains("Export again to update rendered files."), scripted.output)
     }
 
     // MARK: - Color gating

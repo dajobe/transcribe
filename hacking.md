@@ -283,6 +283,8 @@ Main test groups:
 - `HistoryFormatterTests`: relative-time formatting, kind labels, label fallback
   order, column padding
 - `OutputWriterTests`: renderers, metadata, overwrite checks, atomic writes
+- `ExportRefreshTests`: export-refresh decision table (stale, modified, missing,
+  up to date), option precedence, stale-export hints
 - `TimingStoreTests`: timing append/load and median calculations
 - `TranscriptionPipelineTests`: cheap audio preflight failure path
 - `ComputeOptionsTests` and `LiveProgressTests`: compute fallback and progress

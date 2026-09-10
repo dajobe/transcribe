@@ -308,6 +308,103 @@ final class SpeakerCommandsTests: XCTestCase {
         XCTAssertEqual(try run(["speakers", "review", "--apply"]).0, 2, "--apply needs a transcript")
     }
 
+    // MARK: - Export refresh
+
+    func testExportSeedsRecordsInTheCanonicalDocument() throws {
+        let one = try document("one", hash: "a")
+        let out = directory.appendingPathComponent("seeded")
+        let exported = try run(["export", one.path, "--format", "txt,srt", "-o", out.path])
+        XCTAssertEqual(exported.0, 0, exported.1)
+
+        let records = try XCTUnwrap(CanonicalTranscriptStore.load(from: one).exports)
+        XCTAssertEqual(Set(records.map(\.format)), ["txt", "srt"])
+        for record in records {
+            XCTAssertEqual((record.path as NSString).deletingLastPathComponent, out.resolvingSymlinksInPath().path)
+            let bytes = try Data(contentsOf: URL(fileURLWithPath: record.path))
+            XCTAssertEqual(record.sha256, sha256Hex(bytes), "recorded hash matches the written file")
+        }
+    }
+
+    func testConfirmRefreshesRecordedExports() throws {
+        let one = try document("one", hash: "a")
+        let out = directory.appendingPathComponent("refreshed")
+        XCTAssertEqual(try run(["export", one.path, "--format", "txt,srt", "-o", out.path]).0, 0)
+        XCTAssertTrue(try String(contentsOf: out.appendingPathComponent("meeting.txt")).contains("SPEAKER_0"))
+
+        let confirm = try run(["speakers", "confirm", one.path, "SPEAKER_0", "--name", "Dave"])
+        XCTAssertEqual(confirm.0, 0, confirm.1)
+        XCTAssertTrue(confirm.1.contains("Refreshed 2 exports"), confirm.1)
+        XCTAssertFalse(confirm.1.contains("Export again to update rendered files."), confirm.1)
+        XCTAssertTrue(try String(contentsOf: out.appendingPathComponent("meeting.txt")).contains("Dave"))
+        XCTAssertTrue(try String(contentsOf: out.appendingPathComponent("meeting.srt")).contains("Dave"))
+    }
+
+    func testNoRefreshExportsLeavesFilesAndKeepsTheHint() throws {
+        let one = try document("one", hash: "a")
+        let out = directory.appendingPathComponent("disabled")
+        XCTAssertEqual(try run(["export", one.path, "--format", "txt", "-o", out.path]).0, 0)
+
+        let confirm = try run(["speakers", "confirm", one.path, "SPEAKER_0", "--name", "Dave", "--no-refresh-exports"])
+        XCTAssertEqual(confirm.0, 0, confirm.1)
+        XCTAssertTrue(confirm.1.contains("Export again to update rendered files."), confirm.1)
+        XCTAssertFalse(try String(contentsOf: out.appendingPathComponent("meeting.txt")).contains("Dave"))
+
+        let environment = try run(
+            ["speakers", "confirm", one.path, "SPEAKER_0", "--name", "Dave"],
+            environment: ["TRANSCRIBE_REFRESH_EXPORTS": "0"]
+        )
+        XCTAssertEqual(environment.0, 0, environment.1)
+        XCTAssertFalse(try String(contentsOf: out.appendingPathComponent("meeting.txt")).contains("Dave"), "environment variable disables refresh")
+    }
+
+    func testLocallyModifiedExportSurvivesConfirmation() throws {
+        let one = try document("one", hash: "a")
+        let out = directory.appendingPathComponent("edited")
+        XCTAssertEqual(try run(["export", one.path, "--format", "txt", "-o", out.path]).0, 0)
+        let txt = out.appendingPathComponent("meeting.txt")
+        let edited = "my careful manual edits\n"
+        try Data(edited.utf8).write(to: txt)
+
+        let confirm = try run(["speakers", "confirm", one.path, "SPEAKER_0", "--name", "Dave"])
+        XCTAssertEqual(confirm.0, 0, confirm.1)
+        XCTAssertTrue(confirm.1.contains("locally modified"), confirm.1)
+        XCTAssertEqual(try String(contentsOf: txt), edited, "edited export must not be overwritten")
+    }
+
+    func testConfirmOnRecordlessDocumentKeepsTheLegacyHint() throws {
+        let one = try document("one", hash: "a")
+        let confirm = try run(["speakers", "confirm", one.path, "SPEAKER_0", "--name", "Dave"])
+        XCTAssertEqual(confirm.0, 0, confirm.1)
+        XCTAssertTrue(confirm.1.contains("Export again to update rendered files."), confirm.1)
+    }
+
+    func testExportRefreshCommandRewritesStaleFiles() throws {
+        let one = try document("one", hash: "a")
+        let out = directory.appendingPathComponent("manual")
+        XCTAssertEqual(try run(["export", one.path, "--format", "txt", "-o", out.path]).0, 0)
+        XCTAssertEqual(try run(["speakers", "confirm", one.path, "SPEAKER_0", "--name", "Dave", "--no-refresh-exports"]).0, 0)
+        XCTAssertFalse(try String(contentsOf: out.appendingPathComponent("meeting.txt")).contains("Dave"))
+
+        let refresh = try run(["export", one.path, "--refresh"])
+        XCTAssertEqual(refresh.0, 0, refresh.1)
+        XCTAssertTrue(refresh.1.contains("Refreshed 1 export"), refresh.1)
+        XCTAssertTrue(try String(contentsOf: out.appendingPathComponent("meeting.txt")).contains("Dave"))
+
+        let repeated = try run(["export", one.path, "--refresh"])
+        XCTAssertEqual(repeated.0, 0, repeated.1)
+        XCTAssertFalse(repeated.1.contains("Refreshed"), "an up-to-date document refreshes quietly")
+    }
+
+    func testExportRefreshRejectsRenderOptionsAndExportNeedsATranscript() throws {
+        let one = try document("one", hash: "a")
+        XCTAssertEqual(try run(["export", one.path, "--refresh", "--format", "txt"]).0, 2)
+        XCTAssertEqual(try run(["export", one.path, "--refresh", "-o", directory.path]).0, 2)
+        XCTAssertEqual(try run(["export", one.path, "--refresh", "--overwrite"]).0, 2)
+        let missing = try run(["export"])
+        XCTAssertEqual(missing.0, 2, missing.1)
+        XCTAssertTrue(missing.1.contains("Missing transcript path"), missing.1)
+    }
+
     func testColorAppearsOnlyWhenForcedOntoPipes() throws {
         let original = try CanonicalTranscriptStore.load(from: document("one", hash: "a"))
         _ = try CanonicalTranscriptStore.save(original)

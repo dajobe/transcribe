@@ -585,6 +585,8 @@ struct PipelineRunner {
                 logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
             }
 
+            var savedCanonicalURL: URL?
+            var savedCanonicalCreatedAt: Date?
             if let canonical = try prepareCanonicalTranscript(
                 stateless: options.stateless,
                 model: resolvedModel,
@@ -605,6 +607,8 @@ struct PipelineRunner {
                 // product of the run, so the same failure is fatal instead.
                 do {
                     let canonicalURL = try CanonicalTranscriptStore.save(canonical)
+                    savedCanonicalURL = canonicalURL
+                    savedCanonicalCreatedAt = canonical.createdAt
                     out = canonical.renderedOutput()
                     let suggested = canonical.speakerMatches.values.filter { $0.status == .suggested }.count
                     let automatic = canonical.speakerMatches.values.filter { $0.status == .automatic }.count
@@ -649,7 +653,7 @@ struct PipelineRunner {
                 )
             } else {
                 sharedLiveDisplay?.beginOutput()
-                let (_, elapsedMs) = try WallClock.measureMs {
+                let (records, elapsedMs) = try WallClock.measureMs {
                     try writeOutputs(
                         output: out,
                         audioPath: plan.audioPathForOutput,
@@ -660,11 +664,17 @@ struct PipelineRunner {
                         formats: options.resolvedFormats,
                         overwrite: options.overwrite,
                         model: resolvedModel,
-                        version: Transcribe.version
+                        version: Transcribe.version,
+                        createdAt: savedCanonicalCreatedAt ?? Date()
                     )
                 }
                 sharedLiveDisplay?.finishOutput()
                 writeMs = elapsedMs
+                // Remember what was written so a later speaker confirmation
+                // can regenerate exactly these files.
+                if let savedCanonicalURL {
+                    SpeakerCommands.updateExportRecords(at: savedCanonicalURL, adding: records)
+                }
                 activeReporter?.info(
                     "phase_done",
                     fields: sessionFields(

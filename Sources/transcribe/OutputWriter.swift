@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -321,11 +322,12 @@ func renderJSON(
     audioFiles: [String]? = nil,
     sourceMetadata: OutputSourceMetadata? = nil,
     model: String,
-    version: String
+    version: String,
+    createdAt date: Date = Date()
 ) throws -> Data {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
-    let createdAt = formatter.string(from: Date())
+    let createdAt = formatter.string(from: date)
 
     let metadata = JSONMetadata(
         audio_file: (audioFile as NSString).lastPathComponent,
@@ -417,7 +419,8 @@ func renderMarkdown(
     audioFiles: [String]? = nil,
     sourceMetadata: OutputSourceMetadata? = nil,
     model: String,
-    version: String
+    version: String,
+    createdAt date: Date = Date()
 ) -> String {
     let basename = (audioFile as NSString).lastPathComponent
     let title = markdownSanitizeHeadingFragment((basename as NSString).deletingPathExtension)
@@ -425,7 +428,7 @@ func renderMarkdown(
 
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
-    let createdAt = formatter.string(from: Date())
+    let createdAt = formatter.string(from: date)
     let frontmatter = renderMarkdownFrontmatter(
         output: output,
         audioFile: audioFile,
@@ -689,6 +692,68 @@ func renderTSV(output: TranscriptionOutput) -> String {
 
 /// Writes requested output formats. Uses atomic writes.
 /// - Parameter audioFiles: When the input was a directory of clips, the source filenames in concat order; nil for single-file input.
+/// The exact bytes one output format would contain, or nil for an unknown
+/// format. Shared by writeOutputs and the export-refresh routine so a
+/// re-render is byte-identical to the original write when nothing changed.
+func renderOutputData(
+    format: String,
+    output: TranscriptionOutput,
+    audioPath: String,
+    audioFiles: [String]? = nil,
+    sourceMetadata: OutputSourceMetadata? = nil,
+    model: String,
+    version: String,
+    createdAt: Date = Date()
+) throws -> Data? {
+    switch format {
+    case "json":
+        return try renderJSON(
+            output: output,
+            audioFile: audioPath,
+            audioFiles: audioFiles,
+            sourceMetadata: sourceMetadata,
+            model: model,
+            version: version,
+            createdAt: createdAt
+        )
+    case "txt":
+        return (renderTxt(output: output) + "\n").data(using: .utf8)!
+    case "srt":
+        return (renderSRT(output: output) + "\n").data(using: .utf8)!
+    case "vtt":
+        return (renderVTT(output: output) + "\n").data(using: .utf8)!
+    case "tsv":
+        return (renderTSV(output: output) + "\n").data(using: .utf8)!
+    case "md":
+        let text = renderMarkdown(
+            output: output,
+            audioFile: audioPath,
+            audioFiles: audioFiles,
+            sourceMetadata: sourceMetadata,
+            model: model,
+            version: version,
+            createdAt: createdAt
+        )
+        return text.data(using: .utf8)!
+    default:
+        return nil
+    }
+}
+
+func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+/// Device and inode of an existing file, or nil when it does not exist.
+/// Two paths naming the same identity are the same file whatever the
+/// spelling: a case-insensitive volume, a symlink, or a hard link.
+func fileIdentity(_ path: String) -> String? {
+    var info = stat()
+    guard stat(path, &info) == 0 else { return nil }
+    return "\(info.st_dev):\(info.st_ino)"
+}
+
+@discardableResult
 func writeOutputs(
     output: TranscriptionOutput,
     audioPath: String,
@@ -699,8 +764,9 @@ func writeOutputs(
     formats: [String],
     overwrite: Bool,
     model: String,
-    version: String
-) throws {
+    version: String,
+    createdAt: Date = Date()
+) throws -> [ExportRecord] {
     let dir = resolvedOutputDir(outputDir)
 
     if !FileManager.default.fileExists(atPath: dir) {
@@ -722,48 +788,15 @@ func writeOutputs(
         overwrite: overwrite
     )
 
+    var records: [ExportRecord] = []
     for f in formats {
-        switch f {
-        case "json":
-            let data = try renderJSON(
-                output: output,
-                audioFile: audioPath,
-                audioFiles: audioFiles,
-                sourceMetadata: sourceMetadata,
-                model: model,
-                version: version
-            )
-            let path = (dir as NSString).appendingPathComponent("\(basename).json")
-            try writeAtomically(content: data, to: path)
-        case "txt":
-            let text = renderTxt(output: output)
-            let path = (dir as NSString).appendingPathComponent("\(basename).txt")
-            try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
-        case "srt":
-            let text = renderSRT(output: output)
-            let path = (dir as NSString).appendingPathComponent("\(basename).srt")
-            try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
-        case "vtt":
-            let text = renderVTT(output: output)
-            let path = (dir as NSString).appendingPathComponent("\(basename).vtt")
-            try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
-        case "tsv":
-            let text = renderTSV(output: output)
-            let path = (dir as NSString).appendingPathComponent("\(basename).tsv")
-            try writeAtomically(content: (text + "\n").data(using: .utf8)!, to: path)
-        case "md":
-            let text = renderMarkdown(
-                output: output,
-                audioFile: audioPath,
-                audioFiles: audioFiles,
-                sourceMetadata: sourceMetadata,
-                model: model,
-                version: version
-            )
-            let path = (dir as NSString).appendingPathComponent("\(basename).md")
-            try writeAtomically(content: text.data(using: .utf8)!, to: path)
-        default:
-            break
-        }
+        guard let data = try renderOutputData(
+            format: f, output: output, audioPath: audioPath, audioFiles: audioFiles,
+            sourceMetadata: sourceMetadata, model: model, version: version, createdAt: createdAt
+        ) else { continue }
+        let path = (dir as NSString).appendingPathComponent("\(basename).\(f)")
+        try writeAtomically(content: data, to: path)
+        records.append(ExportRecord(path: path, format: f, sha256: sha256Hex(data), exportedAt: Date()))
     }
+    return records
 }

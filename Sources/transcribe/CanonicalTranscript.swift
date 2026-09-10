@@ -1,6 +1,18 @@
 import CryptoKit
 import Foundation
 
+/// One rendered output file a canonical document knows it produced. The hash
+/// is change detection for transcribe's own writes — refresh only overwrites a
+/// file whose current bytes still match it — not an integrity guarantee.
+/// Paths are absolute and per-machine: a document copied elsewhere carries
+/// paths that will not resolve there, and refresh treats them as deleted.
+struct ExportRecord: Codable, Equatable {
+    var path: String
+    var format: String
+    var sha256: String
+    var exportedAt: Date
+}
+
 struct CanonicalTranscript: Codable, Equatable {
     static let currentSchemaVersion = 1
     /// SpeakerKit SDK version stamped into embedding identities. This must
@@ -45,6 +57,10 @@ struct CanonicalTranscript: Codable, Equatable {
     var output: TranscriptionOutput
     let embeddingModelID: String
     var speakerMatches: [String: SpeakerMatch]
+    /// Rendered files this document produced, absent on documents from
+    /// releases before export refresh. An additive optional key within schema
+    /// version 1: older binaries ignore it and older documents decode as nil.
+    var exports: [ExportRecord]?
 
     init(
         schemaVersion: Int = CanonicalTranscript.currentSchemaVersion,
@@ -60,7 +76,8 @@ struct CanonicalTranscript: Codable, Equatable {
         sourceMetadata: OutputSourceMetadata? = nil,
         output: TranscriptionOutput,
         embeddingModelID: String = CanonicalTranscript.speakerEmbeddingModelID,
-        speakerMatches: [String: SpeakerMatch] = [:]
+        speakerMatches: [String: SpeakerMatch] = [:],
+        exports: [ExportRecord]? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
@@ -76,6 +93,7 @@ struct CanonicalTranscript: Codable, Equatable {
         self.output = output
         self.embeddingModelID = embeddingModelID
         self.speakerMatches = speakerMatches
+        self.exports = exports
     }
 
     static func evidenceID(for fingerprint: SourceFingerprint) -> String {
@@ -100,7 +118,7 @@ struct CanonicalTranscript: Codable, Equatable {
             createdAt: createdAt, model: model, transcribeVersion: transcribeVersion,
             audioPath: audioPath, audioFiles: audioFiles, basename: basename,
             sourceMetadata: sourceMetadata, output: output, embeddingModelID: embeddingModelID,
-            speakerMatches: speakerMatches
+            speakerMatches: speakerMatches, exports: exports
         )
     }
 
@@ -158,9 +176,14 @@ enum CanonicalTranscriptStore {
         if let url {
             destination = url
         } else if let existing = existingManagedFile(forEvidenceID: document.evidenceID) {
+            let previous = try? load(from: existing.url)
             document = document.adopting(
-                id: existing.id, speakerMatches: confirmedMatchesCarriedForward(to: document, from: existing.url)
+                id: existing.id, speakerMatches: confirmedMatchesCarriedForward(to: document, from: previous)
             )
+            // A rerun of the same audio (a --no-outputs enrollment run, say)
+            // knows nothing about files earlier runs exported; dropping their
+            // records here would orphan those files from future refreshes.
+            if document.exports == nil { document.exports = previous?.exports }
             destination = existing.url
         } else {
             destination = try defaultURL(for: document.id)
@@ -216,8 +239,8 @@ enum CanonicalTranscriptStore {
         return nil
     }
 
-    /// Merges the confirmed assignments of the document at `url` into the
-    /// matches of a new run over the same evidence. Confirmations are keyed by
+    /// Merges the confirmed assignments of the previously stored document into
+    /// the matches of a new run over the same evidence. Confirmations are keyed by
     /// (evidence ID, speaker ID) in the profile store, so they stay valid
     /// across a re-run of the same audio, but only where the new run still
     /// produced an embedding for that speaker: a speaker the new diarization
@@ -225,9 +248,9 @@ enum CanonicalTranscriptStore {
     /// keeps the fresh suggested or automatic match. A stored file that no
     /// longer loads in full is still replaced, only without its confirmations.
     private static func confirmedMatchesCarriedForward(
-        to document: CanonicalTranscript, from url: URL
+        to document: CanonicalTranscript, from previous: CanonicalTranscript?
     ) -> [String: SpeakerMatch] {
-        guard let previous = try? load(from: url) else { return document.speakerMatches }
+        guard let previous else { return document.speakerMatches }
         var matches = document.speakerMatches
         for (speakerID, match) in previous.speakerMatches
         where match.status == .confirmed && document.output.speakerEmbeddings[speakerID] != nil {
@@ -300,6 +323,20 @@ enum CanonicalTranscriptStore {
                   match.confirmedExampleCount >= 0,
                   match.margin.map({ $0.isFinite && (0...2).contains($0) }) ?? true else {
                 throw StoreError.invalidData("speaker match evidence is invalid")
+            }
+        }
+        for record in document.exports ?? [] {
+            guard record.path.hasPrefix("/"),
+                  record.path.rangeOfCharacter(from: .controlCharacters) == nil,
+                  validOutputFormats.contains(record.format),
+                  // Every writer names files "<basename>.<format>", so a path
+                  // whose extension disagrees with its format was not written
+                  // by transcribe and must never become a refresh target.
+                  (record.path as NSString).pathExtension.lowercased() == record.format,
+                  record.sha256.count == 64,
+                  record.sha256.allSatisfy({ $0.isHexDigit }),
+                  record.sha256 == record.sha256.lowercased() else {
+                throw StoreError.invalidData("export record is invalid")
             }
         }
     }

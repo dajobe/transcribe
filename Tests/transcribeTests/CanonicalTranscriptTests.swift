@@ -264,6 +264,49 @@ final class CanonicalTranscriptTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: corrupt), Data("{ not json".utf8))
     }
 
+    func testExportRecordsRoundTripAndDecodeAsNilWhenAbsent() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("document.json")
+        var withRecords = document()
+        withRecords.exports = [
+            ExportRecord(path: "/notes/meeting.txt", format: "txt", sha256: String(repeating: "a", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_100)),
+        ]
+        _ = try CanonicalTranscriptStore.save(withRecords, to: url)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).exports, withRecords.exports)
+
+        let plain = directory.appendingPathComponent("plain.json")
+        _ = try CanonicalTranscriptStore.save(document(), to: plain)
+        XCTAssertFalse(try String(contentsOf: plain).contains("\"exports\""), "absent records add no key")
+        XCTAssertNil(try CanonicalTranscriptStore.load(from: plain).exports, "documents from before the feature decode with nil records")
+    }
+
+    func testManagedReplacementCarriesForwardExportRecords() throws {
+        var first = document()
+        // Whole seconds: ISO 8601 storage drops sub-second precision.
+        first.exports = [
+            ExportRecord(path: "/notes/meeting.txt", format: "txt", sha256: String(repeating: "b", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_100)),
+        ]
+        _ = try CanonicalTranscriptStore.save(first)
+
+        let url = try CanonicalTranscriptStore.save(document(id: UUID(), output: output(saying: "Second")))
+
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).exports, first.exports, "a rerun of the same audio must not orphan recorded exports")
+    }
+
+    func testValidationRejectsBadExportRecords() throws {
+        for record in [
+            ExportRecord(path: "relative/meeting.txt", format: "txt", sha256: String(repeating: "a", count: 64), exportedAt: Date()),
+            ExportRecord(path: "/notes/meeting.txt", format: "txt", sha256: "not-a-hash", exportedAt: Date()),
+            ExportRecord(path: "/notes/meeting.doc", format: "doc", sha256: String(repeating: "a", count: 64), exportedAt: Date()),
+            ExportRecord(path: "/etc/hosts", format: "txt", sha256: String(repeating: "a", count: 64), exportedAt: Date()),
+            ExportRecord(path: "/notes/meeting.txt", format: "md", sha256: String(repeating: "a", count: 64), exportedAt: Date()),
+        ] {
+            var invalid = document()
+            invalid.exports = [record]
+            XCTAssertThrowsError(try CanonicalTranscriptStore.validate(invalid), record.path)
+        }
+    }
+
     func testExplicitDestinationSaveDoesNotTouchTheManagedStore() throws {
         let managed = try CanonicalTranscriptStore.save(document(output: output(saying: "Managed")))
         let external = FileManager.default.temporaryDirectory
