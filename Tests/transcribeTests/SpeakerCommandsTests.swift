@@ -129,6 +129,56 @@ final class SpeakerCommandsTests: XCTestCase {
         XCTAssertEqual(try run(["speakers", "delete", jane.id]).0, 0)
     }
 
+    func testSpeakerIDAcceptsABareNumberAndAnyCase() throws {
+        let one = try document("one", hash: "a")
+        let confirm = try run(["speakers", "confirm", one.path, "0", "--name", "Dave"])
+        XCTAssertEqual(confirm.0, 0, confirm.1)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: one).speakerMatches["SPEAKER_0"]?.name, "Dave")
+        let cleared = try run(["speakers", "clear", one.path, "speaker_0"])
+        XCTAssertEqual(cleared.0, 0, cleared.1)
+        XCTAssertTrue(cleared.1.contains("Cleared SPEAKER_0."), cleared.1)
+        XCTAssertNil(try CanonicalTranscriptStore.load(from: one).speakerMatches["SPEAKER_0"])
+    }
+
+    func testUnknownSpeakerListsTheDocumentsSpeakers() throws {
+        let one = try document("one", hash: "a")
+        XCTAssertEqual(try run(["speakers", "confirm", one.path, "SPEAKER_0", "--name", "Dave"]).0, 0)
+        let cleared = try run(["speakers", "clear", one.path, "SPEAKER_7"])
+        XCTAssertEqual(cleared.0, 2, cleared.1)
+        XCTAssertTrue(cleared.1.contains("Speakers in this transcript: SPEAKER_0 (Dave, confirmed)."), cleared.1)
+        let confirmed = try run(["speakers", "confirm", one.path, "SPEAKER_7", "--name", "Jane"])
+        XCTAssertEqual(confirmed.0, 2, confirmed.1)
+        XCTAssertTrue(confirmed.1.contains("Speakers in this transcript: SPEAKER_0"), confirmed.1)
+    }
+
+    /// The saved-transcript directory lives under "Application Support", so an
+    /// unquoted path reaches the command as several arguments.
+    func testUnquotedPathWithSpacesSuggestsQuoting() throws {
+        let spaced = directory.appendingPathComponent("Application Support", isDirectory: true)
+        try FileManager.default.createDirectory(at: spaced, withIntermediateDirectories: true)
+        let target = spaced.appendingPathComponent("one.transcript.json")
+        try FileManager.default.moveItem(at: try document("one", hash: "a"), to: target)
+        let pieces = target.path.components(separatedBy: " ")
+        try XCTSkipUnless(pieces.count == 2, "temporary directory path already contains spaces")
+
+        let tooMany = try run(["speakers", "clear"] + pieces + ["SPEAKER_0"])
+        XCTAssertEqual(tooMany.0, 2, tooMany.1)
+        XCTAssertTrue(tooMany.1.contains("quote it: '\(target.path)'"), tooMany.1)
+
+        // A stray file at the first fragment used to surface only as a bare
+        // JSON decoding error.
+        XCTAssertTrue(FileManager.default.createFile(atPath: pieces[0], contents: Data()))
+        let stray = try run(["speakers", "clear"] + pieces)
+        XCTAssertEqual(stray.0, 3, stray.1)
+        // The command resolves symlinked temporary directories, so match the name.
+        XCTAssertTrue(stray.1.contains("Cannot read transcript ") && stray.1.contains("/Application: "), stray.1)
+        XCTAssertTrue(stray.1.contains("quote it: '\(target.path)'"), stray.1)
+
+        let missing = try run(["inspect", directory.appendingPathComponent("absent.transcript.json").path])
+        XCTAssertEqual(missing.0, 3, missing.1)
+        XCTAssertTrue(missing.1.contains("No transcript at"), missing.1)
+    }
+
     func testExportCannotOverwriteCanonicalInput() throws {
         let one = try document("one", hash: "a")
         let before = try Data(contentsOf: one)

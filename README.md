@@ -163,6 +163,11 @@ matches never train profiles. Thresholds are heuristics, not identity
 probabilities; uncertain speakers keep their local IDs. Confirming a different
 name/profile corrects an assignment.
 
+Local speaker IDs such as `SPEAKER_0` (or just `0`) are listed by `inspect` and
+`speakers review`; an unknown ID prints the ones the document has. Saved
+transcript paths usually contain spaces (for example `Application Support`), so
+quote them in the shell.
+
 Use `speakers clear <document> <SPEAKER_n>` to remove an assignment and its
 confirmed example, `speakers rename <profile-id> <name>` to rename a profile,
 and `speakers delete <profile-id>` to remove it. Renaming or deleting a profile
