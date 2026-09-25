@@ -445,11 +445,20 @@ struct PipelineRunner {
         }
         sharedLiveDisplay?.beginAudioChecking()
         let inputCheckStart = Date()
-        try preflightAudioDecoding(
+        let containerDurations = try preflightAudioDecoding(
             for: workItems.map(\.plan.session),
             limits: options.audioLoadLimits,
             logger: logger
         )
+        if let display = sharedLiveDisplay,
+           estimatedAudioDurationSeconds(for: workItems[0].plan) == nil,
+           let estimated = estimatedSessionDuration(workItems[0].plan.session, durations: containerDurations) {
+            // Lets the total ETA include the audio-scaled phases before the
+            // audio is decoded; the decoded length replaces it on audio load.
+            // Voice Memos plans already seeded a metadata estimate (with
+            // inter-clip padding), which this must not replace.
+            display.updateEstimatedAudioDuration(estimated)
+        }
         sharedLiveDisplay?.finishAudioChecking()
         activeReporter?.info(
             "phase_done",

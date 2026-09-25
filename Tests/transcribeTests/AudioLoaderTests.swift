@@ -31,6 +31,19 @@ final class AudioLoaderTests: XCTestCase {
         }
     }
 
+    /// The preflight duration seeds ETA hints before decoding, so it must
+    /// match the real length closely for a plain container.
+    func testValidateAudioContainerReportsEstimatedDuration() throws {
+        let url = try generatedAudioFixtureURL("wav")
+        let duration = try XCTUnwrap(AudioLoader.validateAudioContainer(fromPath: url.path))
+        XCTAssertEqual(duration, 4.0, accuracy: 0.05)
+
+        let session = AudioSession(files: [url.path, url.path], recordedAt: nil)
+        let durations = try preflightAudioDecoding(for: [session])
+        XCTAssertEqual(try XCTUnwrap(estimatedSessionDuration(session, durations: durations)), 8.0, accuracy: 0.1)
+        XCTAssertNil(estimatedSessionDuration(AudioSession(files: ["/missing.wav"], recordedAt: nil), durations: durations))
+    }
+
     func testDirectoryCandidateExtensionsComeFromAudioFormatExtensions() {
         XCTAssertEqual(AudioLoader.candidateExtensions, Set(AudioLoader.audioFormatExtensions))
         XCTAssertEqual(

@@ -131,6 +131,7 @@ final class LiveProgressDisplay {
     private let historicalRatios: HistoricalTimingRatios
     private let renderMode: LiveProgressRenderMode
     private let ttyColumnCountOverride: Int?
+    private let clock: () -> Date
 
     private var showModelLine: Bool = false
     private var showInputCheckLine: Bool = false
@@ -146,6 +147,11 @@ final class LiveProgressDisplay {
 
     private var transcriptionWindows: Int = 0
     private var firstTranscriptionProgressDate: Date?
+    /// Start of the transcribe (+ diarize) block; the processing ETA counts from here.
+    private var processingStartedAt: Date?
+    private var transcriptionProgress = PhaseProgressTracker()
+    private var transcriptionUnitSource: (() -> (completed: Int64, total: Int64))?
+    private var diarizationProgress = PhaseProgressTracker()
     private var diarizationFraction: Double?
     private var diarizationUnitCount: Int64?
     private var isFinished: Bool = false
@@ -164,6 +170,7 @@ final class LiveProgressDisplay {
     ///   - audioDurationSeconds: Estimated or decoded audio length in seconds.
     ///   - historicalRatios: Per-phase and total history ratios for ETA.
     ///   - renderMode: `.tty` for cursor updates; `.lineLog` for newline-separated snapshots.
+    ///   - clock: Time source; tests inject a controllable clock.
     init(
         startDate: Date = Date(),
         stderr: FileHandle = .standardOutput,
@@ -172,9 +179,9 @@ final class LiveProgressDisplay {
         audioDurationSeconds: Double = 0,
         historicalRatios: HistoricalTimingRatios = HistoricalTimingRatios(),
         historicalWallSecondsPerAudioSecond: Double? = nil,
-        historicalEncodingSecondsPerAudioSecond: Double? = nil,
         renderMode: LiveProgressRenderMode = .tty,
-        ttyColumnCountOverride: Int? = nil
+        ttyColumnCountOverride: Int? = nil,
+        clock: @escaping () -> Date = Date.init
     ) {
         self.startDate = startDate
         self.stderr = stderr
@@ -185,17 +192,55 @@ final class LiveProgressDisplay {
         if resolvedRatios.totalSecondsPerAudioSecond == nil {
             resolvedRatios.totalSecondsPerAudioSecond = historicalWallSecondsPerAudioSecond
         }
-        if resolvedRatios.encodingSecondsPerAudioSecond == nil {
-            resolvedRatios.encodingSecondsPerAudioSecond = historicalEncodingSecondsPerAudioSecond
-        }
         self.historicalRatios = resolvedRatios
         self.renderMode = renderMode
         self.ttyColumnCountOverride = ttyColumnCountOverride
+        self.clock = clock
     }
 
     /// Emit an immediate encoding snapshot and keep elapsed/ETA moving while waiting for model callbacks.
     func start() {
         beginEncoding()
+    }
+
+    /// Install a source of completed/total transcription work units (WhisperKit's
+    /// `Progress`, one unit per VAD chunk). It is polled on redraws and on every
+    /// transcription callback while the processing block is running.
+    ///
+    /// - Parameter batchSize: Chunks WhisperKit decodes concurrently; pace
+    ///   samples at batch boundaries are preferred (see `PhaseProgressTracker`).
+    func setTranscriptionUnitSource(
+        batchSize: Int = 0,
+        _ source: (() -> (completed: Int64, total: Int64))?
+    ) {
+        queue.sync {
+            self.transcriptionUnitSource = source
+            self.transcriptionProgress.batchSize = Int64(max(0, batchSize))
+        }
+    }
+
+    /// Record completed/total transcription work units directly.
+    func updateTranscriptionUnits(completed: Int64, total: Int64) {
+        queue.async {
+            guard !self.isFinished else { return }
+            self.recordTranscriptionUnitsLocked(completed: completed, total: total)
+            self.redraw()
+        }
+    }
+
+    private func recordTranscriptionUnitsLocked(completed: Int64, total: Int64) {
+        guard let processingStartedAt, !transcriptionState.isDone else { return }
+        transcriptionProgress.record(
+            completed: completed,
+            total: total,
+            elapsed: clock().timeIntervalSince(processingStartedAt)
+        )
+    }
+
+    private func sampleTranscriptionUnitsLocked() {
+        guard let transcriptionUnitSource, processingStartedAt != nil, !transcriptionState.isDone else { return }
+        let units = transcriptionUnitSource()
+        recordTranscriptionUnitsLocked(completed: units.completed, total: units.total)
     }
 
     func appendDiagnostic(_ event: TranscribeEvent) {
@@ -214,7 +259,7 @@ final class LiveProgressDisplay {
         queue.sync {
             guard !self.isFinished else { return }
             self.showModelLine = true
-            self.modelState = .running(startedAt: Date())
+            self.modelState = .running(startedAt: clock())
             self.redraw()
             self.startTimerIfNeeded()
         }
@@ -224,7 +269,7 @@ final class LiveProgressDisplay {
         queue.sync {
             guard !self.isFinished else { return }
             self.showModelLine = true
-            self.modelState = self.doneState(self.modelState, at: Date())
+            self.modelState = self.doneState(self.modelState, at: clock())
             self.redraw()
         }
     }
@@ -234,7 +279,7 @@ final class LiveProgressDisplay {
             guard !self.isFinished else { return }
             self.showInputCheckLine = true
             if case .waiting = self.inputCheckState {
-                self.inputCheckState = .running(startedAt: Date())
+                self.inputCheckState = .running(startedAt: clock())
             }
             self.redraw()
             self.startTimerIfNeeded()
@@ -245,7 +290,7 @@ final class LiveProgressDisplay {
         queue.sync {
             guard !self.isFinished else { return }
             self.showInputCheckLine = true
-            self.inputCheckState = self.doneState(self.inputCheckState, at: Date())
+            self.inputCheckState = self.doneState(self.inputCheckState, at: clock())
             self.redraw()
         }
     }
@@ -256,10 +301,20 @@ final class LiveProgressDisplay {
             self.showAudioLine = true
             self.audioActivity = "loading audio"
             if case .waiting = self.audioState {
-                self.audioState = .running(startedAt: Date())
+                self.audioState = .running(startedAt: clock())
             }
             self.redraw()
             self.startTimerIfNeeded()
+        }
+    }
+
+    /// Seed the audio length from container metadata so audio-scaled ETAs can
+    /// render before decoding. Ignored once a decoded duration is known.
+    func updateEstimatedAudioDuration(_ durationSeconds: Double) {
+        queue.sync {
+            guard !self.isFinished, durationSeconds > 0, !self.audioState.isDone else { return }
+            self.audioDurationSeconds = durationSeconds
+            self.redraw()
         }
     }
 
@@ -270,7 +325,7 @@ final class LiveProgressDisplay {
             if durationSeconds > 0 {
                 self.audioDurationSeconds = durationSeconds
             }
-            self.audioState = self.doneState(self.audioState, at: Date())
+            self.audioState = self.doneState(self.audioState, at: clock())
             self.redraw()
         }
     }
@@ -278,9 +333,12 @@ final class LiveProgressDisplay {
     func beginEncoding() {
         queue.sync {
             guard !self.isFinished else { return }
-            let now = Date()
+            let now = clock()
             if case .waiting = self.encodingState {
                 self.encodingState = .running(startedAt: now)
+            }
+            if self.processingStartedAt == nil {
+                self.processingStartedAt = now
             }
             if self.showDiarizationLine, case .waiting = self.diarizationState {
                 self.diarizationState = .running(startedAt: now)
@@ -290,17 +348,18 @@ final class LiveProgressDisplay {
         }
     }
 
-    /// Update the transcription line from WhisperKit progress (windows done).
+    /// Update the transcription line from a WhisperKit progress callback.
     func updateTranscription(progress: TranscriptionProgress) {
         queue.async {
             guard !self.isFinished else { return }
-            let now = Date()
+            let now = self.clock()
             if self.firstTranscriptionProgressDate == nil {
                 self.firstTranscriptionProgressDate = now
                 self.encodingState = self.doneState(self.encodingState, at: now)
                 self.transcriptionState = .running(startedAt: now)
             }
             self.transcriptionWindows = Int(progress.timings.totalDecodingWindows)
+            self.sampleTranscriptionUnitsLocked()
             self.redraw()
         }
     }
@@ -310,12 +369,18 @@ final class LiveProgressDisplay {
     func updateDiarization(fractionCompleted: Double, completedUnitCount: Int64) {
         queue.async {
             guard self.showDiarizationLine, !self.isFinished else { return }
-            let now = Date()
+            let now = self.clock()
             if case .waiting = self.diarizationState {
                 self.diarizationState = .running(startedAt: now)
             }
             self.diarizationFraction = fractionCompleted
             self.diarizationUnitCount = completedUnitCount
+            if case .running(let startedAt) = self.diarizationState {
+                self.diarizationProgress.record(
+                    fraction: fractionCompleted,
+                    elapsed: now.timeIntervalSince(startedAt)
+                )
+            }
             if fractionCompleted >= 0.995 {
                 self.diarizationState = self.doneState(self.diarizationState, at: now)
             }
@@ -326,7 +391,7 @@ final class LiveProgressDisplay {
     func beginOutput() {
         queue.sync {
             guard !self.isFinished else { return }
-            let now = Date()
+            let now = clock()
             self.workCompletedAt = nil
             self.encodingState = self.doneState(self.encodingState, at: now)
             self.transcriptionState = self.doneState(self.transcriptionState, at: now)
@@ -341,7 +406,7 @@ final class LiveProgressDisplay {
     func finishOutput() {
         queue.sync {
             guard !self.isFinished else { return }
-            let now = Date()
+            let now = clock()
             self.outputState = self.doneState(self.outputState, at: now)
             self.workCompletedAt = now
             self.redraw()
@@ -357,7 +422,7 @@ final class LiveProgressDisplay {
                 return windows > 0 ? windows : nil
             }
 
-            finishProcessingLocked(at: Date())
+            finishProcessingLocked(at: clock())
             redraw()
 
             let windows = transcriptionWindows
@@ -375,7 +440,7 @@ final class LiveProgressDisplay {
             }
 
             let alreadyRenderedCompletedTTY = workCompletedAt != nil && renderMode == .tty
-            let now = workCompletedAt ?? Date()
+            let now = workCompletedAt ?? clock()
             finishProcessingLocked(at: now)
             if case .waiting = outputState {
                 // No output phase was shown for this display.
@@ -407,7 +472,7 @@ final class LiveProgressDisplay {
         queue.sync {
             guard !isFinished else { return }
 
-            failedAt = Date()
+            failedAt = clock()
             isFinished = true
             redrawTimer?.cancel()
             redrawTimer = nil
@@ -438,6 +503,8 @@ final class LiveProgressDisplay {
         if showDiarizationLine {
             diarizationState = doneState(diarizationState, at: date)
         }
+        transcriptionUnitSource = nil
+        transcriptionProgress.markComplete()
     }
 
     func firstTranscriptionProgressMs(since date: Date) -> Int64? {
@@ -460,7 +527,7 @@ final class LiveProgressDisplay {
     }
 
     private func formatElapsed(since date: Date) -> String {
-        formatDuration(Date().timeIntervalSince(date))
+        formatDuration(clock().timeIntervalSince(date))
     }
 
     private func formatDuration(_ interval: TimeInterval) -> String {
@@ -496,73 +563,91 @@ final class LiveProgressDisplay {
         return ratio * audioDurationSeconds
     }
 
-    private func estimatedEncodingPhaseDuration() -> TimeInterval? {
-        let ratio = [
-            historicalRatios.whisperPrepSecondsPerAudioSecond,
-            historicalRatios.encodingSecondsPerAudioSecond,
-        ]
-        .compactMap { $0 }
-        .filter { $0 > 0 }
-        .reduce(0, +)
-        return ratio > 0 ? estimatedDuration(ratio: ratio) : nil
-    }
-
+    /// Remaining time for a phase with a fixed duration estimate and no live progress signal.
     private func remainingForPhase(_ state: LivePhaseState, estimatedDuration: TimeInterval?) -> TimeInterval? {
-        guard let estimatedDuration else { return nil }
+        guard let estimatedDuration, estimatedDuration > 0 else { return nil }
         switch state {
         case .waiting:
             return estimatedDuration
         case .running(let startedAt):
-            return max(0, estimatedDuration - Date().timeIntervalSince(startedAt))
+            return max(0, estimatedDuration - clock().timeIntervalSince(startedAt))
         case .done:
             return 0
         }
     }
 
-    private func fractionRemaining(for state: LivePhaseState, fractionCompleted: Double?) -> TimeInterval? {
-        guard case .running(let startedAt) = state,
-              let fractionCompleted,
-              fractionCompleted > 0.05,
-              fractionCompleted < 0.995 else {
-            return nil
-        }
-        let elapsed = Date().timeIntervalSince(startedAt)
-        let totalEstimate = elapsed / fractionCompleted
-        return max(0, totalEstimate - elapsed)
+    private func modelLoadRemaining() -> TimeInterval? {
+        remainingForPhase(modelState, estimatedDuration: historicalRatios.modelLoadSeconds)
     }
 
+    private func audioLoadRemaining() -> TimeInterval? {
+        remainingForPhase(
+            audioState,
+            estimatedDuration: estimatedDuration(ratio: historicalRatios.audioLoadSecondsPerAudioSecond)
+        )
+    }
+
+    /// The encoding line covers warm-up until WhisperKit's first callback, which
+    /// takes roughly constant time regardless of audio length.
+    private func encodingRemaining() -> TimeInterval? {
+        remainingForPhase(encodingState, estimatedDuration: historicalRatios.firstProgressSeconds)
+    }
+
+    /// Remaining time for the transcribe block (warm-up plus decoding), measured
+    /// from `processingStartedAt` so it lines up with the recorded wall ratio.
+    /// History seeds the estimate and live chunk progress takes over as it accrues.
+    private func processingRemaining() -> TimeInterval? {
+        if transcriptionState.isDone { return 0 }
+        let historyTotal = estimatedDuration(ratio: historicalRatios.processingSecondsPerAudioSecond)
+        guard let processingStartedAt else { return historyTotal }
+        return PhaseETA.remaining(
+            elapsed: clock().timeIntervalSince(processingStartedAt),
+            historyTotal: historyTotal,
+            progress: transcriptionProgress
+        )
+    }
+
+    private func diarizationRemaining() -> TimeInterval? {
+        guard showDiarizationLine else { return nil }
+        let historyTotal = estimatedDuration(ratio: historicalRatios.diarizationSecondsPerAudioSecond)
+        switch diarizationState {
+        case .done:
+            return 0
+        case .waiting:
+            return historyTotal
+        case .running(let startedAt):
+            return PhaseETA.remaining(
+                elapsed: clock().timeIntervalSince(startedAt),
+                historyTotal: historyTotal,
+                progress: diarizationProgress
+            )
+        }
+    }
+
+    /// Sum of the sequential phases still ahead; transcription and diarization
+    /// run concurrently so only the longer of the two counts.
     private func overallRemaining(elapsedSeconds: TimeInterval) -> TimeInterval? {
-        let encodingRemaining = remainingForPhase(
-            encodingState,
-            estimatedDuration: estimatedEncodingPhaseDuration()
-        ) ?? 0
-        let transcriptionRemaining = remainingForPhase(
-            transcriptionState,
-            estimatedDuration: estimatedDuration(ratio: historicalRatios.transcriptionSecondsPerAudioSecond)
-        ) ?? 0
-        let transcribePathRemaining = encodingRemaining + transcriptionRemaining
-
-        let outputRemaining = remainingForPhase(
-            outputState,
-            estimatedDuration: estimatedDuration(ratio: historicalRatios.outputSecondsPerAudioSecond)
-        ) ?? 0
-
-        let phaseEstimate: TimeInterval
-        if showDiarizationLine {
-            let diarizationRemaining = fractionRemaining(
-                for: diarizationState,
-                fractionCompleted: diarizationFraction
-            ) ?? remainingForPhase(
-                diarizationState,
-                estimatedDuration: estimatedDuration(ratio: historicalRatios.diarizationSecondsPerAudioSecond)
-            ) ?? 0
-            phaseEstimate = max(transcribePathRemaining, diarizationRemaining) + outputRemaining
-        } else {
-            phaseEstimate = transcribePathRemaining + outputRemaining
+        var anyKnown = false
+        func known(_ value: TimeInterval?) -> TimeInterval {
+            guard let value else { return 0 }
+            anyKnown = true
+            return value
         }
 
-        if phaseEstimate > 0 {
-            return phaseEstimate
+        var remaining: TimeInterval = 0
+        // Setup lines exist only on the shared display that starts before model
+        // loading; pipeline-only displays are created after those phases ran.
+        if showInputCheckLine || showModelLine || showAudioLine {
+            remaining += known(modelLoadRemaining())
+            remaining += known(audioLoadRemaining())
+        }
+        remaining += max(known(processingRemaining()), known(diarizationRemaining()))
+        remaining += known(remainingForPhase(
+            outputState,
+            estimatedDuration: estimatedDuration(ratio: historicalRatios.outputSecondsPerAudioSecond)
+        ))
+        if anyKnown {
+            return max(0, remaining)
         }
 
         guard let totalRatio = historicalRatios.totalSecondsPerAudioSecond,
@@ -570,8 +655,14 @@ final class LiveProgressDisplay {
               totalRatio > 0 else {
             return nil
         }
-        let predictedTotal = totalRatio * audioDurationSeconds
-        return max(0, predictedTotal - elapsedSeconds)
+        return max(0, totalRatio * audioDurationSeconds - elapsedSeconds)
+    }
+
+    private func transcriptionWindowsSummary() -> String? {
+        if transcriptionProgress.hasUnits {
+            return "\(transcriptionProgress.completedUnits)/\(transcriptionProgress.totalUnits) windows"
+        }
+        return transcriptionWindows > 0 ? "\(transcriptionWindows) windows" : nil
     }
 
     private func runningElapsed(for state: LivePhaseState) -> String {
@@ -660,7 +751,7 @@ final class LiveProgressDisplay {
             return statusLine(
                 label: "Model Loading",
                 icon: icon(for: modelState),
-                detail: runningDetail("loading models", state: modelState, remaining: nil)
+                detail: runningDetail("loading models", state: modelState, remaining: modelLoadRemaining())
             )
         case .done:
             return statusLine(label: "Model Loading", icon: icon(for: modelState), detail: finishedDetail(state: modelState))
@@ -689,14 +780,10 @@ final class LiveProgressDisplay {
         case .waiting:
             return statusLine(label: "Audio", icon: icon(for: audioState), detail: "waiting")
         case .running:
-            let remaining = remainingForPhase(
-                audioState,
-                estimatedDuration: estimatedDuration(ratio: historicalRatios.audioLoadSecondsPerAudioSecond)
-            )
             return statusLine(
                 label: "Audio",
                 icon: icon(for: audioState),
-                detail: runningDetail(audioActivity, state: audioState, remaining: remaining)
+                detail: runningDetail(audioActivity, state: audioState, remaining: audioLoadRemaining())
             )
         case .done:
             return statusLine(
@@ -712,14 +799,10 @@ final class LiveProgressDisplay {
         case .waiting:
             return statusLine(label: "Encoding", icon: icon(for: encodingState), detail: "waiting")
         case .running:
-            let remaining = remainingForPhase(
-                encodingState,
-                estimatedDuration: estimatedEncodingPhaseDuration()
-            )
             return statusLine(
                 label: "Encoding",
                 icon: icon(for: encodingState),
-                detail: runningDetail("encoding audio", state: encodingState, remaining: remaining)
+                detail: runningDetail("encoding audio", state: encodingState, remaining: encodingRemaining())
             )
         case .done:
             return statusLine(label: "Encoding", icon: icon(for: encodingState), detail: finishedDetail(state: encodingState))
@@ -731,19 +814,21 @@ final class LiveProgressDisplay {
         case .waiting:
             return statusLine(label: "Transcription", icon: icon(for: transcriptionState), detail: "waiting")
         case .running:
-            let state = transcriptionWindows > 0 ? "\(transcriptionWindows) windows" : nil
-            let remaining = remainingForPhase(
-                transcriptionState,
-                estimatedDuration: estimatedDuration(ratio: historicalRatios.transcriptionSecondsPerAudioSecond)
-            )
             return statusLine(
                 label: "Transcription",
                 icon: icon(for: transcriptionState),
-                detail: runningDetail(state, state: transcriptionState, remaining: remaining)
+                detail: runningDetail(
+                    transcriptionWindowsSummary(),
+                    state: transcriptionState,
+                    remaining: processingRemaining()
+                )
             )
         case .done:
-            let summary = transcriptionWindows > 0 ? "\(transcriptionWindows) windows" : nil
-            return statusLine(label: "Transcription", icon: icon(for: transcriptionState), detail: finishedDetail(summary, state: transcriptionState))
+            return statusLine(
+                label: "Transcription",
+                icon: icon(for: transcriptionState),
+                detail: finishedDetail(transcriptionWindowsSummary(), state: transcriptionState)
+            )
         }
     }
 
@@ -753,11 +838,7 @@ final class LiveProgressDisplay {
         case .waiting:
             return statusLine(label: "Diarization", icon: icon(for: diarizationState), detail: "waiting")
         case .running:
-            let remaining = fractionRemaining(for: diarizationState, fractionCompleted: diarizationFraction)
-                ?? remainingForPhase(
-                    diarizationState,
-                    estimatedDuration: estimatedDuration(ratio: historicalRatios.diarizationSecondsPerAudioSecond)
-            )
+            let remaining = diarizationRemaining()
             if let frac = diarizationFraction, let count = diarizationUnitCount {
                 let pct = Int(round(frac * 100))
                 let phase = count < 85 ? "segmenter" : "embedder"
@@ -797,7 +878,7 @@ final class LiveProgressDisplay {
     }
 
     private func progressLines() -> [String] {
-        let elapsedSeconds = Date().timeIntervalSince(startDate)
+        let elapsedSeconds = clock().timeIntervalSince(startDate)
         let totalLine: String
         if let failedAt {
             totalLine = statusLine(
@@ -847,7 +928,7 @@ final class LiveProgressDisplay {
     private func emitLineLogSnapshot(throttled: Bool) {
         guard case .lineLog(let minInterval) = renderMode else { return }
         if throttled {
-            let now = Date()
+            let now = clock()
             if let last = lastLineLogEmit, minInterval > 0, now.timeIntervalSince(last) < minInterval {
                 return
             }
@@ -897,6 +978,7 @@ final class LiveProgressDisplay {
         timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
         timer.setEventHandler { [weak self] in
             guard let self, !self.isFinished else { return }
+            self.sampleTranscriptionUnitsLocked()
             self.redraw()
         }
         redrawTimer = timer

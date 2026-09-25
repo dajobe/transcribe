@@ -35,20 +35,79 @@ without replacing the spec text below.
 - **TTY progress:**
   [`LiveProgress.swift`](../Sources/transcribe/LiveProgress.swift) takes
   `pipelineStartDate` (aligned with `runPipeline` start),
-  `audioDurationSeconds`, and optional `historicalWallSecondsPerAudioSecond`;
-  the transcription line appends a **(~Xm Ys left)** suffix when history
-  provides a median ratio.
+  `audioDurationSeconds`, and `HistoricalTimingRatios`; every running phase line
+  and the total line show an `ETA`. Estimation lives in
+  [`PhaseETA.swift`](../Sources/transcribe/PhaseETA.swift); see “ETA estimator
+  (as shipped)” below.
 - **History read:** Up to **50** most recent matching rows (`model` +
-  `diarization_enabled`), then median of `total_ms / 1000 / audio_duration_s` →
-  **wall seconds per second of audio** (not microseconds; stored times are
-  **milliseconds**).
+  `diarization_enabled`) for whole-run and processing-block ratios, and up to 50
+  rows matching `model` only for the other phase predictors. Ratios are medians
+  of `*_ms / 1000 / audio_duration_s` → **wall seconds per second of audio**
+  (stored times are **milliseconds**).
 - **Opt-out:** `--eta-hints off` or `TRANSCRIBE_ETA_HINTS=0` disables load,
   ETA-from-history, and append. Append failures are non-fatal (`try?`).
 - **User docs:** [README.md](../README.md) “Timing statistics” links here.
 - **Tests:**
   [TimingStoreTests.swift](../Tests/transcribeTests/TimingStoreTests.swift)
-  (median, XDG path, append/filter); live progress tests cover `finish()` return
-  value.
+  (medians, XDG path, append/filter),
+  [PhaseETATests.swift](../Tests/transcribeTests/PhaseETATests.swift) (estimator
+  arithmetic), and live progress tests with an injected clock.
+
+### ETA estimator (as shipped)
+
+**Predictors from history** (`HistoricalTimingRatios`):
+
+| Predictor                          | Source fields                            | Kind             |
+|:-----------------------------------|:-----------------------------------------|:-----------------|
+| `processingSecondsPerAudioSecond`  | `parallel_ms`, else `transcribe_only_ms` | ratio            |
+| `diarizationSecondsPerAudioSecond` | `speaker_diarization_ms`                 | ratio            |
+| `audioLoadSecondsPerAudioSecond`   | `audio_load_ms`                          | ratio            |
+| `outputSecondsPerAudioSecond`      | `merge_ms + write_outputs_ms`            | ratio            |
+| `firstProgressSeconds`             | `whisper_first_progress_ms`              | absolute seconds |
+| `modelLoadSeconds`                 | `whisper_init_ms + speaker_init_ms`      | absolute seconds |
+| `totalSecondsPerAudioSecond`       | `total_ms`                               | ratio (fallback) |
+
+WhisperKit's `encoding` and `decodingLoop` timings are **not** predictors. With
+`chunkingStrategy: .vad` WhisperKit decodes chunks on concurrent workers and
+sums those timings across workers, so they run about 10x the wall time of the
+block and produced ETAs an order of magnitude too long.
+
+**Live signal.** WhisperKit's `Progress` counts one unit per VAD chunk and knows
+the total as soon as chunking finishes. The display polls it on every progress
+callback and redraw tick, renders `completed/total windows`, and records a pace
+sample each time the count advances. WhisperKit decodes chunks in batches of
+`concurrentWorkerCount` (16) that finish together, so only counts on a batch
+boundary (or completion) are treated as throughput samples; a lone chunk
+finishing mid-batch is ignored when history exists and used only as a
+provisional pace on a cold start.
+
+**Audio length before decoding.** The input check reads
+`kAudioFilePropertyEstimatedDuration` from each container and seeds the shared
+display with the session's total, so the total ETA includes the audio-scaled
+phases during model loading. The decoded length replaces it on audio load.
+
+**Per-phase remaining time** (`PhaseETA.remaining`):
+
+- `history_total = ratio × audio_duration_s` (or the absolute median).
+- `live_total = elapsed_at_sample / fraction_at_sample` for the most recent
+  trusted sample. Sampling only at advances (and batch boundaries) makes the ETA
+  count down smoothly between chunk completions instead of climbing and dropping
+  with WhisperKit's batched completions.
+- `total = (1 − w) × history_total + w × live_total`, with `w = min(1, fraction
+  / 0.2)`, so live pace fully replaces history once 20% of the chunks are done.
+- `remaining = total − elapsed`. When that reaches zero but the phase is still
+  running, the estimate falls back to `elapsed / fraction − elapsed` so it keeps
+  moving rather than sticking at “now”.
+
+The transcription line measures elapsed from the start of the transcribe block
+(the same interval `parallel_ms` records), so the encoding warm-up is not
+double-counted. The diarization line uses the same estimator with SpeakerKit's
+`fractionCompleted`.
+
+**Total line.** Sum of the sequential phases still ahead: model load and audio
+load (only on the shared display that starts before them), then
+`max(transcription, diarization)` because those run concurrently, then output.
+With no phase predictor at all it falls back to `totalSecondsPerAudioSecond`.
 
 ### Units (implementation detail)
 
@@ -65,15 +124,15 @@ without replacing the spec text below.
 extrapolation from fraction (same idea as this app’s diarization line).
 
 - [Issue #202 – Progress bar for Swift
-  CLI?](https://github.com/argmaxinc/argmax-oss-swift/issues/202) — Feature request;
-  direction is to drive UI from WhisperKit’s **progress** object.
+  CLI?](https://github.com/argmaxinc/argmax-oss-swift/issues/202) — Feature
+  request; direction is to drive UI from WhisperKit’s **progress** object.
 - [PR #179 – Fix progress when using VAD
   chunking](https://github.com/argmaxinc/argmax-oss-swift/pull/179) — Makes
   `fractionCompleted` **monotonic** across VAD chunks via weighted child
   progress (important for any fraction-based ETA).
 - [PR #335 – WhisperKit CLI verbose / progress-style
-  logging](https://github.com/argmaxinc/argmax-oss-swift/pull/335) — Upstream CLI
-  improvements around progress and logging (still **live** signals, not a
+  logging](https://github.com/argmaxinc/argmax-oss-swift/pull/335) — Upstream
+  CLI improvements around progress and logging (still **live** signals, not a
   history file).
 
 No common, documented pattern was found for **device-specific or history-based**
@@ -175,33 +234,28 @@ compatibility.
   `median((total_ms / 1000) / audio_duration_s)` so `r_total` is **wall-seconds
   per second of audio** (stored `total_ms` is milliseconds).
 - Optionally separate `r_parallel` for the diarization path using stored
-  `parallel_ms` (not implemented separately yet; ETA uses full-run `total_ms`
-  only).
+  `parallel_ms`. *Shipped:* `processingSecondsPerAudioSecond` is exactly this
+  (`parallel_ms`, else `transcribe_only_ms`) and is the primary predictor;
+  `r_total` is only a fallback.
 
 1. **Live display updates:**
 
 - **Diarization:** Keep fraction-based ETA where `fractionCompleted` is
-  reliable; optionally **blend** with history-based ETA when fraction is noisy
-  (e.g. weight 0.5 / 0.5). *Shipped:* diarization line is still fraction-based
-  only (no blend).
+  reliable; optionally **blend** with history-based ETA when fraction is noisy.
+  *Shipped:* blended through `PhaseETA` (history until 20% done, then live
+  pace).
 - **Transcription:** With no native fraction, show ETA using **elapsed +
-  predicted remaining**:
-  - `predicted_total = r_total * audio_duration_s` (tune with optional
-    `file_bytes` term later: `a * duration + b * bytes`). *Shipped:* history
-    term only; no `file_bytes` regression in the ETA path yet.
-  - `remaining = max(0, predicted_total - elapsed)` — expose on the
-    transcription line when `r_total` is available (after at least one prior
-    run, or use a conservative default). *Shipped:* `elapsed` is from the shared
-    **`pipelineStartDate`** (full pipeline, not “since transcribe started”).
+  predicted remaining**. *Shipped:* WhisperKit's `Progress` supplies
+  completed/total chunks, so the line has a native fraction; history seeds the
+  estimate and the live pace takes over. `elapsed` is measured from the start of
+  the transcribe block, matching `parallel_ms`. No `file_bytes` regression yet.
 
-1. **Cold start / first run:** No history → omit transcription ETA or show “…”
-   until enough elapsed to estimate from **current** run (e.g. after first 5–10%
-   of predicted duration from a rough default ratio). *Shipped:* no rough in-run
-   extrapolation yet—history-based suffix appears only after prior matching runs
-   exist; otherwise the transcription line has elapsed but no ETA suffix.
-2. **WhisperKit follow-up (optional):** Inspect `TranscriptionProgress` /
-   timings in WhisperKit for a **fraction or completed/total windows** to
-   combine with historical ETA (hybrid is usually best).
+1. **Cold start / first run:** No history → omit transcription ETA until the
+   current run provides a pace. *Shipped:* the transcription ETA appears at the
+   first completed chunk and the total ETA follows it.
+2. **WhisperKit follow-up:** *Shipped:* `whisperKit.progress`
+   (`completedUnitCount` / `totalUnitCount`) is polled during transcription; see
+   “ETA estimator (as shipped)”.
 
 ## CLI / behavior
 

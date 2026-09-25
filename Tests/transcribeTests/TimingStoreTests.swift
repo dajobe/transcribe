@@ -77,7 +77,30 @@ final class TimingStoreTests: XCTestCase {
         XCTAssertEqual(record.speaker_total_chunks, 0)
     }
 
-    func testMedianEncodingSecondsPerAudioSecondIgnoresZeroAndMissingValues() throws {
+    private func record(
+        model: String = "model-a",
+        diarizationEnabled: Bool,
+        audioDurationS: Double = 10,
+        phases: PhaseTimings,
+        totalMs: Int64
+    ) -> RunTimingRecord {
+        RunTimingRecord(
+            endedAt: Date(),
+            transcribeVersion: "2.7.0",
+            model: model,
+            diarizationEnabled: diarizationEnabled,
+            inputBasename: "a.wav",
+            fileBytes: 100,
+            audioDurationS: audioDurationS,
+            segmentCount: 1,
+            speakersDetected: diarizationEnabled ? 2 : nil,
+            phases: phases,
+            writeOutputsMs: 1,
+            totalMs: totalMs
+        )
+    }
+
+    func testMedianProcessingSecondsPerAudioSecondPrefersParallelAndSkipsZero() throws {
         let v1JSON = """
         {
           "schema_version": 1,
@@ -103,87 +126,77 @@ final class TimingStoreTests: XCTestCase {
         """
         let migratedV1 = try JSONDecoder().decode(RunTimingRecord.self, from: Data(v1JSON.utf8))
 
-        var p1 = PhaseTimings()
-        p1.whisperEncodingMs = 1000
-        let r1 = RunTimingRecord(
-            endedAt: Date(),
-            transcribeVersion: "1.8.0",
-            model: "model-a",
-            diarizationEnabled: false,
-            inputBasename: "a.wav",
-            fileBytes: 100,
-            audioDurationS: 10,
-            segmentCount: 1,
-            speakersDetected: nil,
-            phases: p1,
-            writeOutputsMs: 1,
-            totalMs: 1000
-        )
+        // Diarized run: parallel block wins even though the summed decoder time is huge.
+        var diarized = PhaseTimings()
+        diarized.parallelMs = 3000
+        diarized.whisperDecodingLoopMs = 36_000
+        diarized.whisperEncodingMs = 9_000
+        let r1 = record(diarizationEnabled: true, phases: diarized, totalMs: 3200)
 
-        var p2 = PhaseTimings()
-        p2.whisperEncodingMs = 3000
-        let r2 = RunTimingRecord(
-            endedAt: Date(),
-            transcribeVersion: "1.8.0",
-            model: "model-a",
-            diarizationEnabled: false,
-            inputBasename: "b.wav",
-            fileBytes: 100,
-            audioDurationS: 10,
-            segmentCount: 1,
-            speakersDetected: nil,
-            phases: p2,
-            writeOutputsMs: 1,
-            totalMs: 3000
-        )
+        // Record with neither block recorded is ignored.
+        let r2 = record(diarizationEnabled: false, phases: PhaseTimings(), totalMs: 5000)
 
-        let median = TimingStore.medianEncodingSecondsPerAudioSecond(records: [migratedV1, r1, r2])
+        let median = TimingStore.medianProcessingSecondsPerAudioSecond(records: [migratedV1, r1, r2])
+        // Ratios: v1 transcribe_only 0.1, diarized parallel 0.3 -> median 0.2.
         XCTAssertEqual(try XCTUnwrap(median), 0.2, accuracy: 0.0001)
+        XCTAssertNil(TimingStore.medianProcessingSecondsPerAudioSecond(records: [r2]))
     }
 
-    func testHistoricalRatiosUsesPhaseRecordsAcrossDiarizationModes() throws {
+    func testMedianFirstProgressAndModelLoadAreAbsoluteSeconds() throws {
+        var fast = PhaseTimings()
+        fast.whisperFirstProgressMs = 1500
+        fast.whisperInitMs = 4000
+        fast.speakerInitMs = 60
+        let r1 = record(diarizationEnabled: true, audioDurationS: 600, phases: fast, totalMs: 90_000)
+
+        var slow = PhaseTimings()
+        slow.whisperFirstProgressMs = 2500
+        slow.whisperInitMs = 6000
+        slow.speakerInitMs = 140
+        let r2 = record(diarizationEnabled: true, audioDurationS: 60, phases: slow, totalMs: 12_000)
+
+        // Reused models within a batch record zero init and no first-progress sample.
+        let reused = record(diarizationEnabled: true, audioDurationS: 60, phases: PhaseTimings(), totalMs: 9_000)
+
+        let firstProgress = try XCTUnwrap(TimingStore.medianFirstProgressSeconds(records: [r1, r2, reused]))
+        XCTAssertEqual(firstProgress, 2.0, accuracy: 0.0001)
+        let modelLoad = try XCTUnwrap(TimingStore.medianModelLoadSeconds(records: [r1, r2, reused]))
+        XCTAssertEqual(modelLoad, 5.1, accuracy: 0.0001)
+        XCTAssertNil(TimingStore.medianFirstProgressSeconds(records: [reused]))
+        XCTAssertNil(TimingStore.medianModelLoadSeconds(records: [reused]))
+    }
+
+    func testHistoricalRatiosUsesWallClockPredictors() throws {
         var transcriptOnlyPhases = PhaseTimings()
-        transcriptOnlyPhases.whisperEncodingMs = 2000
-        let transcriptOnly = RunTimingRecord(
-            endedAt: Date(),
-            transcribeVersion: "1.8.0",
-            model: "model-a",
-            diarizationEnabled: false,
-            inputBasename: "a.wav",
-            fileBytes: 100,
-            audioDurationS: 10,
-            segmentCount: 1,
-            speakersDetected: nil,
-            phases: transcriptOnlyPhases,
-            writeOutputsMs: 1,
-            totalMs: 2000
-        )
+        transcriptOnlyPhases.transcribeOnlyMs = 2000
+        transcriptOnlyPhases.whisperEncodingMs = 20_000
+        transcriptOnlyPhases.whisperFirstProgressMs = 1000
+        transcriptOnlyPhases.whisperInitMs = 3000
+        let transcriptOnly = record(diarizationEnabled: false, phases: transcriptOnlyPhases, totalMs: 2000)
 
         var diarizedPhases = PhaseTimings()
-        diarizedPhases.whisperEncodingMs = 4000
+        diarizedPhases.parallelMs = 4000
+        diarizedPhases.whisperDecodingLoopMs = 48_000
         diarizedPhases.speakerDiarizationMs = 8000
-        let diarized = RunTimingRecord(
-            endedAt: Date(),
-            transcribeVersion: "1.8.0",
-            model: "model-a",
-            diarizationEnabled: true,
-            inputBasename: "b.wav",
-            fileBytes: 100,
-            audioDurationS: 10,
-            segmentCount: 1,
-            speakersDetected: 2,
-            phases: diarizedPhases,
-            writeOutputsMs: 1,
-            totalMs: 9000
-        )
+        diarizedPhases.whisperFirstProgressMs = 2000
+        diarizedPhases.whisperInitMs = 5000
+        let diarized = record(diarizationEnabled: true, phases: diarizedPhases, totalMs: 9000)
 
         let ratios = TimingStore.historicalRatios(
             totalRecords: [diarized],
             phaseRecords: [transcriptOnly, diarized]
         )
         XCTAssertEqual(try XCTUnwrap(ratios.totalSecondsPerAudioSecond), 0.9, accuracy: 0.0001)
-        XCTAssertEqual(try XCTUnwrap(ratios.encodingSecondsPerAudioSecond), 0.3, accuracy: 0.0001)
+        // Processing ratio comes from the diarization-matched records only.
+        XCTAssertEqual(try XCTUnwrap(ratios.processingSecondsPerAudioSecond), 0.4, accuracy: 0.0001)
         XCTAssertEqual(try XCTUnwrap(ratios.diarizationSecondsPerAudioSecond), 0.8, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(ratios.firstProgressSeconds), 1.5, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(ratios.modelLoadSeconds), 4.0, accuracy: 0.0001)
+
+        // Without diarization-matched records the processing ratio falls back to model-only records.
+        let fallback = TimingStore.historicalRatios(totalRecords: [], phaseRecords: [transcriptOnly, diarized])
+        XCTAssertEqual(try XCTUnwrap(fallback.processingSecondsPerAudioSecond), 0.3, accuracy: 0.0001)
+        XCTAssertNil(fallback.totalSecondsPerAudioSecond)
     }
 
     func testStateDirectoryUnderXDGStateHome() throws {

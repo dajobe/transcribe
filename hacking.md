@@ -40,6 +40,8 @@ The Swift package currently has one executable target:
   `HistoryFormatter` (relative-time and column rendering).
 - `Sources/transcribe/TimingStore.swift`: append-only timing history used for
   ETA hints.
+- `Sources/transcribe/PhaseETA.swift`: remaining-time estimator that blends
+  history predictors with live per-phase progress.
 - `Sources/transcribe/ComputeOptions.swift`: compute-unit option parsing and
   preferred/fallback backend selection.
 - `Sources/transcribe/Errors.swift`: user-facing errors and exit codes.
@@ -259,7 +261,14 @@ model component and falls back when a preferred GPU/Metal path fails.
 - processing history: `processing_history.jsonl`
 
 Both stores use append-only writes and file locking on Darwin. Timing records
-feed the progress ETA median; processing records feed idempotency.
+feed the progress ETA medians; processing records feed idempotency.
+
+ETA predictors are wall-clock medians (`parallel_ms` / `transcribe_only_ms`,
+`whisper_first_progress_ms`, `whisper_init_ms`), never WhisperKit's `encoding`
+or `decodingLoop` timings: with VAD chunking those are summed across concurrent
+workers and overstate wall time by roughly 10x. During a run the live display
+polls WhisperKit's `Progress` (one unit per VAD chunk) and shifts from the
+history estimate to the observed pace as chunks complete.
 
 ## Tests
 

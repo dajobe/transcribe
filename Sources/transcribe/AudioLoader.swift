@@ -40,7 +40,11 @@ enum AudioLoader {
     /// some valid AAC/M4A files when it seeks during an early validation pass.
     /// Keep preflight on the container-inspection path and leave full decoding
     /// to the actual transcription load.
-    static func validateAudioContainer(fromPath path: String) throws {
+    ///
+    /// - Returns: The container's estimated duration in seconds when the file
+    ///   reports one; used to seed ETA hints before the audio is decoded.
+    @discardableResult
+    static func validateAudioContainer(fromPath path: String) throws -> Double? {
         let expandedPath = (path as NSString).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: expandedPath) else {
             throw TranscribeError(
@@ -94,6 +98,19 @@ enum AudioLoader {
                 exitCode: .inputFile
             )
         }
+
+        var estimatedDuration: Float64 = 0
+        var durationSize = UInt32(MemoryLayout<Float64>.size)
+        let durationStatus = AudioFileGetProperty(
+            audioFile,
+            kAudioFilePropertyEstimatedDuration,
+            &durationSize,
+            &estimatedDuration
+        )
+        guard durationStatus == noErr, estimatedDuration.isFinite, estimatedDuration > 0 else {
+            return nil
+        }
+        return estimatedDuration
     }
 
     static func uncompressedByteCount(forSampleCount count: Int) -> Int {

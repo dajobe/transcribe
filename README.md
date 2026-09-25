@@ -348,10 +348,13 @@ them in the TUI diagnostics block.
 
 ### Timing statistics
 
-Successful runs can append timing records for ETA hints on the **transcription**
-progress line. Disable with `--eta-hints off` or **`TRANSCRIBE_ETA_HINTS=0`**
-(inherited by the process environment). **`TRANSCRIBE_TIMING_STATS=0`** is still
-honored as a legacy alias.
+Successful runs can append timing records for ETA hints on the live progress
+lines. The estimate starts from the wall-clock timing of prior runs with the
+same model and is refined as the run proceeds using WhisperKit's chunk progress,
+so the total ETA becomes more accurate the further a run gets. Disable with
+`--eta-hints off` or **`TRANSCRIBE_ETA_HINTS=0`** (inherited by the process
+environment). **`TRANSCRIBE_TIMING_STATS=0`** is still honored as a legacy
+alias.
 
 Full schema, paths, and ETA behavior:
 **[specs/timing-history.md](specs/timing-history.md)**.

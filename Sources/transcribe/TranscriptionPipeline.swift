@@ -137,11 +137,15 @@ func loadPreparedAudio(
 /// Inspects every input audio file before model initialization. This keeps
 /// missing or non-audio inputs on the cheap input-error path without forcing a
 /// full AVFoundation decode before Whisper/SpeakerKit models are loaded.
+/// Validates every input container before model initialization.
+/// - Returns: Estimated duration in seconds per path for files that report one
+///   (container metadata, not decoded length), keyed by the path as given.
+@discardableResult
 func preflightAudioDecoding(
     for sessions: [AudioSession],
     limits _: AudioLoadLimits = .default,
     logger: VerboseLogger? = nil
-) throws {
+) throws -> [String: Double] {
     var seen: Set<String> = []
     var paths: [String] = []
     for session in sessions {
@@ -151,16 +155,30 @@ func preflightAudioDecoding(
         }
     }
 
-    guard !paths.isEmpty else { return }
+    guard !paths.isEmpty else { return [:] }
     if paths.count == 1 {
         logger?.log("Validating audio before model init: \((paths[0] as NSString).lastPathComponent)")
     } else {
         logger?.log("Validating \(paths.count) audio files before model init...")
     }
 
+    var durations: [String: Double] = [:]
     for path in paths {
-        try AudioLoader.validateAudioContainer(fromPath: path)
+        if let duration = try AudioLoader.validateAudioContainer(fromPath: path) {
+            durations[path] = duration
+        }
     }
+    return durations
+}
+
+/// Sum of estimated container durations for a session, or nil when any clip lacks one.
+func estimatedSessionDuration(_ session: AudioSession, durations: [String: Double]) -> Double? {
+    var total: Double = 0
+    for path in session.files {
+        guard let duration = durations[path] else { return nil }
+        total += duration
+    }
+    return total > 0 ? total : nil
 }
 
 /// Returns a complete locally cached WhisperKit model folder, if one exists.
@@ -447,6 +465,13 @@ func runTranscriptionOnly(
     let results: [TranscriptionResult]
     if let display = liveDisplay {
         display.start()
+        // Capture the Progress object once: WhisperKit only replaces it after a
+        // run finishes, and re-reading the property from the display queue
+        // would race with that reassignment.
+        let chunkProgress = whisperKit.progress
+        display.setTranscriptionUnitSource(batchSize: decodeOptions.concurrentWorkerCount) {
+            (chunkProgress.completedUnitCount, chunkProgress.totalUnitCount)
+        }
         let transcribeStartDate = Date()
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
             try await whisperKit.transcribe(
@@ -843,6 +868,13 @@ private func runTranscriptionWithDiarization(
     let diarizationResult: DiarizationResult
     if let display = liveDisplay {
         display.start()
+        // Capture the Progress object once: WhisperKit only replaces it after a
+        // run finishes, and re-reading the property from the display queue
+        // would race with that reassignment.
+        let chunkProgress = whisperKit.progress
+        display.setTranscriptionUnitSource(batchSize: decodeOptions.concurrentWorkerCount) {
+            (chunkProgress.completedUnitCount, chunkProgress.totalUnitCount)
+        }
         let transcribeStartDate = Date()
         let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
             async let transTask: [TranscriptionResult] = whisperKit.transcribe(
@@ -1098,6 +1130,13 @@ func runSession(
     let diarizationResult: DiarizationResult
     if let display = liveDisplay {
         display.beginEncoding()
+        // Capture the Progress object once: WhisperKit only replaces it after a
+        // run finishes, and re-reading the property from the display queue
+        // would race with that reassignment.
+        let chunkProgress = models.whisperKit.progress
+        display.setTranscriptionUnitSource(batchSize: decodeOptions.concurrentWorkerCount) {
+            (chunkProgress.completedUnitCount, chunkProgress.totalUnitCount)
+        }
         let transcribeStartDate = Date()
         let (pair, pMs) = try await WallClock.measureMs { () async throws -> ([TranscriptionResult], DiarizationResult) in
             async let transTask: [TranscriptionResult] = models.whisperKit.transcribe(
@@ -1236,6 +1275,13 @@ private func runTranscriptOnlyOnLoadedWhisper(
     let results: [TranscriptionResult]
     if let display = liveDisplay {
         display.beginEncoding()
+        // Capture the Progress object once: WhisperKit only replaces it after a
+        // run finishes, and re-reading the property from the display queue
+        // would race with that reassignment.
+        let chunkProgress = whisperKit.progress
+        display.setTranscriptionUnitSource(batchSize: decodeOptions.concurrentWorkerCount) {
+            (chunkProgress.completedUnitCount, chunkProgress.totalUnitCount)
+        }
         let transcribeStartDate = Date()
         let (res, tMs) = try await WallClock.measureMs { () async throws -> [TranscriptionResult] in
             try await whisperKit.transcribe(audioArray: audioArray, decodeOptions: decodeOptions) { progress in

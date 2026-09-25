@@ -1,30 +1,43 @@
 import Foundation
 
+/// Wall-clock predictors derived from prior runs, used by the live ETA.
+///
+/// Every `*SecondsPerAudioSecond` value is wall seconds per second of audio.
+/// WhisperKit's own `encoding` / `decodingLoop` timings are deliberately not
+/// used here: with VAD chunking WhisperKit decodes many chunks concurrently and
+/// those timings are summed across workers, so they overstate wall time by an
+/// order of magnitude.
 struct HistoricalTimingRatios: Sendable, Equatable {
+    /// Whole run (`total_ms`), used only as a last-resort fallback.
     var totalSecondsPerAudioSecond: Double?
     var audioLoadSecondsPerAudioSecond: Double?
-    var whisperPrepSecondsPerAudioSecond: Double?
-    var encodingSecondsPerAudioSecond: Double?
-    var transcriptionSecondsPerAudioSecond: Double?
+    /// Wall time of the transcribe (+ concurrent diarize) block:
+    /// `parallel_ms` or `transcribe_only_ms`.
+    var processingSecondsPerAudioSecond: Double?
     var diarizationSecondsPerAudioSecond: Double?
     var outputSecondsPerAudioSecond: Double?
+    /// Absolute seconds from transcribe start until WhisperKit's first progress
+    /// callback (VAD chunking plus the first encoder pass); does not scale with audio length.
+    var firstProgressSeconds: Double?
+    /// Absolute seconds to initialize WhisperKit (+ SpeakerKit when recorded).
+    var modelLoadSeconds: Double?
 
     init(
         totalSecondsPerAudioSecond: Double? = nil,
         audioLoadSecondsPerAudioSecond: Double? = nil,
-        whisperPrepSecondsPerAudioSecond: Double? = nil,
-        encodingSecondsPerAudioSecond: Double? = nil,
-        transcriptionSecondsPerAudioSecond: Double? = nil,
+        processingSecondsPerAudioSecond: Double? = nil,
         diarizationSecondsPerAudioSecond: Double? = nil,
-        outputSecondsPerAudioSecond: Double? = nil
+        outputSecondsPerAudioSecond: Double? = nil,
+        firstProgressSeconds: Double? = nil,
+        modelLoadSeconds: Double? = nil
     ) {
         self.totalSecondsPerAudioSecond = totalSecondsPerAudioSecond
         self.audioLoadSecondsPerAudioSecond = audioLoadSecondsPerAudioSecond
-        self.whisperPrepSecondsPerAudioSecond = whisperPrepSecondsPerAudioSecond
-        self.encodingSecondsPerAudioSecond = encodingSecondsPerAudioSecond
-        self.transcriptionSecondsPerAudioSecond = transcriptionSecondsPerAudioSecond
+        self.processingSecondsPerAudioSecond = processingSecondsPerAudioSecond
         self.diarizationSecondsPerAudioSecond = diarizationSecondsPerAudioSecond
         self.outputSecondsPerAudioSecond = outputSecondsPerAudioSecond
+        self.firstProgressSeconds = firstProgressSeconds
+        self.modelLoadSeconds = modelLoadSeconds
     }
 }
 
@@ -98,15 +111,6 @@ enum TimingStore {
         return median(ratios)
     }
 
-    /// Median of Whisper audio-encoder seconds per second of audio.
-    static func medianEncodingSecondsPerAudioSecond(records: [RunTimingRecord]) -> Double? {
-        let ratios: [Double] = records.compactMap { r in
-            guard r.audio_duration_s > 0, r.whisper_encoding_ms > 0 else { return nil }
-            return Double(r.whisper_encoding_ms) / 1000.0 / r.audio_duration_s
-        }
-        return median(ratios)
-    }
-
     /// Median of source audio load seconds per second of audio.
     static func medianAudioLoadSecondsPerAudioSecond(records: [RunTimingRecord]) -> Double? {
         let ratios: [Double] = records.compactMap { r in
@@ -116,23 +120,34 @@ enum TimingStore {
         return median(ratios)
     }
 
-    /// Median of Whisper preprocessing (window prep + log-mel) seconds per second of audio.
-    static func medianWhisperPrepSecondsPerAudioSecond(records: [RunTimingRecord]) -> Double? {
+    /// Median wall seconds per second of audio for the transcribe (+ diarize)
+    /// block: `parallel_ms` when diarization ran, otherwise `transcribe_only_ms`.
+    static func medianProcessingSecondsPerAudioSecond(records: [RunTimingRecord]) -> Double? {
         let ratios: [Double] = records.compactMap { r in
-            let ms = r.whisper_audio_processing_ms + r.whisper_logmels_ms
+            let ms = r.parallel_ms > 0 ? r.parallel_ms : r.transcribe_only_ms
             guard r.audio_duration_s > 0, ms > 0 else { return nil }
             return Double(ms) / 1000.0 / r.audio_duration_s
         }
         return median(ratios)
     }
 
-    /// Median of Whisper decoder loop seconds per second of audio.
-    static func medianTranscriptionSecondsPerAudioSecond(records: [RunTimingRecord]) -> Double? {
-        let ratios: [Double] = records.compactMap { r in
-            guard r.audio_duration_s > 0, r.whisper_decoding_loop_ms > 0 else { return nil }
-            return Double(r.whisper_decoding_loop_ms) / 1000.0 / r.audio_duration_s
+    /// Median absolute seconds until WhisperKit's first progress callback.
+    static func medianFirstProgressSeconds(records: [RunTimingRecord]) -> Double? {
+        let values: [Double] = records.compactMap { r in
+            guard r.whisper_first_progress_ms > 0 else { return nil }
+            return Double(r.whisper_first_progress_ms) / 1000.0
         }
-        return median(ratios)
+        return median(values)
+    }
+
+    /// Median absolute seconds spent initializing WhisperKit and SpeakerKit.
+    /// Records with `whisper_init_ms == 0` (models reused within a batch) are skipped.
+    static func medianModelLoadSeconds(records: [RunTimingRecord]) -> Double? {
+        let values: [Double] = records.compactMap { r in
+            guard r.whisper_init_ms > 0 else { return nil }
+            return Double(r.whisper_init_ms + r.speaker_init_ms) / 1000.0
+        }
+        return median(values)
     }
 
     /// Median of SpeakerKit diarization full-pipeline seconds per second of audio.
@@ -154,6 +169,11 @@ enum TimingStore {
         return median(ratios)
     }
 
+    /// - Parameters:
+    ///   - totalRecords: Recent runs matching model and diarization flag; used
+    ///     for whole-run and processing-block ratios whose cost depends on the phase mix.
+    ///   - phaseRecords: Recent runs matching model only; used for per-phase
+    ///     predictors that do not depend on diarization.
     static func historicalRatios(
         totalRecords: [RunTimingRecord],
         phaseRecords: [RunTimingRecord]
@@ -161,11 +181,12 @@ enum TimingStore {
         HistoricalTimingRatios(
             totalSecondsPerAudioSecond: medianWallSecondsPerAudioSecond(records: totalRecords),
             audioLoadSecondsPerAudioSecond: medianAudioLoadSecondsPerAudioSecond(records: phaseRecords),
-            whisperPrepSecondsPerAudioSecond: medianWhisperPrepSecondsPerAudioSecond(records: phaseRecords),
-            encodingSecondsPerAudioSecond: medianEncodingSecondsPerAudioSecond(records: phaseRecords),
-            transcriptionSecondsPerAudioSecond: medianTranscriptionSecondsPerAudioSecond(records: phaseRecords),
+            processingSecondsPerAudioSecond: medianProcessingSecondsPerAudioSecond(records: totalRecords)
+                ?? medianProcessingSecondsPerAudioSecond(records: phaseRecords),
             diarizationSecondsPerAudioSecond: medianDiarizationSecondsPerAudioSecond(records: phaseRecords),
-            outputSecondsPerAudioSecond: medianOutputSecondsPerAudioSecond(records: phaseRecords)
+            outputSecondsPerAudioSecond: medianOutputSecondsPerAudioSecond(records: phaseRecords),
+            firstProgressSeconds: medianFirstProgressSeconds(records: phaseRecords),
+            modelLoadSeconds: medianModelLoadSeconds(records: phaseRecords)
         )
     }
 

@@ -132,7 +132,7 @@ final class LiveProgressTests: XCTestCase {
             stderr: writeHandle,
             showDiarizationLine: false,
             audioDurationSeconds: 3_604,
-            historicalRatios: HistoricalTimingRatios(encodingSecondsPerAudioSecond: 1),
+            historicalRatios: HistoricalTimingRatios(processingSecondsPerAudioSecond: 1),
             renderMode: .lineLog(minInterval: 0)
         )
         display.start()
@@ -315,8 +315,8 @@ final class LiveProgressTests: XCTestCase {
             showDiarizationLine: false,
             audioDurationSeconds: 20,
             historicalRatios: HistoricalTimingRatios(
-                encodingSecondsPerAudioSecond: 0.5,
-                transcriptionSecondsPerAudioSecond: 0.1
+                processingSecondsPerAudioSecond: 0.1,
+                firstProgressSeconds: 2
             ),
             renderMode: .lineLog(minInterval: 0)
         )
@@ -353,7 +353,7 @@ final class LiveProgressTests: XCTestCase {
             stderr: writeHandle,
             showDiarizationLine: false,
             audioDurationSeconds: 20,
-            historicalRatios: HistoricalTimingRatios(encodingSecondsPerAudioSecond: 0.5),
+            historicalRatios: HistoricalTimingRatios(firstProgressSeconds: 2),
             renderMode: .lineLog(minInterval: 0)
         )
         display.start()
@@ -475,8 +475,7 @@ final class LiveProgressTests: XCTestCase {
             showDiarizationLine: false,
             audioDurationSeconds: 3,
             historicalRatios: HistoricalTimingRatios(
-                encodingSecondsPerAudioSecond: 0.1,
-                transcriptionSecondsPerAudioSecond: 0.1,
+                processingSecondsPerAudioSecond: 0.1,
                 outputSecondsPerAudioSecond: 0.1
             ),
             renderMode: .lineLog(minInterval: 0)
@@ -530,8 +529,7 @@ final class LiveProgressTests: XCTestCase {
             showDiarizationLine: false,
             audioDurationSeconds: 3,
             historicalRatios: HistoricalTimingRatios(
-                encodingSecondsPerAudioSecond: 0.1,
-                transcriptionSecondsPerAudioSecond: 0.1,
+                processingSecondsPerAudioSecond: 0.1,
                 outputSecondsPerAudioSecond: 0.1
             ),
             renderMode: .tty
@@ -617,8 +615,7 @@ final class LiveProgressTests: XCTestCase {
             showDiarizationLine: true,
             audioDurationSeconds: 10,
             historicalRatios: HistoricalTimingRatios(
-                encodingSecondsPerAudioSecond: 1,
-                transcriptionSecondsPerAudioSecond: 1,
+                processingSecondsPerAudioSecond: 2,
                 diarizationSecondsPerAudioSecond: 5
             ),
             renderMode: .lineLog(minInterval: 0)
@@ -743,6 +740,156 @@ final class LiveProgressTests: XCTestCase {
         XCTAssertTrue(finalBlock.contains(#"ERROR event=run_failed exit=3 message="model failed""#), finalBlock)
         XCTAssertTrue(finalBlock.contains("▶ Model Loading:"), finalBlock)
         XCTAssertFalse(finalBlock.contains("✓ Model Loading:"), finalBlock)
+    }
+
+    /// Drives the display with a fake clock so ETA arithmetic is deterministic.
+    func testTranscriptionEtaUsesLiveChunkProgressAndCountsDown() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var now = start
+        let display = LiveProgressDisplay(
+            startDate: start,
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            audioDurationSeconds: 100,
+            // History predicts 1000s (10x too slow, like summed per-worker timings would).
+            historicalRatios: HistoricalTimingRatios(processingSecondsPerAudioSecond: 10, firstProgressSeconds: 2),
+            renderMode: .lineLog(minInterval: 0),
+            clock: { now }
+        )
+        display.start()
+        let timings = TranscriptionTimings(totalDecodingWindows: 0)
+        display.updateTranscription(progress: TranscriptionProgress(timings: timings, text: "", tokens: []))
+        // 40s in, half the chunks are done: live pace says 80s total.
+        now = start.addingTimeInterval(40)
+        display.updateTranscriptionUnits(completed: 50, total: 100)
+        _ = display.firstTranscriptionProgressMs(since: start) // drain the display queue
+        // 50s in, no new chunk yet: the estimate keeps counting down.
+        now = start.addingTimeInterval(50)
+        display.updateTranscriptionUnits(completed: 50, total: 100)
+        _ = display.firstTranscriptionProgressMs(since: start)
+        _ = display.finish()
+        writeHandle.closeFile()
+
+        var data = Data()
+        while true {
+            let chunk = try readHandle.read(upToCount: 4096) ?? Data()
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        readHandle.closeFile()
+
+        let output = String(data: data, encoding: .utf8) ?? ""
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        let transLines = lines.filter { $0.contains("Transcription:") }
+        let totalLines = lines.filter { $0.contains("Total:") }
+        XCTAssertTrue(
+            transLines.contains { $0.contains("50/100 windows") && $0.contains("ETA ~40s") },
+            "Live chunk progress should override slow history, got: \(transLines)"
+        )
+        XCTAssertTrue(
+            transLines.contains { $0.contains("50/100 windows") && $0.contains("ETA ~30s") },
+            "ETA should count down between chunk completions, got: \(transLines)"
+        )
+        XCTAssertTrue(
+            totalLines.contains { $0.contains("ETA ~30s") },
+            "Total ETA should follow the transcription estimate, got: \(totalLines)"
+        )
+    }
+
+    func testHistoryOnlyEtaUsesWallClockProcessingRatio() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var now = start
+        let display = LiveProgressDisplay(
+            startDate: start,
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            audioDurationSeconds: 600,
+            historicalRatios: HistoricalTimingRatios(processingSecondsPerAudioSecond: 0.15, firstProgressSeconds: 2),
+            renderMode: .lineLog(minInterval: 0),
+            clock: { now }
+        )
+        display.start()
+        now = start.addingTimeInterval(10)
+        let timings = TranscriptionTimings(totalDecodingWindows: 0)
+        display.updateTranscription(progress: TranscriptionProgress(timings: timings, text: "", tokens: []))
+        _ = display.finish()
+        writeHandle.closeFile()
+
+        var data = Data()
+        while true {
+            let chunk = try readHandle.read(upToCount: 4096) ?? Data()
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        readHandle.closeFile()
+
+        let output = String(data: data, encoding: .utf8) ?? ""
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        // 0.15 * 600 = 90s predicted for the block; 10s elapsed since it began.
+        XCTAssertTrue(
+            lines.contains { $0.contains("Encoding:") && $0.contains("▶") && $0.contains("ETA ~2s") },
+            "Encoding ETA should use the absolute first-progress median, got: \(lines)"
+        )
+        XCTAssertTrue(
+            lines.contains { $0.contains("Transcription:") && $0.contains("▶") && $0.contains("ETA ~1m 20s") },
+            "Transcription ETA should count from processing start, got: \(lines)"
+        )
+    }
+
+    func testTotalEtaIncludesModelLoadingOnSharedDisplay() async throws {
+        let pipe = Pipe()
+        let writeHandle = pipe.fileHandleForWriting
+        let readHandle = pipe.fileHandleForReading
+        defer { writeHandle.closeFile() }
+
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var now = start
+        let display = LiveProgressDisplay(
+            startDate: start,
+            stderr: writeHandle,
+            showDiarizationLine: false,
+            audioDurationSeconds: 100,
+            historicalRatios: HistoricalTimingRatios(
+                processingSecondsPerAudioSecond: 0.5,
+                modelLoadSeconds: 6
+            ),
+            renderMode: .lineLog(minInterval: 0),
+            clock: { now }
+        )
+        display.beginModelLoading()
+        now = start.addingTimeInterval(2)
+        display.finishModelLoading()
+        _ = display.finish()
+        writeHandle.closeFile()
+
+        var data = Data()
+        while true {
+            let chunk = try readHandle.read(upToCount: 4096) ?? Data()
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        readHandle.closeFile()
+
+        let output = String(data: data, encoding: .utf8) ?? ""
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        XCTAssertTrue(
+            lines.contains { $0.contains("Model Loading:") && $0.contains("▶") && $0.contains("ETA ~6s") },
+            "Model loading should show its own ETA, got: \(lines)"
+        )
+        XCTAssertTrue(
+            lines.contains { $0.contains("Total:") && $0.contains("ETA ~56s") },
+            "Total ETA should add model loading to the processing estimate, got: \(lines)"
+        )
     }
 
     func testUpdatesAfterFinishAreIgnored() throws {
