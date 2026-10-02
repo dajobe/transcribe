@@ -3,14 +3,19 @@ import XCTest
 
 final class CLITests: XCTestCase {
     /// Path to the built transcribe executable (relative to package root).
+    /// `.build/debug` is the symlink every SwiftPM build system maintains to
+    /// its current products directory; the arch-specific paths are fallbacks
+    /// for environments without it. Preferring the symlink matters: the newer
+    /// build system writes to .build/out/Products/Debug and leaves any old
+    /// arch-path binary stale, which once had these tests exercising an
+    /// executable weeks older than the sources.
     static var transcribePath: String {
-        #if arch(arm64)
-        return ".build/arm64-apple-macosx/debug/transcribe"
-        #elseif arch(x86_64)
-        return ".build/x86_64-apple-macosx/debug/transcribe"
-        #else
-        return ".build/debug/transcribe"
-        #endif
+        let candidates = [
+            ".build/debug/transcribe",
+            ".build/arm64-apple-macosx/debug/transcribe",
+            ".build/x86_64-apple-macosx/debug/transcribe",
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? candidates[0]
     }
 
     func testHelpExitZero() throws {
