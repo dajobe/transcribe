@@ -455,6 +455,77 @@ final class SpeakerCommandsTests: XCTestCase {
         XCTAssertTrue(missing.1.contains("Missing transcript path"), missing.1)
     }
 
+    // MARK: - Transcript ID arguments
+
+    /// Saves a document into the managed store and returns its URL and the
+    /// ID its filename encodes, the handle commands accept instead of a path.
+    private func managedDocument(hash: String) throws -> (url: URL, id: String) {
+        let saved = try CanonicalTranscriptStore.save(
+            CanonicalTranscriptStore.load(from: document("managed-\(hash)", hash: hash))
+        )
+        return (saved, String(saved.lastPathComponent.dropLast(".transcript.json".count)))
+    }
+
+    func testTranscriptArgumentsAcceptSavedDocumentIDs() throws {
+        let (url, id) = try managedDocument(hash: "a")
+
+        let list = try run(["transcripts"])
+        XCTAssertEqual(list.0, 0, list.1)
+        XCTAssertTrue(list.1.contains("\t\(id)\t"), "listing shows the ID column: \(list.1)")
+
+        let inspect = try run(["inspect", String(id.prefix(8))])
+        XCTAssertEqual(inspect.0, 0, inspect.1)
+        XCTAssertTrue(inspect.1.contains("SPEAKER_0"), inspect.1)
+
+        let confirm = try run(["speakers", "confirm", id, "0", "--name", "Dave"])
+        XCTAssertEqual(confirm.0, 0, confirm.1)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"]?.name, "Dave")
+
+        let clear = try run(["speakers", "clear", String(id.prefix(12)), "SPEAKER_0"])
+        XCTAssertEqual(clear.0, 0, clear.1)
+        XCTAssertNil(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"])
+    }
+
+    func testUnknownAndAmbiguousTranscriptIDsAreRejected() throws {
+        let (url, id) = try managedDocument(hash: "a")
+
+        let unknown = try run(["speakers", "clear", "deadbeef", "0"])
+        XCTAssertEqual(unknown.0, 3, unknown.1)
+        XCTAssertTrue(unknown.1.contains("no saved transcript ID starts with it"), unknown.1)
+
+        // A second filename sharing the first eight characters makes that
+        // prefix ambiguous; only the filename matters to resolution.
+        let flipped = id[id.index(id.startIndex, offsetBy: 9)] == "0" ? "1" : "0"
+        var otherID = id
+        otherID.replaceSubrange(
+            otherID.index(otherID.startIndex, offsetBy: 9)...otherID.index(otherID.startIndex, offsetBy: 9),
+            with: flipped
+        )
+        try FileManager.default.copyItem(
+            at: url, to: url.deletingLastPathComponent().appendingPathComponent(otherID + ".transcript.json")
+        )
+        let ambiguous = try run(["inspect", String(id.prefix(8))])
+        XCTAssertEqual(ambiguous.0, 2, ambiguous.1)
+        XCTAssertTrue(ambiguous.1.contains("ambiguous"), ambiguous.1)
+        XCTAssertTrue(ambiguous.1.contains(otherID), ambiguous.1)
+
+        let full = try run(["inspect", id])
+        XCTAssertEqual(full.0, 0, "the full ID stays unambiguous: \(full.1)")
+    }
+
+    func testReviewPrintsTheTranscriptID() throws {
+        let (_, id) = try managedDocument(hash: "a")
+
+        let table = try run(["speakers", "review", id])
+        XCTAssertEqual(table.0, 0, table.1)
+        XCTAssertTrue(table.1.contains("Transcript ID: \(id)"), table.1)
+
+        let interactive = try run(["speakers", "review", id, "--interactive"], input: "Dave\n")
+        XCTAssertEqual(interactive.0, 0, interactive.1)
+        XCTAssertTrue(interactive.1.contains("Confirmed SPEAKER_0 as Dave"), interactive.1)
+        XCTAssertTrue(interactive.1.contains("Transcript ID: \(id)"), interactive.1)
+    }
+
     func testColorAppearsOnlyWhenForcedOntoPipes() throws {
         let original = try CanonicalTranscriptStore.load(from: document("one", hash: "a"))
         _ = try CanonicalTranscriptStore.save(original)

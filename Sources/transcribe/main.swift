@@ -31,8 +31,8 @@ struct Transcribe: AsyncParsableCommand {
 
             Other commands:
               speakers <subcommand>     Review and confirm persistent speaker identities.
-              export <transcript.json>  Render a saved transcript without inference.
-              inspect <transcript.json> Show saved transcript metadata and speakers.
+              export <transcript|id>   Render a saved transcript without inference.
+              inspect <transcript|id>  Show saved transcript metadata and speakers.
               transcripts               List paths to saved canonical transcripts.
               history [--count <n>]   Show recent transcription/import history.
               config <subcommand>     View or edit user defaults (JSON at ~/.config/transcribe/config.json).

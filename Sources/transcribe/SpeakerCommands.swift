@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 struct TranscriptExportArguments: ParsableArguments {
-    @Argument(help: "Path to a saved .transcript.json document; omit with --refresh to walk every saved transcript.")
+    @Argument(help: "Saved document ID (from transcribe transcripts) or path; omit with --refresh to walk every saved transcript.")
     var transcript: String?
     @Option(name: [.short, .long], help: "Comma-separated formats, or all.")
     var format: String?
@@ -18,7 +18,7 @@ struct TranscriptExportArguments: ParsableArguments {
 }
 
 struct SpeakerReviewArguments: ParsableArguments {
-    @Argument(help: "Path to a saved .transcript.json document; omit to review all saved transcripts.")
+    @Argument(help: "Saved document ID (from transcribe transcripts) or path; omit to review all saved transcripts.")
     var transcript: String?
     @Flag(help: "Save refreshed suggestions and strong automatic matches to this document without prompting.")
     var apply: Bool = false
@@ -31,7 +31,7 @@ struct SpeakerReviewArguments: ParsableArguments {
 }
 
 struct SpeakerConfirmArguments: ParsableArguments {
-    @Argument(help: "Path to a saved .transcript.json document; quote paths containing spaces.") var transcript: String
+    @Argument(help: "Saved document ID (from transcribe transcripts) or path; quote paths containing spaces.") var transcript: String
     @Argument(help: "Local speaker ID listed by inspect or speakers review, for example SPEAKER_0 or 0.") var speaker: String
     @Option(help: "Name for a new profile; quote names containing spaces.") var name: String?
     @Option(help: "Existing profile ID printed by speakers list or review.") var profile: String?
@@ -40,7 +40,7 @@ struct SpeakerConfirmArguments: ParsableArguments {
 }
 
 struct SpeakerClearArguments: ParsableArguments {
-    @Argument(help: "Path to a saved .transcript.json document; quote paths containing spaces.") var transcript: String
+    @Argument(help: "Saved document ID (from transcribe transcripts) or path; quote paths containing spaces.") var transcript: String
     @Argument(help: "Local speaker ID listed by inspect or speakers review, for example SPEAKER_0 or 0.") var speaker: String
     @Flag(inversion: .prefixedNo, help: "Regenerate this document's recorded exports after clearing (default: on).")
     var refreshExports: Bool?
@@ -59,7 +59,7 @@ enum SpeakerCommands {
 
     static func transcripts(_ args: [String]) throws {
         if args == ["--help"] || args == ["-h"] {
-            print("USAGE: transcribe transcripts\nLists saved canonical transcript paths. Copy a path into inspect, speakers review, or export.")
+            print("USAGE: transcribe transcripts\nLists saved canonical transcripts: title, ID, and path. Pass the ID (any unique prefix works) or the path to inspect, speakers review/confirm/clear, or export.")
             return
         }
         try require(args.isEmpty, "Usage: transcribe transcripts")
@@ -78,7 +78,13 @@ enum SpeakerCommands {
                 let listing = try JSONDecoder().decode(TranscriptListing.self, from: Data(contentsOf: file))
                 let basename = listing.basename.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !basename.isEmpty else { throw CanonicalTranscriptStore.StoreError.invalidData("basename is empty") }
-                print("\(Terminal.stdout.bold(safeText(listing.basename)))\t\(Terminal.stdout.dim(file.path))")
+                // The ID is the argument speaker commands accept, so it gets
+                // its own copyable column; a foreign filename has no ID.
+                let stem = String(file.lastPathComponent.dropLast(".transcript.json".count))
+                var columns = [Terminal.stdout.bold(safeText(listing.basename))]
+                if UUID(uuidString: stem) != nil { columns.append(stem.lowercased()) }
+                columns.append(Terminal.stdout.dim(file.path))
+                print(columns.joined(separator: "\t"))
             } catch {
                 print("\(Terminal.stdout.red("(unreadable)"))\t\(Terminal.stdout.dim(file.path))\t\(safeText(errorText(error)))")
             }
@@ -90,15 +96,18 @@ enum SpeakerCommands {
         USAGE: transcribe speakers <subcommand>
 
           list
-          review [transcript.json] [--all] [--apply] [--[no-]interactive]
-          confirm <transcript.json> <SPEAKER_n> --name <name>
-          confirm <transcript.json> <SPEAKER_n> --profile <profile-id>
-          clear <transcript.json> <SPEAKER_n>
+          review [transcript] [--all] [--apply] [--[no-]interactive]
+          confirm <transcript> <SPEAKER_n> --name <name>
+          confirm <transcript> <SPEAKER_n> --profile <profile-id>
+          clear <transcript> <SPEAKER_n>
           rename <profile-id> <name>
           delete <profile-id>
 
-        <SPEAKER_n> is a local speaker ID in that transcript (SPEAKER_0, or just
-        0); inspect and review list them, and an unknown ID prints the valid
+        <transcript> is a saved document's ID — the UUID printed by
+        transcripts, inspect, and review; any unique prefix of at least four
+        characters works — or a path to its .transcript.json file. <SPEAKER_n>
+        is a local speaker ID in that transcript (SPEAKER_0, or just 0);
+        inspect and review list them, and an unknown ID prints the valid
         ones. Saved transcript paths usually contain spaces (Application
         Support), so quote them in the shell.
 
@@ -124,9 +133,12 @@ enum SpeakerCommands {
 
     static func exportHelpText() -> String {
         """
-        USAGE: transcribe export <transcript.json> [--format txt,json,srt,vtt,md,tsv,all]
+        USAGE: transcribe export <transcript> [--format txt,json,srt,vtt,md,tsv,all]
                                  [-o <directory>] [--output-prefix <name>] [--overwrite]
-               transcribe export [transcript.json] --refresh
+               transcribe export [transcript] --refresh
+
+        <transcript> is a saved document's ID (from transcribe transcripts;
+        any unique prefix works) or a path to its .transcript.json file.
 
         Renders a saved canonical transcript without audio, models, or downloads.
         Saved confirmed and automatic names are used; suggestions remain local IDs.
@@ -162,7 +174,7 @@ enum SpeakerCommands {
             let options = try parse(SpeakerConfirmArguments.self, args)
             try require((options.name != nil) != (options.profile != nil), "Use exactly one of --name or --profile.")
             let speaker = localSpeakerID(options.speaker)
-            let url = transcriptURL(options.transcript)
+            let url = try transcriptURL(options.transcript)
             try withDocumentLock(at: url) {
                 var document = try loadTranscript(at: url, arguments: args)
                 guard let embedding = document.output.speakerEmbeddings[speaker] else {
@@ -201,7 +213,7 @@ enum SpeakerCommands {
         case "clear":
             let options = try parse(SpeakerClearArguments.self, args)
             let speaker = localSpeakerID(options.speaker)
-            let url = transcriptURL(options.transcript)
+            let url = try transcriptURL(options.transcript)
             try withDocumentLock(at: url) {
                 var document = try loadTranscript(at: url, arguments: args)
                 guard document.output.speakerEmbeddings[speaker] != nil else {
@@ -255,7 +267,7 @@ enum SpeakerCommands {
             )
         }
         let outputDir = options.outputDir ?? "."
-        let url = transcriptURL(transcript)
+        let url = try transcriptURL(transcript)
         // Load, render, write, and record under one document lock, so a
         // concurrent speaker change cannot slip between the render and the
         // record merge and leave a record whose hash describes files rendered
@@ -335,7 +347,7 @@ enum SpeakerCommands {
     /// whose recorded exports are all current print nothing.
     private static func refreshRecordedExports(transcript: String?, arguments: [String]) throws {
         if let transcript {
-            let url = transcriptURL(transcript)
+            let url = try transcriptURL(transcript)
             try withDocumentLock(at: url) {
                 let document = try loadTranscript(at: url, arguments: arguments)
                 ExportRefresh.run(document: document, at: url, color: color)
@@ -361,11 +373,11 @@ enum SpeakerCommands {
 
     static func inspect(_ args: [String]) throws {
         if args == ["--help"] || args == ["-h"] {
-            print("USAGE: transcribe inspect <transcript.json>\nShows metadata and saved assignments without printing voice embeddings.")
+            print("USAGE: transcribe inspect <transcript>\nShows metadata and saved assignments without printing voice embeddings. <transcript> is a saved document ID (from transcribe transcripts) or a path.")
             return
         }
-        try require(args.count == 1, withSplitPathHint("Usage: transcribe inspect <transcript.json>", args))
-        let document = try loadTranscript(at: transcriptURL(args[0]), arguments: args)
+        try require(args.count == 1, withSplitPathHint("Usage: transcribe inspect <transcript>", args))
+        let document = try loadTranscript(at: try transcriptURL(args[0]), arguments: args)
         print("Transcript: \(document.id)\nModel: \(safeText(document.model))\nDuration: \(document.output.durationSeconds)s\nSegments: \(document.output.segments.count)")
         printReview(document)
     }
@@ -380,7 +392,7 @@ enum SpeakerCommands {
             guard let transcript = options.transcript else {
                 throw usage("--apply needs a transcript path; run transcribe transcripts to list them.")
             }
-            let url = transcriptURL(transcript)
+            let url = try transcriptURL(transcript)
             try withDocumentLock(at: url) {
                 let document = try refreshed(loadTranscript(at: url, arguments: arguments))
                 printReview(document)
@@ -400,9 +412,11 @@ enum SpeakerCommands {
             refreshExports: ExportRefresh.enabled(flag: options.refreshExports)
         )
         if let transcript = options.transcript {
-            let url = transcriptURL(transcript)
+            let url = try transcriptURL(transcript)
             guard interactive else {
-                printReview(try refreshed(loadTranscript(at: url, arguments: arguments)))
+                let document = try refreshed(loadTranscript(at: url, arguments: arguments))
+                printReview(document)
+                print(color.dim("Transcript ID: \(document.id.uuidString.lowercased())"))
                 return
             }
             let document = try refreshed(loadTranscript(at: url, arguments: arguments))
@@ -422,7 +436,7 @@ enum SpeakerCommands {
             for url in urls {
                 do {
                     let document = try refreshedDocument(at: url)
-                    print("\(color.bold(safeText(document.basename)))\t\(color.dim(url.path))")
+                    print("\(color.bold(safeText(document.basename)))\t\(document.id.uuidString.lowercased())\t\(color.dim(url.path))")
                     printReview(document)
                 } catch {
                     print("\(color.red("(unreadable)"))\t\(color.dim(url.path))\t\(safeText(errorText(error)))")
@@ -545,11 +559,49 @@ enum SpeakerCommands {
         }
     }
 
-    private static func transcriptURL(_ path: String) -> URL {
+    private static func transcriptURL(_ reference: String) throws -> URL {
         // Use the same target for the sidecar lock, read, and atomic replace.
         // Renaming over an unresolved symlink would detach it from its target.
-        URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        let url = URL(fileURLWithPath: (reference as NSString).expandingTildeInPath)
             .resolvingSymlinksInPath()
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        // Not a file: a value shaped like a saved-document ID (the UUID
+        // printed by transcripts, inspect, and review, or a unique prefix of
+        // one) resolves against the managed store, so commands do not demand
+        // the full Application Support path.
+        guard let candidate = transcriptIDCandidate(reference) else { return url }
+        let suffix = ".transcript.json"
+        let matches = try savedTranscriptURLs()
+            .filter { $0.lastPathComponent.dropLast(suffix.count).hasPrefix(candidate) }
+            .sorted { $0.path < $1.path }
+        switch matches.count {
+        case 1:
+            return matches[0]
+        case 0:
+            throw TranscribeError(
+                message: "No transcript at \(safeText(reference)) and no saved transcript ID starts with it. Run transcribe transcripts to list saved documents.",
+                exitCode: .inputFile
+            )
+        default:
+            let ids = matches.map { String($0.lastPathComponent.dropLast(suffix.count)) }
+            throw usage(
+                "Transcript ID '\(safeText(reference))' is ambiguous: \(ids.joined(separator: ", ")). Give more characters or the full ID."
+            )
+        }
+    }
+
+    /// The lowercased saved-document ID an argument may name: hex digits and
+    /// dashes only, at least four characters so a short filename cannot match
+    /// by accident, optionally carrying the listing's .transcript.json
+    /// suffix. Anything else is treated as a path.
+    private static func transcriptIDCandidate(_ reference: String) -> String? {
+        var text = reference.trimmingCharacters(in: .whitespaces).lowercased()
+        let suffix = ".transcript.json"
+        if text.hasSuffix(suffix) { text = String(text.dropLast(suffix.count)) }
+        guard text.count >= 4, text.count <= 36,
+              text.allSatisfy({ $0 == "-" || ($0.isASCII && $0.isHexDigit) })
+        else { return nil }
+        return text
     }
 
     /// One-line reason for a file that could not be listed. A decoding error's

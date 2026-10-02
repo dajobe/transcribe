@@ -106,9 +106,13 @@ transcribe \
 ### Saved transcripts and persistent speaker names
 
 Stateful runs save a private canonical transcript before writing exports. Run
-`transcribe transcripts` to find its path; plain logs also include a
-`canonical_saved` event. These files preserve local speaker labels and voice
-embeddings independently of output formats.
+`transcribe transcripts` to list each document's title, ID, and path; plain logs
+also include a `canonical_saved` event. These files preserve local speaker
+labels and voice embeddings independently of output formats.
+
+Commands that take a transcript accept either the document's ID (any unique
+prefix of at least four characters) or a path to its `.transcript.json` file;
+`transcripts`, `inspect`, and `speakers review` all print the ID.
 
 The fastest way to name speakers is the interactive review. On a terminal it
 walks every saved transcript that still needs attention (or one document when
@@ -117,7 +121,7 @@ middle, and end of the recording, and prompts for a name:
 
 ```bash
 transcribe speakers review            # all saved transcripts needing attention
-transcribe speakers review /path/to/result.transcript.json
+transcribe speakers review TRANSCRIPT_ID
 transcribe speakers review --all      # also revisit confirmed speakers
 ```
 
@@ -144,17 +148,17 @@ transcribe speakers review
 The scripted commands remain for specific corrections:
 
 ```bash
-transcribe transcripts
-transcribe inspect /path/to/result.transcript.json
-transcribe speakers confirm /path/to/result.transcript.json SPEAKER_0 --name "Dave"
+transcribe transcripts                # titles, IDs, and paths
+transcribe inspect TRANSCRIPT_ID
+transcribe speakers confirm TRANSCRIPT_ID SPEAKER_0 --name "Dave"
 transcribe speakers list
 
 # Confirm another recording using the profile ID printed above.
-transcribe speakers confirm /path/to/second.transcript.json SPEAKER_1 --profile PROFILE_ID
+transcribe speakers confirm OTHER_TRANSCRIPT_ID SPEAKER_1 --profile PROFILE_ID
 
 # Refresh an older result and export it without audio or model loading.
-transcribe speakers review /path/to/result.transcript.json --apply
-transcribe export /path/to/result.transcript.json --format md,srt -o ./notes
+transcribe speakers review TRANSCRIPT_ID --apply
+transcribe export TRANSCRIPT_ID --format md,srt -o ./notes
 ```
 
 Automatic naming requires two strong, explicitly confirmed examples from
@@ -164,11 +168,11 @@ probabilities; uncertain speakers keep their local IDs. Confirming a different
 name/profile corrects an assignment.
 
 Local speaker IDs such as `SPEAKER_0` (or just `0`) are listed by `inspect` and
-`speakers review`; an unknown ID prints the ones the document has. Saved
-transcript paths usually contain spaces (for example `Application Support`), so
-quote them in the shell.
+`speakers review`; an unknown ID prints the ones the document has. When passing
+a path instead of a transcript ID, remember that saved transcript paths usually
+contain spaces (for example `Application Support`), so quote them in the shell.
 
-Use `speakers clear <document> <SPEAKER_n>` to remove an assignment and its
+Use `speakers clear <transcript> <SPEAKER_n>` to remove an assignment and its
 confirmed example, `speakers rename <profile-id> <name>` to rename a profile,
 and `speakers delete <profile-id>` to remove it. Renaming or deleting a profile
 does not rewrite saved name snapshots; `review --apply` refreshes a document's

@@ -148,6 +148,9 @@ enum SpeakerReview {
             let confirmed = try SpeakerReview.apply(
                 decisions, to: url, io: io, color: color, refreshExports: refreshExports
             )
+            // The ID is what speakers confirm/clear take to revise a
+            // decision, so leave it on screen when the session moves on.
+            io.write(color.dim("Transcript ID: \(document.id.uuidString.lowercased())") + "\n")
             return (confirmed, quit)
         }
 
