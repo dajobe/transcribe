@@ -344,6 +344,60 @@ Compatibility tests must compare against independent fixture bytes, and any
 intentional divergence must be documented rather than described as
 byte-identical.
 
+## Speaker review usability (2026-10-07)
+
+Two gaps in the interactive `speakers review` prompt (`SpeakerReview.swift`).
+
+### Permanent skip for unidentifiable speakers
+
+- [x] Add a reply that records "cannot identify this speaker, and that will not
+  change" so the speaker stops being prompted in future review sessions.
+  (Implemented 2026-10-07: the `u` reply saves `dismissedSpeakers` in the
+  canonical document; refresh suppresses new matches for marked speakers,
+  `--all` revisits them, and confirming or `speakers clear` removes the mark.
+  See [the review spec](specs/interactive-speaker-review.md).)
+
+**Problem:** The `s` skip reply in `ReviewReply` only skips for the current
+session. `promptableSpeakers` re-prompts every speaker whose match status is not
+`.confirmed`, so a voice the user cannot tell or cannot remember comes back on
+every review with no way to settle it.
+
+**Approach:** Add a prompt key (for example `u` for unknown) that persists a
+dismissed/unknown state for that local speaker, likely a new
+`SpeakerMatchStatus` case or a separate per-document record, and exclude it from
+`promptableSpeakers` in normal sessions. `--all` should still revisit dismissed
+speakers, and `speakers clear` (or similar) should undo the dismissal. Decide
+whether the state lives in the canonical transcript only or also affects future
+automatic matching.
+
+**Acceptance:** A dismissed speaker is not prompted on the next plain review
+run, is shown again under `--all`, and can be un-dismissed and then named.
+Dismissal survives document refresh/re-export and does not create a profile.
+
+### More-examples key with diverse samples
+
+- [x] Add a prompt key to show additional sample segments when the initial three
+  are not enough to identify the voice. (Implemented 2026-10-07: the `m` reply
+  prints further samples, excluding everything already shown and spreading each
+  batch across the remaining turns, and reports when samples run out.)
+
+**Problem:** `selectSamples` deterministically picks the wordiest segment from
+the beginning, middle, and end thirds of a speaker's turns. When those three do
+not identify the voice there is no way to see more, and re-invoking the same
+selection would just repeat the identical segments.
+
+**Approach:** Add a key (for example `m` for more) to the review prompt that
+prints further samples. Track segments already shown in the session and pick
+unseen candidates for diversity — for example the next-wordiest unseen segment
+per third, or widen to more/narrower time slices — rather than re-running the
+same selection. Stop cleanly with a message when the speaker has no unseen
+qualifying segments left.
+
+**Acceptance:** Pressing the key repeatedly never repeats an already-shown
+segment while unseen candidates remain, samples continue to span the recording
+rather than clustering, and the prompt loop still accepts all existing replies
+afterward. Covered by scripted `InteractiveIO` tests.
+
 ## Model download progress
 
 Report to the user before starting a large model download. Ideally show download

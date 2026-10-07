@@ -94,6 +94,10 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(ReviewReply.parse("L"), .listProfiles)
         XCTAssertEqual(ReviewReply.parse("s"), .skip)
         XCTAssertEqual(ReviewReply.parse("q"), .quit)
+        XCTAssertEqual(ReviewReply.parse("m"), .moreSamples)
+        XCTAssertEqual(ReviewReply.parse("M"), .moreSamples)
+        XCTAssertEqual(ReviewReply.parse("u"), .dismiss)
+        XCTAssertEqual(ReviewReply.parse("U"), .dismiss)
         XCTAssertEqual(ReviewReply.parse("2"), .profileIndex(2))
         XCTAssertEqual(ReviewReply.parse(" Dave Beckett "), .name("Dave Beckett"))
         XCTAssertEqual(ReviewReply.parse("lars"), .name("lars"))
@@ -121,6 +125,38 @@ final class SpeakerReviewTests: XCTestCase {
         let segments = [segment("SPEAKER_0", 0, "Yes."), segment("SPEAKER_0", 5, "No.")]
         let samples = SpeakerReview.selectSamples(from: segments, speaker: "SPEAKER_0")
         XCTAssertEqual(samples.count, 2, "short segments are better than nothing")
+    }
+
+    func testSampleSelectionExcludingNeverRepeatsAndExhaustsEverySegment() {
+        var segments: [TranscriptSegment] = []
+        for index in 0..<12 {
+            segments.append(segment(
+                "SPEAKER_0", Double(index * 10),
+                "Sample number \(index) with several spoken words here."
+            ))
+        }
+        var shown = SpeakerReview.selectSamples(from: segments, speaker: "SPEAKER_0")
+        XCTAssertEqual(shown.count, 3)
+        while true {
+            let more = SpeakerReview.selectSamples(from: segments, speaker: "SPEAKER_0", excluding: shown)
+            if more.isEmpty { break }
+            XCTAssertTrue(
+                Set(more.map(\.start)).isDisjoint(with: shown.map(\.start)),
+                "a later batch repeats an already shown segment"
+            )
+            if more.count == 3 {
+                XCTAssertGreaterThan(
+                    more[2].start - more[0].start, 30,
+                    "later batches still spread across the recording"
+                )
+            }
+            shown += more
+        }
+        XCTAssertEqual(shown.count, segments.count, "every qualifying segment eventually appears")
+        XCTAssertTrue(
+            SpeakerReview.selectSamples(from: segments, speaker: "SPEAKER_0", excluding: shown).isEmpty,
+            "exhausted selection stays empty"
+        )
     }
 
     // MARK: - Interactive sessions
@@ -216,6 +252,89 @@ final class SpeakerReviewTests: XCTestCase {
         let url = try document("one", hash: "a")
         try session(ScriptedIO([])).run(documents: [url])
         XCTAssertNil(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"])
+    }
+
+    // MARK: - More samples
+
+    func testMoreSamplesShowsNewSegmentsThenReportsExhaustion() throws {
+        var segments: [TranscriptSegment] = []
+        for index in 0..<6 {
+            segments.append(segment(
+                "SPEAKER_0", Double(index * 10),
+                "Sample number \(index) with several spoken words here."
+            ))
+        }
+        let url = try document("one", hash: "a", segments: segments)
+        let scripted = ScriptedIO(["m", "m", "s"])
+        try session(scripted).run(documents: [url])
+        for index in 0..<6 {
+            // The scripted prompt has no terminal echo, so samples can share a
+            // line with the prompt; count occurrences rather than lines.
+            let occurrences = scripted.output.components(separatedBy: "Sample number \(index) ").count - 1
+            XCTAssertEqual(occurrences, 1, "segment \(index) shown exactly once across the two batches")
+        }
+        XCTAssertTrue(scripted.output.contains("No more samples for this speaker."), scripted.output)
+        XCTAssertNil(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"], "showing samples decides nothing")
+    }
+
+    // MARK: - Dismissal
+
+    func testDismissPersistsAndStopsPrompting() throws {
+        let url = try document("one", hash: "a")
+        let scripted = ScriptedIO(["u"])
+        try session(scripted).run(documents: [url])
+        XCTAssertTrue(scripted.output.contains("Marked SPEAKER_0 as unidentifiable"), scripted.output)
+        let saved = try CanonicalTranscriptStore.load(from: url)
+        XCTAssertEqual(saved.dismissedSpeakers, ["SPEAKER_0"])
+        XCTAssertNil(saved.speakerMatches["SPEAKER_0"])
+        XCTAssertFalse(
+            session(ScriptedIO([])).needsAttention(try SpeakerCommands.refreshedDocument(at: url)),
+            "a dismissed speaker is not prompted again"
+        )
+        XCTAssertTrue(
+            session(ScriptedIO([]), includeConfirmed: true).needsAttention(saved),
+            "--all still revisits a dismissed speaker"
+        )
+    }
+
+    func testDismissedSpeakerGetsNoFreshSuggestion() throws {
+        let one = try document("one", hash: "a")
+        try session(ScriptedIO(["Dave"])).run(documents: [one])
+        let two = try document("two", hash: "b")
+        XCTAssertEqual(
+            try SpeakerCommands.refreshedDocument(at: two).speakerMatches["SPEAKER_0"]?.status,
+            .suggested, "the matching voice is suggested before dismissal"
+        )
+        try session(ScriptedIO(["u"])).run(documents: [two])
+        XCTAssertNil(
+            try SpeakerCommands.refreshedDocument(at: two).speakerMatches["SPEAKER_0"],
+            "refresh must not resurrect a dismissed speaker as a suggestion"
+        )
+    }
+
+    func testConfirmingUnderAllClearsDismissal() throws {
+        let url = try document("one", hash: "a")
+        try session(ScriptedIO(["u"])).run(documents: [url])
+        let revisit = ScriptedIO(["Dave"])
+        try session(revisit, includeConfirmed: true).run(documents: [url])
+        XCTAssertTrue(revisit.output.contains("marked unidentifiable"), "the mark is shown when revisiting")
+        let saved = try CanonicalTranscriptStore.load(from: url)
+        XCTAssertNil(saved.dismissedSpeakers, "a confirmed name removes the mark")
+        XCTAssertEqual(saved.speakerMatches["SPEAKER_0"]?.status, .confirmed)
+    }
+
+    func testDismissingAConfirmedSpeakerWithdrawsItsExample() throws {
+        let url = try document("one", hash: "a")
+        try session(ScriptedIO(["Dave"])).run(documents: [url])
+        XCTAssertEqual(try SpeakerProfileStore.profiles().first?.examples.count, 1)
+        try session(ScriptedIO(["u"]), includeConfirmed: true).run(documents: [url])
+        let saved = try CanonicalTranscriptStore.load(from: url)
+        XCTAssertEqual(saved.dismissedSpeakers, ["SPEAKER_0"])
+        XCTAssertNil(saved.speakerMatches["SPEAKER_0"])
+        XCTAssertEqual(
+            try SpeakerProfileStore.profiles().first?.examples.count, 0,
+            "dismissing a confirmed speaker withdraws the voice example, like clear"
+        )
     }
 
     // MARK: - Export refresh

@@ -352,6 +352,27 @@ final class SpeakerCommandsTests: XCTestCase {
         XCTAssertTrue(settled.1.contains("run with --all to revisit"), settled.1)
     }
 
+    func testDismissalThroughTheCLISurvivesUntilCleared() throws {
+        let one = try document("one", hash: "a")
+        let dismissed = try run(["speakers", "review", one.path, "--interactive"], input: "u\n")
+        XCTAssertEqual(dismissed.0, 0, dismissed.1)
+        XCTAssertTrue(dismissed.1.contains("Marked SPEAKER_0 as unidentifiable"), dismissed.1)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: one).dismissedSpeakers, ["SPEAKER_0"])
+
+        let table = try run(["speakers", "review", one.path])
+        XCTAssertTrue(table.1.contains("SPEAKER_0\tdismissed"), table.1)
+        let settled = try run(["speakers", "review", one.path, "--interactive"], input: "Dave\n")
+        XCTAssertEqual(settled.0, 0, settled.1)
+        XCTAssertTrue(settled.1.contains("marked unidentifiable; run with --all"), settled.1)
+        XCTAssertNil(try CanonicalTranscriptStore.load(from: one).speakerMatches["SPEAKER_0"], "a settled session must not prompt")
+
+        let cleared = try run(["speakers", "clear", one.path, "SPEAKER_0"])
+        XCTAssertEqual(cleared.0, 0, cleared.1)
+        XCTAssertNil(try CanonicalTranscriptStore.load(from: one).dismissedSpeakers)
+        let prompted = try run(["speakers", "review", one.path, "--interactive"], input: "Dave\n")
+        XCTAssertTrue(prompted.1.contains("Confirmed SPEAKER_0 as Dave"), "clear makes the speaker promptable again")
+    }
+
     func testReviewFlagValidation() throws {
         let one = try document("one", hash: "a")
         XCTAssertEqual(try run(["speakers", "review", one.path, "--apply", "--interactive"]).0, 2)

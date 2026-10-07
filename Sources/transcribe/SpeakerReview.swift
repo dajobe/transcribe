@@ -29,6 +29,8 @@ enum ReviewReply: Equatable {
     case name(String)
     case listProfiles
     case profileIndex(Int)
+    case moreSamples
+    case dismiss
     case skip
     case quit
 
@@ -40,6 +42,8 @@ enum ReviewReply: Equatable {
         switch trimmed.lowercased() {
         case "": return .acceptDefault
         case "l": return .listProfiles
+        case "m": return .moreSamples
+        case "u": return .dismiss
         case "s": return .skip
         case "q": return .quit
         default:
@@ -55,6 +59,9 @@ enum ReviewReply: Equatable {
 enum SpeakerDecision: Equatable {
     case newProfile(name: String)
     case existingProfile(id: String)
+    /// This voice cannot be identified and that will not change; stop
+    /// prompting for it in future sessions.
+    case dismiss
 }
 
 enum SpeakerReview {
@@ -64,14 +71,19 @@ enum SpeakerReview {
     /// utterances of a speaker are often fragments ("Me? Yeah."), so instead
     /// of taking the transcript head this drops short segments and picks the
     /// wordiest segment from the beginning, middle, and end thirds of the
-    /// speaker's turns.
+    /// speaker's turns. Passing the segments already shown excludes them, so
+    /// asking for more samples spreads fresh ones across the recording
+    /// instead of repeating the first selection; an empty result means every
+    /// qualifying segment has been shown.
     static func selectSamples(
         from segments: [TranscriptSegment], speaker: String,
-        count: Int = 3, minimumWords: Int = 4
+        count: Int = 3, minimumWords: Int = 4,
+        excluding shown: [TranscriptSegment] = []
     ) -> [TranscriptSegment] {
         let turns = segments.filter { $0.speaker == speaker }
         var candidates = turns.filter { wordCount($0.text) >= minimumWords }
         if candidates.isEmpty { candidates = turns }
+        candidates.removeAll { shown.contains($0) }
         guard candidates.count > count, count > 0 else { return candidates }
         let chunk = candidates.count / count
         return (0..<count).map { index in
@@ -102,13 +114,13 @@ enum SpeakerReview {
         /// needs attention. Returns after the last document or when the user
         /// quits; decisions are applied per document either way.
         func run(documents: [URL]) throws {
-            var confirmedAnything = false
+            var changedAnything = false
             for url in documents {
                 let outcome = try review(documentAt: url)
-                confirmedAnything = confirmedAnything || outcome.confirmed
+                changedAnything = changedAnything || outcome.changed
                 if outcome.quit { break }
             }
-            if confirmedAnything && !refreshExports {
+            if changedAnything && !refreshExports {
                 io.write("Export again to update rendered files.\n")
             }
         }
@@ -121,11 +133,13 @@ enum SpeakerReview {
 
         func promptableSpeakers(of document: CanonicalTranscript) -> [String] {
             document.output.speakerEmbeddings.keys.sorted().filter { speaker in
-                includeConfirmed || document.speakerMatches[speaker]?.status != .confirmed
+                includeConfirmed
+                    || (document.speakerMatches[speaker]?.status != .confirmed
+                        && !document.isDismissed(speaker))
             }
         }
 
-        private func review(documentAt url: URL) throws -> (confirmed: Bool, quit: Bool) {
+        private func review(documentAt url: URL) throws -> (changed: Bool, quit: Bool) {
             let document = try SpeakerCommands.refreshedDocument(at: url)
             let pending = promptableSpeakers(of: document)
             guard !pending.isEmpty else { return (false, false) }
@@ -145,13 +159,13 @@ enum SpeakerReview {
                 }
                 if quit { break }
             }
-            let confirmed = try SpeakerReview.apply(
+            let changed = try SpeakerReview.apply(
                 decisions, to: url, io: io, color: color, refreshExports: refreshExports
             )
             // The ID is what speakers confirm/clear take to revise a
             // decision, so leave it on screen when the session moves on.
             io.write(color.dim("Transcript ID: \(document.id.uuidString.lowercased())") + "\n")
-            return (confirmed, quit)
+            return (changed, quit)
         }
 
         private enum PromptOutcome {
@@ -174,7 +188,8 @@ enum SpeakerReview {
         private func prompt(
             for speaker: String, in document: CanonicalTranscript, profiles: [SpeakerProfile]
         ) -> PromptOutcome {
-            printSpeaker(speaker, in: document)
+            var shown = SpeakerReview.selectSamples(from: document.output.segments, speaker: speaker)
+            printSpeaker(speaker, in: document, samples: shown)
             let match = document.speakerMatches[speaker]
             let defaultName = match?.name
             while true {
@@ -184,12 +199,24 @@ enum SpeakerReview {
                     return .quit
                 case .skip:
                     return .skipped
+                case .dismiss:
+                    return .decided(.dismiss)
                 case .acceptDefault:
                     guard let match else { return .skipped }
                     // Re-accepting a confirmed name changes nothing; only a
                     // suggestion or automatic guess gains a voice example.
                     if match.status == .confirmed { return .skipped }
                     return .decided(.existingProfile(id: match.profileID))
+                case .moreSamples:
+                    let more = SpeakerReview.selectSamples(
+                        from: document.output.segments, speaker: speaker, excluding: shown
+                    )
+                    guard !more.isEmpty else {
+                        io.write("No more samples for this speaker.\n")
+                        continue
+                    }
+                    printSamples(more)
+                    shown += more
                 case .listProfiles:
                     printProfileMenu(profiles)
                 case .profileIndex(let number):
@@ -209,7 +236,9 @@ enum SpeakerReview {
             }
         }
 
-        private func printSpeaker(_ speaker: String, in document: CanonicalTranscript) {
+        private func printSpeaker(
+            _ speaker: String, in document: CanonicalTranscript, samples: [TranscriptSegment]
+        ) {
             let turns = document.output.segments.filter { $0.speaker == speaker }
             let speaking = turns.reduce(0.0) { $0 + max(0, $1.end - $1.start) }
             var line = "\n\(color.bold(safeText(speaker)))  (\(turns.count) turns, \(durationText(speaking)) speaking)"
@@ -222,8 +251,15 @@ enum SpeakerReview {
                 case .suggested: line += "   " + color.yellow(annotation)
                 }
             }
+            if document.isDismissed(speaker) {
+                line += "   " + color.dim("marked unidentifiable")
+            }
             io.write(line + "\n")
-            for sample in SpeakerReview.selectSamples(from: document.output.segments, speaker: speaker) {
+            printSamples(samples)
+        }
+
+        private func printSamples(_ samples: [TranscriptSegment]) {
+            for sample in samples {
                 let stamp = color.dim("[\(formatTimeRange(seconds: sample.start))]")
                 io.write("  \(stamp)  \(sampleText(sample.text))\n")
             }
@@ -231,9 +267,9 @@ enum SpeakerReview {
 
         private func promptLine(defaultName: String?) -> String {
             if let defaultName {
-                return "Name [\(safeText(defaultName))], l list profiles, s skip, q quit: "
+                return "Name [\(safeText(defaultName))], l profiles, m more, u unknown, s skip, q quit: "
             }
-            return "Name, l list profiles, s skip (Enter), q quit: "
+            return "Name, l profiles, m more, u unknown, s skip (Enter), q quit: "
         }
 
         private func printProfileMenu(_ profiles: [SpeakerProfile]) {
@@ -269,7 +305,7 @@ enum SpeakerReview {
     /// locks — a session can wait on a human indefinitely — so the document
     /// is reloaded under its lock here and each decision re-checked against
     /// the fresh content before confirming, in the standard document-then-
-    /// profile lock order. Returns whether anything was confirmed.
+    /// profile lock order. Returns whether anything changed.
     static func apply(
         _ decisions: [(speaker: String, decision: SpeakerDecision)],
         to url: URL, io: InteractiveIO, color: TerminalColor,
@@ -279,7 +315,7 @@ enum SpeakerReview {
         return try SpeakerCommands.withDocumentLock(at: url) {
             var document = try CanonicalTranscriptStore.load(from: url)
             let profiles = try SpeakerProfileStore.profiles()
-            var confirmedAny = false
+            var changedAny = false
             for (speaker, decision) in decisions {
                 guard let embedding = document.output.speakerEmbeddings[speaker] else {
                     emitWarning("No embedding for local speaker '\(speaker)' in this document any more; not confirmed.")
@@ -288,6 +324,21 @@ enum SpeakerReview {
                 let name: String
                 var profileID: String?
                 switch decision {
+                case .dismiss:
+                    // Dismissing a previously confirmed speaker withdraws the
+                    // confirmation from the profile store too, as `speakers
+                    // clear` would; the user has decided the identification
+                    // was not supportable.
+                    if document.speakerMatches[speaker]?.status == .confirmed {
+                        try SpeakerProfileStore.clearExamples(
+                            transcriptID: document.evidenceID, speakerID: speaker
+                        )
+                    }
+                    document.speakerMatches.removeValue(forKey: speaker)
+                    document.markDismissed(speaker)
+                    changedAny = true
+                    io.write(color.green("Marked \(safeText(speaker)) as unidentifiable; review will not prompt for it again (--all revisits).") + "\n")
+                    continue
                 case .existingProfile(let id):
                     guard let profile = profiles.first(where: { $0.id == id }) else {
                         emitWarning("Profile \(id) no longer exists; speaker '\(speaker)' not confirmed.")
@@ -304,16 +355,17 @@ enum SpeakerReview {
                     sourceHashes: document.sourceHashes
                 )
                 document.speakerMatches[speaker] = match
-                confirmedAny = true
+                document.clearDismissed(speaker)
+                changedAny = true
                 io.write(color.green("Confirmed \(safeText(speaker)) as \(safeText(match.name)) (\(match.profileID)).") + "\n")
             }
-            if confirmedAny {
+            if changedAny {
                 _ = try CanonicalTranscriptStore.save(document, to: url)
                 if refreshExports {
                     ExportRefresh.run(document: document, at: url, io: io, color: color)
                 }
             }
-            return confirmedAny
+            return changedAny
         }
     }
 }

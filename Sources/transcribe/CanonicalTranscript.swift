@@ -57,6 +57,11 @@ struct CanonicalTranscript: Codable, Equatable {
     var output: TranscriptionOutput
     let embeddingModelID: String
     var speakerMatches: [String: SpeakerMatch]
+    /// Local speakers the user marked unidentifiable during review: review
+    /// stops prompting for them and refresh assigns them no new matches.
+    /// Sorted and unique, or absent when empty. Like `exports`, an additive
+    /// optional key within schema version 1.
+    var dismissedSpeakers: [String]?
     /// Rendered files this document produced, absent on documents from
     /// releases before export refresh. An additive optional key within schema
     /// version 1: older binaries ignore it and older documents decode as nil.
@@ -77,6 +82,7 @@ struct CanonicalTranscript: Codable, Equatable {
         output: TranscriptionOutput,
         embeddingModelID: String = CanonicalTranscript.speakerEmbeddingModelID,
         speakerMatches: [String: SpeakerMatch] = [:],
+        dismissedSpeakers: [String]? = nil,
         exports: [ExportRecord]? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -93,6 +99,7 @@ struct CanonicalTranscript: Codable, Equatable {
         self.output = output
         self.embeddingModelID = embeddingModelID
         self.speakerMatches = speakerMatches
+        self.dismissedSpeakers = dismissedSpeakers
         self.exports = exports
     }
 
@@ -118,8 +125,25 @@ struct CanonicalTranscript: Codable, Equatable {
             createdAt: createdAt, model: model, transcribeVersion: transcribeVersion,
             audioPath: audioPath, audioFiles: audioFiles, basename: basename,
             sourceMetadata: sourceMetadata, output: output, embeddingModelID: embeddingModelID,
-            speakerMatches: speakerMatches, exports: exports
+            speakerMatches: speakerMatches, dismissedSpeakers: dismissedSpeakers, exports: exports
         )
+    }
+
+    /// Whether review marked this local speaker as not identifiable.
+    func isDismissed(_ speaker: String) -> Bool {
+        dismissedSpeakers?.contains(speaker) ?? false
+    }
+
+    /// Adds a speaker to the dismissed set, keeping it sorted and unique.
+    mutating func markDismissed(_ speaker: String) {
+        dismissedSpeakers = Set(dismissedSpeakers ?? []).union([speaker]).sorted()
+    }
+
+    /// Removes a speaker from the dismissed set, dropping the key entirely
+    /// when the set empties so untouched documents stay byte-identical.
+    mutating func clearDismissed(_ speaker: String) {
+        let remaining = (dismissedSpeakers ?? []).filter { $0 != speaker }
+        dismissedSpeakers = remaining.isEmpty ? nil : remaining
     }
 
     /// Returns an export view with accepted profile names substituted for local speaker IDs.
@@ -184,6 +208,7 @@ enum CanonicalTranscriptStore {
             // knows nothing about files earlier runs exported; dropping their
             // records here would orphan those files from future refreshes.
             if document.exports == nil { document.exports = previous?.exports }
+            document.dismissedSpeakers = dismissalsCarriedForward(to: document, from: previous)
             destination = existing.url
         } else {
             destination = try defaultURL(for: document.id)
@@ -259,6 +284,21 @@ enum CanonicalTranscriptStore {
         return matches
     }
 
+    /// Merges the previously stored document's dismissed speakers into a new
+    /// run over the same evidence, for the same reason confirmed matches carry
+    /// forward: the user already decided those voices cannot be identified.
+    /// Only speakers the new run still diarized are kept, since validation
+    /// rejects a dismissal without an embedding.
+    private static func dismissalsCarriedForward(
+        to document: CanonicalTranscript, from previous: CanonicalTranscript?
+    ) -> [String]? {
+        let carried = (previous?.dismissedSpeakers ?? []).filter {
+            document.output.speakerEmbeddings[$0] != nil
+        }
+        let merged = Set(document.dismissedSpeakers ?? []).union(carried)
+        return merged.isEmpty ? nil : merged.sorted()
+    }
+
     private static func transcriptsDirectoryURL() throws -> URL {
         try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts", isDirectory: true)
     }
@@ -323,6 +363,17 @@ enum CanonicalTranscriptStore {
                   match.confirmedExampleCount >= 0,
                   match.margin.map({ $0.isFinite && (0...2).contains($0) }) ?? true else {
                 throw StoreError.invalidData("speaker match evidence is invalid")
+            }
+        }
+        if let dismissed = document.dismissedSpeakers {
+            guard dismissed == Set(dismissed).sorted(), !dismissed.isEmpty else {
+                throw StoreError.invalidData("dismissed speaker list is not sorted and unique")
+            }
+            for speakerID in dismissed {
+                guard isLocalSpeakerID(speakerID), localIDs.contains(speakerID),
+                      document.output.speakerEmbeddings[speakerID] != nil else {
+                    throw StoreError.invalidData("dismissed speaker reference is invalid")
+                }
             }
         }
         for record in document.exports ?? [] {

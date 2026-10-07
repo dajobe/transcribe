@@ -293,6 +293,40 @@ final class CanonicalTranscriptTests: XCTestCase {
         XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).exports, first.exports, "a rerun of the same audio must not orphan recorded exports")
     }
 
+    func testManagedReplacementCarriesForwardDismissedSpeakersTheNewRunStillHas() throws {
+        var first = document(output: twoSpeakerOutput())
+        first.dismissedSpeakers = ["SPEAKER_0", "SPEAKER_1"]
+        _ = try CanonicalTranscriptStore.save(first)
+
+        // The second run diarized only SPEAKER_0, so only that dismissal can
+        // carry; a dangling one would fail validation.
+        let url = try CanonicalTranscriptStore.save(document(id: UUID()))
+
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).dismissedSpeakers, ["SPEAKER_0"])
+    }
+
+    func testDismissedSpeakersRoundTripAndStayAbsentWhenUnset() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("document.json")
+        var withDismissal = document()
+        withDismissal.dismissedSpeakers = ["SPEAKER_0"]
+        _ = try CanonicalTranscriptStore.save(withDismissal, to: url)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).dismissedSpeakers, ["SPEAKER_0"])
+
+        let plain = directory.appendingPathComponent("plain.json")
+        _ = try CanonicalTranscriptStore.save(document(), to: plain)
+        XCTAssertFalse(try String(contentsOf: plain).contains("dismissedSpeakers"), "absent dismissals add no key")
+        XCTAssertNil(try CanonicalTranscriptStore.load(from: plain).dismissedSpeakers)
+    }
+
+    func testValidationRejectsBadDismissedSpeakers() throws {
+        for dismissed in [["SPEAKER_9"], ["SPEAKER_0", "SPEAKER_0"], [], ["evil"]] {
+            var invalid = document()
+            invalid.dismissedSpeakers = dismissed
+            XCTAssertThrowsError(try CanonicalTranscriptStore.validate(invalid), "\(dismissed)")
+        }
+    }
+
     func testValidationRejectsBadExportRecords() throws {
         for record in [
             ExportRecord(path: "relative/meeting.txt", format: "txt", sha256: String(repeating: "a", count: 64), exportedAt: Date()),

@@ -41,7 +41,7 @@ SPEAKER_1  (46 turns, 11m speaking)   suggested: Bob (distance 0.115)
   [00:03:56]  Yeah! Blah blah blah.
   [00:14:02]  I think the foo bar is wrong there because...
   [00:27:45]  Let's pick that up on Monday with the meeting.
-Name [Bob], l list profiles, s skip, q quit:
+Name [Bob], l profiles, m more, u unknown, s skip, q quit:
 ```
 
 Reply semantics:
@@ -53,6 +53,18 @@ Reply semantics:
   Names that differ only by case therefore cannot create duplicate profiles.
 - `l` lists profiles as a numbered menu; entering a number confirms into that
   profile (for names that are ambiguous or hard to type).
+- `m` prints more speech samples when the first three do not identify the voice.
+  Each batch excludes everything already shown and again spreads over the
+  remaining turns, so repeats never appear; when every qualifying segment has
+  been shown the session says so.
+- `u` marks the speaker unidentifiable: the voice cannot be told apart or
+  remembered, and that is not going to change. The mark is saved in the document
+  (`dismissedSpeakers`), the session stops prompting for that speaker, and
+  refresh suppresses future suggested or automatic matches for it. `--all`
+  revisits marked speakers; confirming a name or `speakers clear` removes the
+  mark. Dismissing a previously confirmed speaker also withdraws its voice
+  example, like `speakers clear`. A rerun of the same audio carries the mark
+  forward alongside confirmed matches.
 - `s` skips this speaker, `q` ends the session. Both apply the decisions already
   made; a skipped or quit speaker is untouched and prompts again next session.
 
@@ -148,14 +160,15 @@ never styled.
 Three layers, no terminal emulation:
 
 1. Unit tests for pure logic: sample selection (tercile spread, short-segment
-   filter, fallbacks), reply parsing (empty/name/`l`/number/`s`/`q`), and the
-   color gate (`NO_COLOR`, `TERM=dumb`, `CLICOLOR_FORCE`, non-TTY), with the
-   environment injected rather than read from the process.
+   filter, fallbacks, exclusion of already shown segments), reply parsing
+   (empty/name/`l`/number/`m`/`u`/`s`/`q`), and the color gate (`NO_COLOR`,
+   `TERM=dumb`, `CLICOLOR_FORCE`, non-TTY), with the environment injected rather
+   than read from the process.
 2. In-process session tests: the prompt loop reads and writes through an
    injected `InteractiveIO` (a pair of closures), so tests script an entire
-   session — accept suggestion, type a new name, pick from the profile menu,
-   skip, quit — and assert on decisions, profile store contents, and document
-   matches without a subprocess.
+   session — accept suggestion, type a new name, pick from the profile menu, ask
+   for more samples, mark unidentifiable, skip, quit — and assert on decisions,
+   profile store contents, and document matches without a subprocess.
 3. End-to-end CLI tests: run the built binary with `--interactive`, piped stdin
    for replies, and `XDG_STATE_HOME` pointing at fixture documents (the existing
    `SpeakerCommandsTests` harness plus a `standardInput` pipe). Verifies

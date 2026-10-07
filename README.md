@@ -127,10 +127,13 @@ transcribe speakers review --all      # also revisit confirmed speakers
 
 At the prompt, Enter accepts the bracketed suggestion when one is shown, any
 other text is a name (matching an existing profile case-insensitively before
-creating a new one), `l` lists profiles as a numbered menu, `s` skips, and `q`
-quits after applying the decisions already made. With piped or redirected
-output, review keeps its read-only table; `--interactive` and `--no-interactive`
-force the mode.
+creating a new one), `l` lists profiles as a numbered menu, `m` shows more
+speech samples (fresh ones each time, spread across the recording), `u` marks
+the speaker unidentifiable so review stops prompting for it (`--all` revisits
+the mark; confirming a name or `speakers clear` removes it), `s` skips for now,
+and `q` quits after applying the decisions already made. With piped or
+redirected output, review keeps its read-only table; `--interactive` and
+`--no-interactive` force the mode.
 
 To grow the speaker recognizer from recordings that were already transcribed and
 hand-edited, re-run them with `--no-outputs`: the full pipeline runs and the

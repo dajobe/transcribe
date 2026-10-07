@@ -119,9 +119,14 @@ enum SpeakerCommands {
         speakers. Piped output keeps the read-only table, and --apply saves
         refreshed suggestions and strong automatic matches without prompting.
         Only explicit confirmation adds a voice example to a profile.
+        In the session, m prints more speech samples when the first ones are
+        not enough, and u marks the speaker unidentifiable: review stops
+        prompting for it and automatic matching leaves it alone. --all
+        revisits it, and confirming a name or clear removes the mark.
         Automatic names require two independent confirmed recordings and a clear
         matching margin. Distances are heuristics, not identity probabilities.
-        Clear removes this document's assignment and confirmed example. Delete
+        Clear removes this document's assignment, confirmed example, and
+        unidentifiable mark. Delete
         removes a profile and its examples; saved transcript name snapshots remain.
         After a change, exports the document has on record are regenerated so
         rendered files pick up the new names; files edited or deleted since
@@ -195,6 +200,7 @@ enum SpeakerCommands {
                     sourceHashes: document.sourceHashes
                 )
                 document.speakerMatches[speaker] = match
+                document.clearDismissed(speaker)
                 do {
                     _ = try CanonicalTranscriptStore.save(document, to: url)
                 } catch {
@@ -223,6 +229,7 @@ enum SpeakerCommands {
                 // document save previously failed.
                 try SpeakerProfileStore.clearExamples(transcriptID: document.evidenceID, speakerID: speaker)
                 document.speakerMatches.removeValue(forKey: speaker)
+                document.clearDismissed(speaker)
                 _ = try CanonicalTranscriptStore.save(document, to: url)
                 print(color.green("Cleared \(speaker).") + " Future explicit review can suggest matches again.")
                 if ExportRefresh.enabled(flag: options.refreshExports) {
@@ -465,8 +472,9 @@ enum SpeakerCommands {
         if document.output.speakerEmbeddings.isEmpty {
             return "No diarized speakers in this transcript."
         }
-        return all
-            ? "No diarized speakers to revisit in this transcript."
+        if all { return "No diarized speakers to revisit in this transcript." }
+        return (document.dismissedSpeakers?.isEmpty == false)
+            ? "All speakers are confirmed or marked unidentifiable; run with --all to revisit them."
             : "All speakers are confirmed; run with --all to revisit them."
     }
 
@@ -515,6 +523,12 @@ enum SpeakerCommands {
                 refreshed[speaker] = existing
             }
         }
+        // A dismissed speaker was decided to be unidentifiable, so a fresh
+        // suggestion or automatic match must not resurrect it; an explicit
+        // confirmation (which clears the dismissal) still wins defensively.
+        for speaker in document.dismissedSpeakers ?? [] where refreshed[speaker]?.status != .confirmed {
+            refreshed.removeValue(forKey: speaker)
+        }
         document.speakerMatches = SpeakerProfileStore.demoteConflictingAutomaticMatches(refreshed)
         return document
     }
@@ -553,6 +567,8 @@ enum SpeakerCommands {
                 case .suggested: status = color.yellow(match.status.rawValue)
                 }
                 print("\(safeText(speaker))\t\(status)\t\(color.bold(safeText(match.name)))\tprofile=\(match.profileID)\tdistance=\(distance)\texamples=\(match.confirmedExampleCount)")
+            } else if document.isDismissed(speaker) {
+                print("\(safeText(speaker))\t\(color.dim("dismissed"))")
             } else {
                 print("\(safeText(speaker))\t\(color.red("unidentified"))")
             }
