@@ -28,4 +28,22 @@ enum StatePaths {
     static func processingHistoryURL() throws -> URL {
         try stateDirectoryURL().appendingPathComponent("processing_history.jsonl", isDirectory: false)
     }
+
+    /// SQLite state database (`StateDatabase`); its `-wal` and `-shm`
+    /// companions sit beside it.
+    static func stateDatabaseURL() throws -> URL {
+        try stateDirectoryURL().appendingPathComponent("state.db", isDirectory: false)
+    }
+
+    /// Bootstrap lock held while a process creates, rebuilds or migrates the
+    /// state database. Normal operation relies on database transactions.
+    static func initLockURL() throws -> URL {
+        try stateDirectoryURL().appendingPathComponent("init.lock", isDirectory: false)
+    }
+
+    /// Directory of per-document advisory locks held around export render and
+    /// record commit for managed documents.
+    static func locksDirectoryURL() throws -> URL {
+        try stateDirectoryURL().appendingPathComponent("locks", isDirectory: true)
+    }
 }

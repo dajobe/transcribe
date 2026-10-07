@@ -102,7 +102,11 @@ struct Statement {
         guard !isNull(index), let cString = sqlite3_column_text(handle, index) else {
             return nil
         }
-        return String(cString: cString)
+        // Length-aware decoding: stored text may legally contain NULs, which
+        // String(cString:) would silently truncate at.
+        let byteCount = Int(sqlite3_column_bytes(handle, index))
+        let buffer = UnsafeBufferPointer(start: cString, count: byteCount)
+        return String(decoding: buffer, as: UTF8.self)
     }
 
     func blob(_ index: Int32) -> Data? {
