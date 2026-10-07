@@ -258,6 +258,45 @@ enum SpeakerProfileStore {
         }
     }
 
+    /// The 2.x `speaker_profiles.json` layout, read only by migration.
+    private struct LegacyStoreFile: Decodable {
+        static let schemaVersion = 1
+        let schemaVersion: Int
+        let profiles: [SpeakerProfile]
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case profiles
+        }
+    }
+
+    /// Imports a 2.x profile store into empty profile tables, applying the
+    /// same checks the JSON store's loader did. Any failure throws
+    /// `invalidStore` rather than importing part of the shared profile state.
+    /// Examples insert in file order, which is confirmation order. The caller
+    /// provides the transaction. Returns the number of profiles imported.
+    @discardableResult
+    static func importLegacyStore(data: Data, in database: StateDatabase) throws -> Int {
+        let file: LegacyStoreFile
+        do {
+            file = try JSONDecoder().decode(LegacyStoreFile.self, from: data)
+        } catch {
+            throw SpeakerProfileError.invalidStore(error.localizedDescription)
+        }
+        guard file.schemaVersion == LegacyStoreFile.schemaVersion else {
+            throw SpeakerProfileError.invalidStore("unsupported schema version")
+        }
+        try validate(file.profiles)
+        for profile in file.profiles {
+            try database.execute(
+                "INSERT INTO profiles (id, name) VALUES (?, ?)", [.text(profile.id), .text(profile.name)]
+            )
+            for example in profile.examples {
+                try insert(example, profileID: profile.id, in: database)
+            }
+        }
+        return file.profiles.count
+    }
+
     private static func validateIdentifier(_ value: String) throws {
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               value.rangeOfCharacter(from: .controlCharacters) == nil else {

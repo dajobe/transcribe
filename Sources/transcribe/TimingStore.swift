@@ -69,28 +69,41 @@ enum TimingStore {
     /// Stores one ledger line verbatim, lifting its key columns leniently;
     /// see `ProcessingStore.appendVerbatim(line:)`.
     static func appendVerbatim(line: String) throws {
+        try StateStore.withDatabase { try appendVerbatim(line: line, in: $0) }
+    }
+
+    /// `appendVerbatim(line:)` on an explicit connection, for migration,
+    /// which runs while the shared connection is still being initialized.
+    static func appendVerbatim(line: String, in database: StateDatabase) throws {
         let fields = StateStore.ledgerFields(line)
         try insert(
             line: line,
             recordedAt: fields["ended_at"] as? String ?? "",
             model: fields["model"] as? String ?? "",
-            diarization: fields["diarization_enabled"] as? Bool ?? false
+            diarization: fields["diarization_enabled"] as? Bool ?? false,
+            in: database
         )
     }
 
     private static func insert(line: String, recordedAt: String, model: String, diarization: Bool) throws {
         try StateStore.withDatabase { database in
-            try database.inTransaction(.write) {
-                try database.execute(
-                    "INSERT INTO timing_history (recorded_at, model, diarization, record) VALUES (?, ?, ?, ?)",
-                    [
-                        .text(recordedAt),
-                        .text(StateStore.normalizedKey(model)),
-                        .integer(diarization ? 1 : 0),
-                        .text(line),
-                    ]
-                )
-            }
+            try insert(line: line, recordedAt: recordedAt, model: model, diarization: diarization, in: database)
+        }
+    }
+
+    private static func insert(
+        line: String, recordedAt: String, model: String, diarization: Bool, in database: StateDatabase
+    ) throws {
+        try database.inTransaction(.write) {
+            try database.execute(
+                "INSERT INTO timing_history (recorded_at, model, diarization, record) VALUES (?, ?, ?, ?)",
+                [
+                    .text(recordedAt),
+                    .text(StateStore.normalizedKey(model)),
+                    .integer(diarization ? 1 : 0),
+                    .text(line),
+                ]
+            )
         }
     }
 

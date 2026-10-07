@@ -11,7 +11,6 @@ enum StateDatabaseError: Error, LocalizedError, Equatable {
     case transactionAborted
     case invalidVectorBlob(byteCount: Int)
     case insecurePath(String)
-    case legacyStatePresent(String)
     case sqlite(code: Int32, message: String)
 
     var errorDescription: String? {
@@ -20,8 +19,6 @@ enum StateDatabaseError: Error, LocalizedError, Equatable {
             return "Another transcribe process is writing to the state database; retry when it finishes."
         case .insecurePath(let path):
             return "The state database path \(path) is a symbolic link; refusing to open it."
-        case .legacyStatePresent(let path):
-            return "Found existing transcribe state at \(path), but this build cannot migrate it yet; refusing to start a separate empty state database."
         case .newerSchema(let found, let supported):
             return "The state database uses schema version \(found), but this transcribe understands up to version \(supported). A newer transcribe is required."
         case .unexpectedSchema(let found):
@@ -121,11 +118,11 @@ final class StateDatabase {
     }
 
     /// Runs under the init lock. Meta markers record how far setup got:
-    /// `import_complete` is written in the same transaction as the schema (or,
-    /// once migration exists, after the import commits), and
-    /// `archive_complete` after legacy files are moved aside. A database that
-    /// was created fresh, with no legacy state to import, records both as
-    /// `'fresh'` so later phases treat it as fully migrated.
+    /// `import_complete` commits in the same transaction as the schema and
+    /// the legacy import (`StateMigration`), and `archive_complete` after the
+    /// legacy files are moved aside. A database that was created fresh, with
+    /// no legacy state to import, records both as `'fresh'` so later phases
+    /// treat it as fully migrated.
     private func initialize() throws {
         // The open below cannot use SQLITE_OPEN_NOFOLLOW (see openConnection),
         // so refuse a symlinked database name outright: following it would
@@ -160,9 +157,18 @@ final class StateDatabase {
                     closeConnection()
                     throw StateDatabaseError.unexpectedSchema(found: version)
                 }
-                // StateMigration hook: resume the archive phase when
-                // `archive_complete` is absent, then check for reappeared
-                // legacy files, all still under the init lock.
+                // Still under the init lock: finish an interrupted archive
+                // phase, then, in the same open, look for legacy files an
+                // older binary recreated since — including one recreated at
+                // a path the resumed archive just recorded as moved.
+                if try metaValue("archive_complete") == nil {
+                    runArchivePhase()
+                }
+                do {
+                    try StateMigration.checkReappeared(self)
+                } catch {
+                    emitWarning("Could not check for transcribe state files recreated by an older version: \(SpeakerCommands.errorText(error))")
+                }
                 return
             }
             // No import marker: an earlier setup stopped before committing.
@@ -171,26 +177,78 @@ final class StateDatabase {
             closeConnection()
             try removeDatabaseFiles()
         }
-        // StateMigration hook: when legacy JSON state exists, the import
-        // replaces this refusal, and `import_complete` is written only after
-        // that import commits; the archive phase then sets `archive_complete`.
-        // Until then, creating a fresh database here would set markers that
-        // permanently hide the legacy files from the future migration.
-        if let legacy = try Self.legacyStatePath() {
-            throw StateDatabaseError.legacyStatePresent(legacy)
+        // Checked before the database exists: with legacy JSON state present
+        // the import runs in the schema transaction and `import_complete`
+        // commits only with it; a fresh database instead records both markers
+        // as 'fresh' at once.
+        let migrating = try StateMigration.legacyStateExists()
+        guard migrating else {
+            _ = try createAndImport(migrating: false)
+            return
         }
+        // The ledger files stay locked from before the import reads them
+        // until the archive phase has moved them, so a 2.x writer's append
+        // cannot fall between the two (see `StateMigration.withLedgerLock`).
+        let summary = try StateMigration.withLedgerLocks { () -> StateMigration.ImportSummary? in
+            let summary = try createAndImport(migrating: true)
+            if summary != nil { runArchivePhase() }
+            return summary
+        }
+        guard let summary else { return }
+        var notice = "Migrated transcribe state into \(databaseURL.path); the original files were moved to \((try? StateMigration.archiveDirectoryURL().path) ?? StateMigration.archiveDirectoryName)/."
+        let leftInPlace = summary.skipped + summary.conflicts
+        if leftInPlace > 0 {
+            notice += " \(leftInPlace) transcript file\(leftInPlace == 1 ? " was" : "s were") left in place (skipped or conflicting)."
+        }
+        notice += " Run transcribe transcripts migration-status for details."
+        emitWarning(notice)
+    }
+
+    /// Creates the database file and schema; with `migrating`, imports the
+    /// legacy state in the same transaction and returns its summary.
+    private func createAndImport(migrating: Bool) throws -> StateMigration.ImportSummary? {
         try createDatabaseFile()
-        try openConnection()
-        try inTransaction(.write) {
-            try exec(Self.schemaV1)
-            try exec("PRAGMA user_version = \(Self.schemaVersion)")
-            try setMeta("schema_version", String(Self.schemaVersion))
-            try setMeta("created_by", Transcribe.version)
-            try setMeta("import_complete", "fresh")
-            try setMeta("archive_complete", "fresh")
+        let summary: StateMigration.ImportSummary?
+        do {
+            try openConnection()
+            summary = try inTransaction(.write) { () -> StateMigration.ImportSummary? in
+                try exec(Self.schemaV1)
+                try exec("PRAGMA user_version = \(Self.schemaVersion)")
+                try setMeta("schema_version", String(Self.schemaVersion))
+                try setMeta("created_by", Transcribe.version)
+                guard migrating else {
+                    try setMeta("import_complete", "fresh")
+                    try setMeta("archive_complete", "fresh")
+                    return nil
+                }
+                let summary = try StateMigration.importLegacyState(into: self)
+                try setMeta("import_complete", "migrated")
+                return summary
+            }
+        } catch {
+            // Nothing was committed, or the import aborted: leave no database
+            // behind, so the next run starts over from the untouched sources
+            // instead of finding an empty store that hides them.
+            closeConnection()
+            try? removeDatabaseFiles()
+            throw error
         }
-        // Push the marker out of the WAL so it is in the main file at rest.
+        // Push the marker out of the WAL so it is in the main file at rest
+        // before any source file moves.
         checkpoint()
+        return summary
+    }
+
+    /// The archive phase moves files only after the import committed, so a
+    /// failure here loses nothing: every row is already in the database, and
+    /// the phase resumes on the next start. Warn and carry on rather than
+    /// fail the command the user actually ran.
+    private func runArchivePhase() {
+        do {
+            try StateMigration.completeArchive(self)
+        } catch {
+            emitWarning("Could not finish moving migrated transcribe state files to \(StateMigration.archiveDirectoryName)/: \(SpeakerCommands.errorText(error)). Their contents are already in the state database; transcribe retries the move on its next run.")
+        }
     }
 
     /// SQLite creates a missing database file 0644 masked by umask. Creating
@@ -202,21 +260,6 @@ final class StateDatabase {
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { Darwin.close(fd) }
         try tightenPermissions(ofFileDescriptor: fd, at: path, to: privateFileMode)
-    }
-
-    /// The first legacy JSON state location that still exists, or nil on a
-    /// genuinely fresh machine. Used to refuse fresh creation until
-    /// StateMigration can import these files. Every 2.x store is superseded
-    /// now — both ledgers, the profile store, and the managed transcripts
-    /// directory — and nothing in this build creates any of them.
-    private static func legacyStatePath() throws -> String? {
-        let candidates = [
-            try StatePaths.processingHistoryURL().path,
-            try StatePaths.timingHistoryURL().path,
-            try StatePaths.legacySpeakerProfilesURL().path,
-            try StatePaths.legacyTranscriptsDirectoryURL().path,
-        ]
-        return candidates.first { FileManager.default.fileExists(atPath: $0) }
     }
 
     private func removeDatabaseFiles() throws {
@@ -629,8 +672,9 @@ final class StateDatabase {
           status        TEXT NOT NULL,            -- imported|skipped|conflict
           detail        TEXT,                     -- skip/conflict reason
           planned_path  TEXT,                     -- written BEFORE the rename
-          archived_path TEXT                      -- confirmed after the rename
-        );
+          archived_path TEXT,                     -- confirmed after the rename
+          source_sha256 TEXT                      -- imported bytes; resume checks
+        );                                        -- a found destination against it
         """
 }
 

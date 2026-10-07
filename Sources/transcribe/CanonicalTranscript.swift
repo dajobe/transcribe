@@ -374,9 +374,15 @@ enum CanonicalTranscriptStore {
     }
 
     static func load(from url: URL) throws -> CanonicalTranscript {
+        try load(data: Data(contentsOf: url))
+    }
+
+    /// Decodes and validates portable JSON already read, for a caller that
+    /// also needs the exact bytes (migration hashes them).
+    static func load(data: Data) throws -> CanonicalTranscript {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let document = try decoder.decode(CanonicalTranscript.self, from: Data(contentsOf: url))
+        let document = try decoder.decode(CanonicalTranscript.self, from: data)
         try validate(document)
         return document
     }
@@ -428,6 +434,22 @@ enum CanonicalTranscriptStore {
                 return document.id
             }
         }
+    }
+
+    /// Stores a migrated 2.x document exactly as its file had it: its own ID,
+    /// no evidence replacement and no carry-forward (migration's preflight
+    /// already settled which file wins each ID and evidence ID), and
+    /// `updated_at` seeded from the file's mtime so the newest-first review
+    /// order survives. The caller provides the transaction.
+    static func importMigrated(
+        _ document: CanonicalTranscript, updatedAt: Date, in database: StateDatabase
+    ) throws {
+        try validate(document)
+        try insertDocument(document, in: database)
+        try database.execute(
+            "UPDATE documents SET updated_at = ? WHERE id = ?",
+            [.text(iso8601String(updatedAt)), .text(idKey(document.id))]
+        )
     }
 
     static func load(id: UUID) throws -> CanonicalTranscript {

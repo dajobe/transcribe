@@ -51,10 +51,14 @@ enum SpeakerCommands {
 
     static func transcripts(_ args: [String]) throws {
         if args == ["--help"] || args == ["-h"] {
-            print("USAGE: transcribe transcripts\nLists saved canonical transcripts: title and ID. Pass the ID (any unique prefix works) to inspect, speakers review/confirm/clear, or export; those commands also accept a path to a portable .transcript.json file.")
+            print("USAGE: transcribe transcripts\n       transcribe transcripts migration-status\nLists saved canonical transcripts: title and ID. Pass the ID (any unique prefix works) to inspect, speakers review/confirm/clear, or export; those commands also accept a path to a portable .transcript.json file.\nmigration-status shows what the move from 2.x JSON state files into the state database imported, archived, skipped, or left in place.")
             return
         }
-        try require(args.isEmpty, "Usage: transcribe transcripts")
+        if args.first == "migration-status" {
+            try migrationStatus(Array(args.dropFirst()))
+            return
+        }
+        try require(args.isEmpty, "Usage: transcribe transcripts [migration-status]")
         let listing = try CanonicalTranscriptStore.listing(order: .id)
         if listing.isEmpty { print("No saved canonical transcripts.") }
         for entry in listing {
@@ -74,6 +78,65 @@ enum SpeakerCommands {
             // The ID is the argument speaker commands accept, so it gets its
             // own copyable column.
             print("\(Terminal.stdout.bold(safeText(entry.basename)))\t\(id)")
+        }
+    }
+
+    /// Prints the migration manifest (`migration_sources`) grouped by
+    /// outcome, so a user can see what moved, why a file was left in place,
+    /// and which files an older binary recreated afterwards.
+    static func migrationStatus(_ args: [String]) throws {
+        try require(args.isEmpty, "Usage: transcribe transcripts migration-status")
+        let (importMarker, archiveMarker, rows, databasePath) = try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                (
+                    try database.metaValue("import_complete"),
+                    try database.metaValue("archive_complete"),
+                    try StateMigration.manifestRows(in: database),
+                    database.databaseURL.path
+                )
+            }
+        }
+        let archive = try StateMigration.archiveDirectoryURL().path
+        if importMarker == "migrated" {
+            print("Migrated 2.x state files into \(safeText(databasePath)).")
+            if archiveMarker == "migrated" {
+                print("Originals moved to \(safeText(archive))/; plain-text manifest: \(safeText(archive))/\(StateMigration.manifestFileName)")
+            } else {
+                print("Moving the originals to \(safeText(archive))/ is unfinished; transcribe resumes it on its next run.")
+            }
+        } else if rows.isEmpty {
+            print("Nothing was migrated: the state database \(safeText(databasePath)) was created fresh, with no 2.x state files to import.")
+            return
+        } else {
+            print("The state database \(safeText(databasePath)) was created fresh; nothing was migrated at creation.")
+        }
+
+        func line(_ row: MigrationSourceRow, showStatus: Bool = false) -> String {
+            var text = "  " + safeText(row.filePath)
+            if showStatus { text += " [\(safeText(row.status))]" }
+            if let archived = row.archivedPath, !archived.isEmpty { text += " -> " + safeText(archived) }
+            if let detail = row.detail, !detail.isEmpty {
+                text += row.status == "imported" ? " (\(safeText(detail)))" : ": " + safeText(detail)
+            }
+            return text
+        }
+        let reappeared = rows.filter(\.isReappeared)
+        let original = rows.filter { !$0.isReappeared }
+        let sections: [(String, [MigrationSourceRow])] = [
+            ("Imported", original.filter { $0.status == "imported" }),
+            ("Skipped", original.filter { $0.status == "skipped" }),
+            ("Conflicts", original.filter { $0.status == "conflict" }),
+        ]
+        for (title, members) in sections where !members.isEmpty {
+            print("\n\(title) (\(members.count)):")
+            members.forEach { print(line($0)) }
+        }
+        if !reappeared.isEmpty {
+            print("\nReappeared after migration (\(reappeared.count)):")
+            reappeared.forEach { print(line($0, showStatus: true)) }
+        }
+        if rows.contains(where: { $0.status != "imported" }) {
+            print("\nFiles not imported were left where they are. After repairing one, import it with transcribe transcripts import <path>.")
         }
     }
 
@@ -770,7 +833,7 @@ enum SpeakerCommands {
     /// One-line reason for a document that could not be listed or read. A
     /// decoding error's localizedDescription drops the field that failed, so
     /// name it here.
-    private static func errorText(_ error: Error) -> String {
+    static func errorText(_ error: Error) -> String {
         switch error {
         case let error as DecodingError:
             switch error {

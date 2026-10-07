@@ -186,28 +186,41 @@ enum ProcessingStore {
     /// files); a line whose keys cannot be read is kept with placeholder
     /// keys, and is then skipped on read like any undecodable row.
     static func appendVerbatim(line: String) throws {
+        try StateStore.withDatabase { try appendVerbatim(line: line, in: $0) }
+    }
+
+    /// `appendVerbatim(line:)` on an explicit connection, for migration,
+    /// which runs while the shared connection is still being initialized.
+    static func appendVerbatim(line: String, in database: StateDatabase) throws {
         let fields = StateStore.ledgerFields(line)
         try insert(
             line: line,
             completedAt: fields["completed_at"] as? String ?? "",
             sourceKind: fields["source_kind"] as? String ?? "",
-            sourceID: fields["source_id"] as? String ?? ""
+            sourceID: fields["source_id"] as? String ?? "",
+            in: database
         )
     }
 
     private static func insert(line: String, completedAt: String, sourceKind: String, sourceID: String) throws {
         try StateStore.withDatabase { database in
-            try database.inTransaction(.write) {
-                try database.execute(
-                    "INSERT INTO processing_history (completed_at, source_kind, source_id, record) VALUES (?, ?, ?, ?)",
-                    [
-                        .text(completedAt),
-                        .text(StateStore.normalizedKey(sourceKind)),
-                        .text(StateStore.normalizedKey(sourceID)),
-                        .text(line),
-                    ]
-                )
-            }
+            try insert(line: line, completedAt: completedAt, sourceKind: sourceKind, sourceID: sourceID, in: database)
+        }
+    }
+
+    private static func insert(
+        line: String, completedAt: String, sourceKind: String, sourceID: String, in database: StateDatabase
+    ) throws {
+        try database.inTransaction(.write) {
+            try database.execute(
+                "INSERT INTO processing_history (completed_at, source_kind, source_id, record) VALUES (?, ?, ?, ?)",
+                [
+                    .text(completedAt),
+                    .text(StateStore.normalizedKey(sourceKind)),
+                    .text(StateStore.normalizedKey(sourceID)),
+                    .text(line),
+                ]
+            )
         }
     }
 
