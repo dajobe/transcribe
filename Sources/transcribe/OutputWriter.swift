@@ -149,6 +149,69 @@ func writePrivateAtomically(data: Data, to url: URL, mode: mode_t = privateFileM
     syncDirectory(directory)
 }
 
+/// Device and inode of a file, identifying it whatever path names it.
+struct FileID: Equatable {
+    let device: dev_t
+    let inode: ino_t
+
+    init(_ info: stat) {
+        device = info.st_dev
+        inode = info.st_ino
+    }
+
+    /// The same "device:inode" text `fileIdentity(_:)` returns.
+    var text: String { "\(device):\(inode)" }
+}
+
+/// A no-replace publish found a file already at the destination name.
+struct DestinationExistsError: Error, LocalizedError {
+    let path: String
+    var errorDescription: String? { "\(path) already exists" }
+}
+
+/// Writes `data` as `name` inside the directory open at `directoryFD`, the
+/// way `writePrivateAtomically` does — an `O_EXCL` temporary in the same
+/// directory, owner-only mode, forced to disk, then renamed into place —
+/// but relative to the descriptor, so a path component swapped meanwhile
+/// cannot redirect it. With `replace` false the rename is
+/// `renameatx_np(RENAME_EXCL)`: a file that appeared at the name after any
+/// earlier check is never replaced, and `DestinationExistsError` is thrown
+/// instead. Returns the published file's identity. `displayPath` is only
+/// for messages.
+@discardableResult
+func publishPrivateFile(
+    data: Data, named name: String, inDirectory directoryFD: Int32, displayPath: String,
+    replace: Bool, mode: mode_t = privateFileMode
+) throws -> FileID {
+    let temporary = ".\(name).\(UUID().uuidString).tmp"
+    let fd = openat(directoryFD, temporary, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, mode)
+    guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    var published = false
+    defer { if !published { _ = unlinkat(directoryFD, temporary, 0) } }
+    let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    var info = stat()
+    do {
+        try tightenPermissions(ofFileDescriptor: fd, at: displayPath, to: mode)
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+        guard fstat(fd, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        try handle.close()
+    } catch {
+        try? handle.close()
+        throw error
+    }
+    let renamed = replace
+        ? renameat(directoryFD, temporary, directoryFD, name)
+        : renameatx_np(directoryFD, temporary, directoryFD, name, UInt32(RENAME_EXCL))
+    guard renamed == 0 else {
+        if errno == EEXIST { throw DestinationExistsError(path: displayPath) }
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    published = true
+    _ = fsync(directoryFD)
+    return FileID(info)
+}
+
 /// Flushes the directory entry so a crash cannot lose a completed rename.
 /// Best effort: filesystems that reject the open or the fsync still hold a
 /// correctly renamed file, only without the durability guarantee.

@@ -1,0 +1,75 @@
+{
+  "audioPath" : "/audio/alpha.m4a",
+  "basename" : "alpha",
+  "createdAt" : "2023-11-14T22:13:20Z",
+  "dismissedSpeakers" : [
+    "SPEAKER_1"
+  ],
+  "embeddingModelID" : "argmax-speakerkit-1.1.0/pyannote-v3/speaker_embedder/W8A16",
+  "evidenceID" : "sha256:ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+  "exports" : [
+    {
+      "exportedAt" : "2023-11-14T22:15:00Z",
+      "format" : "txt",
+      "path" : "/notes/alpha.txt",
+      "sha256" : "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "id" : "AAAAAAAA-0000-4000-8000-000000000001",
+  "model" : "whisper-test",
+  "output" : {
+    "diarizationEnabled" : true,
+    "durationSeconds" : 3,
+    "language" : "en",
+    "segments" : [
+      {
+        "end" : 1.5,
+        "speaker" : "SPEAKER_0",
+        "start" : 0,
+        "text" : "Hello",
+        "words" : [
+          {
+            "end" : 1.5,
+            "start" : 0,
+            "word" : "Hello"
+          }
+        ]
+      },
+      {
+        "end" : 3,
+        "speaker" : "SPEAKER_1",
+        "start" : 2,
+        "text" : "There"
+      }
+    ],
+    "speakerEmbeddings" : {
+      "SPEAKER_0" : [
+        0.25,
+        0.75
+      ],
+      "SPEAKER_1" : [
+        0.5,
+        0.5
+      ]
+    },
+    "speakerStrategy" : "segment",
+    "speakersDetected" : 2,
+    "warnings" : [
+      "a warning"
+    ]
+  },
+  "schemaVersion" : 1,
+  "sourceHashes" : [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "speakerMatches" : {
+    "SPEAKER_0" : {
+      "confirmedExampleCount" : 1,
+      "distance" : 0,
+      "name" : "Ada",
+      "profileID" : "p-ada",
+      "status" : "confirmed"
+    }
+  },
+  "transcribeVersion" : "2.7.0"
+}

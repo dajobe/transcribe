@@ -362,15 +362,21 @@ enum CanonicalTranscriptStore {
         if !FileManager.default.fileExists(atPath: directory.path) {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
+        try writePrivateAtomically(data: try portableData(document), to: url)
+        return url
+    }
 
+    /// The exact bytes of the portable schema v1 file: what the explicit
+    /// destination save writes, `export-document` exports, and
+    /// `export-legacy` dumps. Validates first.
+    static func portableData(_ document: CanonicalTranscript) throws -> Data {
+        try validate(document)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         var data = try encoder.encode(document)
         data.append(0x0A)
-
-        try writePrivateAtomically(data: data, to: url)
-        return url
+        return data
     }
 
     static func load(from url: URL) throws -> CanonicalTranscript {
@@ -432,6 +438,45 @@ enum CanonicalTranscriptStore {
                 try database.execute("DELETE FROM documents WHERE id = ?", [.text(idKey(document.id))])
                 try insertDocument(document, in: database)
                 return document.id
+            }
+        }
+    }
+
+    struct ImportOutcome: Equatable {
+        /// The ID the document is stored under.
+        let id: UUID
+        /// A stored document for the same recording was replaced.
+        let replacedExisting: Bool
+        /// The file's own ID, when it was already used by a different
+        /// recording and the document was stored under a fresh ID instead.
+        let reassignedFrom: UUID?
+    }
+
+    /// `transcripts import`: stores a portable document with the managed
+    /// save's semantics — a stored document for the same evidence is
+    /// replaced, its ID adopted and its confirmations, dismissals and
+    /// export records carried forward. The one difference: a file whose own
+    /// ID belongs to a different recording gets a fresh ID, since a managed
+    /// save's replace-by-ID would silently delete that other document (a
+    /// migration conflict file is exactly this case). Joins the caller's
+    /// transaction.
+    static func importPortable(_ document: CanonicalTranscript) throws -> ImportOutcome {
+        try validate(document)
+        return try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                let replaced = !(try database.query(
+                    "SELECT 1 FROM documents WHERE evidence_id = ?", [.text(document.evidenceID)]
+                ) { _ in true }).isEmpty
+                var incoming = document
+                var reassignedFrom: UUID?
+                if !replaced, !(try database.query(
+                    "SELECT 1 FROM documents WHERE id = ?", [.text(idKey(document.id))]
+                ) { _ in true }).isEmpty {
+                    incoming = document.adopting(id: UUID(), speakerMatches: document.speakerMatches)
+                    reassignedFrom = document.id
+                }
+                let id = try saveManaged(incoming)
+                return ImportOutcome(id: id, replacedExisting: replaced, reassignedFrom: reassignedFrom)
             }
         }
     }

@@ -258,8 +258,9 @@ enum SpeakerProfileStore {
         }
     }
 
-    /// The 2.x `speaker_profiles.json` layout, read only by migration.
-    private struct LegacyStoreFile: Decodable {
+    /// The 2.x `speaker_profiles.json` layout, read by migration and written
+    /// by `export-legacy`.
+    private struct LegacyStoreFile: Codable {
         static let schemaVersion = 1
         let schemaVersion: Int
         let profiles: [SpeakerProfile]
@@ -267,6 +268,23 @@ enum SpeakerProfileStore {
             case schemaVersion = "schema_version"
             case profiles
         }
+    }
+
+    /// The stored profiles as a 2.x `speaker_profiles.json`, encoded exactly
+    /// as the 2.x store wrote it (sorted keys, pretty printed, no trailing
+    /// newline). Profiles and examples keep insertion order, which is the
+    /// order the 2.x store appended them in, so a migrated store exports
+    /// unchanged. The rows get the same validation every load applies. The
+    /// caller provides the transaction.
+    static func legacyStoreData(in database: StateDatabase) throws -> (data: Data, count: Int) {
+        let profiles = try loadProfiles(in: database)
+        let order = try database.query("SELECT id FROM profiles ORDER BY rowid") { $0.text(0) ?? "" }
+        let position = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        let ordered = profiles.sorted { (position[$0.id] ?? .max, $0.id) < (position[$1.id] ?? .max, $1.id) }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        let file = LegacyStoreFile(schemaVersion: LegacyStoreFile.schemaVersion, profiles: ordered)
+        return (try encoder.encode(file), ordered.count)
     }
 
     /// Imports a 2.x profile store into empty profile tables, applying the

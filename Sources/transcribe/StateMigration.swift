@@ -626,6 +626,41 @@ enum StateMigration {
         _ = rmdir(directory)
     }
 
+    // MARK: - Later imports
+
+    /// Status of a skipped or conflicting transcript file that
+    /// `transcripts import` stored afterwards. The file stays where it was:
+    /// unlike `imported`, the row is never archived, and with no
+    /// `archived_path` it still counts as left in place, so the file is not
+    /// reported as reappeared.
+    static let importedLaterStatus = "imported-later"
+
+    /// Marks the skipped or conflict rows whose path still names the file
+    /// import read (`identity`, taken from the descriptor it read through,
+    /// so any spelling of the path matches but a file swapped in since does
+    /// not) as imported later, keeping the original reason in the detail.
+    /// Joins the caller's write transaction; the caller rewrites
+    /// `MANIFEST.tsv` after commit. Returns the number of rows updated.
+    @discardableResult
+    static func recordLaterImport(ofFileWithIdentity identity: FileID, as id: UUID, in database: StateDatabase) throws -> Int {
+        let rows = try manifestRows(in: database).filter {
+            ($0.status == "skipped" || $0.status == "conflict") && $0.archivedPath == nil
+                && fileIdentity($0.filePath) == identity.text
+        }
+        let note = "imported later as \(id.uuidString.lowercased()) with transcribe transcripts import; the file was left in place"
+        try database.inTransaction(.write) {
+            for row in rows {
+                let detail = (row.detail ?? "").isEmpty ? note : "\(row.detail!); \(note)"
+                try database.execute(
+                    "UPDATE migration_sources SET status = ?, detail = ? WHERE source_path = ?",
+                    [.text(importedLaterStatus), .text(detail), .text(row.sourcePath)]
+                )
+            }
+            if !rows.isEmpty { try markManifestDirty(database) }
+        }
+        return rows.count
+    }
+
     // MARK: - Manifest
 
     static func manifestRows(in database: StateDatabase) throws -> [MigrationSourceRow] {

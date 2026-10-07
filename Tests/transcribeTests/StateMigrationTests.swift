@@ -954,4 +954,214 @@ final class StateMigrationTests: XCTestCase {
         let again = try run(["transcripts"])
         XCTAssertTrue(again.stderr.contains("SPEAKER PROFILES NOT MERGED"), again.stderr)
     }
+
+    // MARK: - export-legacy equivalence (phase 5)
+
+    private struct DecodedProfileFile: Decodable, Equatable {
+        let schemaVersion: Int
+        let profiles: [SpeakerProfile]
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case profiles
+        }
+    }
+
+    private func decodedProfiles(_ url: URL) throws -> DecodedProfileFile {
+        try JSONDecoder().decode(DecodedProfileFile.self, from: bytes(url))
+    }
+
+    /// The spec's acceptance harness: migrate the 2.x fixture, export it
+    /// back as 2.x files through the real binary, and compare against the
+    /// sources. Ledger lines are byte-identical in order (the torn final
+    /// line was never imported, so it is the one difference); documents and
+    /// profiles are decoded-equal — and, as the 2.x writers produced them,
+    /// byte-identical too.
+    /// Frozen 2.x bytes: `Fixtures/Legacy2x/` holds a portable document and a
+    /// `speaker_profiles.json` captured once from the writers, which were
+    /// verified byte-compatible with the 2.7.0 release. They are a format
+    /// contract and are never regenerated: the other export tests compare
+    /// against bytes the current encoder produced, so encoder drift would
+    /// pass them silently. Any change to the portable or profile-store
+    /// encoding must fail here, deliberately.
+    func testExportLegacyMatchesFrozen2xBytes() throws {
+        let fixtures = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/Legacy2x", isDirectory: true)
+        let frozenDocument = try bytes(fixtures.appendingPathComponent("legacy-2x-document.transcript.json"))
+        let frozenProfiles = try bytes(fixtures.appendingPathComponent("legacy-2x-speaker_profiles.json"))
+        // Sanity: the frozen document is the rich fixture document.
+        XCTAssertEqual(try CanonicalTranscriptStore.load(data: frozenDocument),
+                       document(id: idA, hash: "a", basename: "alpha", rich: true))
+
+        try FileManager.default.createDirectory(at: transcriptsDirectory, withIntermediateDirectories: true)
+        try frozenDocument.write(to: transcriptsDirectory.appendingPathComponent("\(idA.uuidString.lowercased()).transcript.json"))
+        try frozenProfiles.write(to: profilesURL)
+
+        let out = root.appendingPathComponent("frozen-export", isDirectory: true)
+        let result = try run(["transcripts", "export-legacy", out.path])
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(try bytes(out.appendingPathComponent("transcripts/\(idA.uuidString.lowercased()).transcript.json")), frozenDocument)
+        XCTAssertEqual(try bytes(out.appendingPathComponent("speaker_profiles.json")), frozenProfiles)
+    }
+
+    func testExportLegacyReproducesTheMigrated2xFixture() throws {
+        let documents = try writeFullFixture()
+        let originalDocuments = try [idA, idB].map {
+            try bytes(transcriptsDirectory.appendingPathComponent("\($0.uuidString.lowercased()).transcript.json"))
+        }
+        let originalProfiles = try bytes(profilesURL)
+        let originalTiming = try bytes(timingURL)
+
+        let out = root.appendingPathComponent("export", isDirectory: true)
+        let result = try run(["transcripts", "export-legacy", out.path])
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertTrue(result.stderr.contains("Migrated transcribe state"), "the export migrated first: \(result.stderr)")
+        XCTAssertEqual(result.stdout, "Exported 2 transcripts, 2 speaker profiles, 2 processing history rows, and 1 timing history row as 2.x files to \(out.path).\n")
+
+        for (index, document) in documents.enumerated() {
+            let file = out.appendingPathComponent("transcripts/\(document.id.uuidString.lowercased()).transcript.json")
+            XCTAssertEqual(try CanonicalTranscriptStore.load(from: file), document)
+            XCTAssertEqual(try bytes(file), originalDocuments[index])
+        }
+        let exportedProfiles = out.appendingPathComponent("speaker_profiles.json")
+        XCTAssertEqual(try decodedProfiles(exportedProfiles), try decodedProfiles(archive.appendingPathComponent("speaker_profiles.json")))
+        XCTAssertEqual(try bytes(exportedProfiles), originalProfiles)
+        XCTAssertEqual(try bytes(out.appendingPathComponent("processing_history.jsonl")),
+                       Data((processingLines.joined(separator: "\n") + "\n").utf8))
+        XCTAssertEqual(
+            String(decoding: try bytes(archive.appendingPathComponent("processing_history.jsonl")), as: UTF8.self),
+            processingLines.joined(separator: "\n") + "\n" + tornLine,
+            "the archive keeps the torn line the export cannot carry"
+        )
+        XCTAssertEqual(try bytes(out.appendingPathComponent("timing_history.jsonl")), originalTiming)
+    }
+
+    /// Lossless rollback: changes made after migration are in the export,
+    /// and the export is itself a valid 2.x state directory — migrating it
+    /// again yields the same state, and exporting that gives the same bytes.
+    func testExportLegacyCarriesPostMigrationChangesAndMigratesBackIdentically() throws {
+        try writeFullFixture()
+        _ = try StateDatabase()
+        // A new confirmation, a dismissal, and ledger appends.
+        var beta = try CanonicalTranscriptStore.load(id: idB)
+        let match = try SpeakerProfileStore.confirm(
+            name: "Bob", profileID: "p-bob", transcriptID: beta.evidenceID, speakerID: "SPEAKER_0",
+            embedding: [0.25, 0.75], modelID: beta.embeddingModelID, sourceHashes: beta.sourceHashes
+        )
+        beta.speakerMatches["SPEAKER_0"] = match
+        beta.markDismissed("SPEAKER_1")
+        try CanonicalTranscriptStore.save(beta, to: .managed(id: idB))
+        let appended = processingLine("late.m4a")
+        try ProcessingStore.appendVerbatim(line: appended)
+        try TimingStore.appendVerbatim(line: timingLine("late.wav"))
+
+        let out = root.appendingPathComponent("rollback", isDirectory: true)
+        let snapshot = try LegacyExport.snapshot()
+        try LegacyExport.write(snapshot, to: out)
+        XCTAssertEqual(
+            try CanonicalTranscriptStore.load(from: out.appendingPathComponent("transcripts/\(idB.uuidString.lowercased()).transcript.json")),
+            beta
+        )
+        let profiles = try decodedProfiles(out.appendingPathComponent("speaker_profiles.json")).profiles
+        XCTAssertEqual(profiles.first { $0.id == "p-bob" }?.examples.map(\.transcriptID), [beta.evidenceID])
+        let processing = String(decoding: try bytes(out.appendingPathComponent("processing_history.jsonl")), as: UTF8.self)
+        XCTAssertEqual(processing, (processingLines + [appended]).joined(separator: "\n") + "\n")
+
+        // Use the export as a 2.x state directory and migrate it again.
+        StateStore.closeShared()
+        let secondRoot = root.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: false)
+        try FileManager.default.copyItem(at: out, to: secondRoot.appendingPathComponent("transcribe"))
+        setenv("XDG_STATE_HOME", secondRoot.path, 1)
+        _ = try StateDatabase()
+        let again = try LegacyExport.snapshot()
+        XCTAssertEqual(again.documents.map(\.id), snapshot.documents.map(\.id))
+        XCTAssertEqual(again.documents.map(\.data), snapshot.documents.map(\.data))
+        XCTAssertEqual(again.profiles, snapshot.profiles)
+        XCTAssertEqual(again.processingLines, snapshot.processingLines)
+        XCTAssertEqual(again.timingLines, snapshot.timingLines)
+        setenv("XDG_STATE_HOME", root.path, 1)
+    }
+
+    // MARK: - transcripts import of files migration left in place (phase 5)
+
+    /// The manifest is matched against the file import actually read: a
+    /// different file renamed over the path after the read and before the
+    /// write transaction must not be marked imported later.
+    func testImportDoesNotMarkAFileReplacedAfterItWasRead() throws {
+        try writeFullFixture()
+        let bad = transcriptsDirectory.appendingPathComponent("broken.transcript.json")
+        try Data("{".utf8).write(to: bad)
+        _ = try StateDatabase()
+        XCTAssertEqual(row(try manifest(StateDatabase()), bad)?.status, "skipped")
+        StateStore.closeShared()
+
+        let read = document(id: UUID(uuidString: "dddddddd-0000-4000-8000-000000000004")!, hash: "d", basename: "read")
+        _ = try CanonicalTranscriptStore.save(read, to: bad)
+        let swapped = document(id: UUID(uuidString: "eeeeeeee-0000-4000-8000-000000000005")!, hash: "e", basename: "swapped")
+        let staging = root.appendingPathComponent("staging.transcript.json")
+        _ = try CanonicalTranscriptStore.save(swapped, to: staging)
+        defer { SpeakerCommands.afterImportRead = nil }
+        SpeakerCommands.afterImportRead = {
+            guard rename(staging.path, bad.path) == 0 else { throw POSIXError(.EIO) }
+        }
+
+        try SpeakerCommands.transcripts(["import", bad.path])
+
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: read.id).basename, "read", "what was read is stored")
+        XCTAssertFalse(try CanonicalTranscriptStore.listing().contains { $0.id == swapped.id })
+        let untouched = row(try manifest(StateDatabase()), bad)
+        XCTAssertEqual(untouched?.status, "skipped", "the replacement file was never imported")
+        XCTAssertFalse(untouched?.detail?.contains("imported later") ?? true)
+    }
+
+    func testImportingSkippedAndConflictFilesUpdatesTheManifest() throws {
+        try writeFullFixture()
+        let conflict = try writeTranscript(document(id: idC, hash: "a", basename: "dupe"))
+        let bad = transcriptsDirectory.appendingPathComponent("broken.transcript.json")
+        try Data("{".utf8).write(to: bad)
+        XCTAssertEqual(try run(["transcripts"]).status, 0)
+
+        // The user repairs the skipped file and imports it.
+        let repaired = document(id: UUID(uuidString: "dddddddd-0000-4000-8000-000000000004")!, hash: "d", basename: "repaired")
+        _ = try CanonicalTranscriptStore.save(repaired, to: bad)
+        let imported = try run(["transcripts", "import", bad.path])
+        XCTAssertEqual(imported.status, 0, imported.stderr)
+        XCTAssertTrue(imported.stdout.hasPrefix("Imported \(bad.path) as dddddddd-0000-4000-8000-000000000004.\n"), imported.stdout)
+        XCTAssertTrue(imported.stdout.contains("migration-status lists it as imported later"), imported.stdout)
+
+        var status = try run(["transcripts", "migration-status"])
+        XCTAssertEqual(status.status, 0, status.stderr)
+        XCTAssertTrue(status.stdout.contains(
+            "Imported later with transcripts import (1):\n  \(bad.path): unreadable: "
+        ), status.stdout)
+        XCTAssertTrue(status.stdout.contains("; imported later as dddddddd-0000-4000-8000-000000000004 with transcribe transcripts import; the file was left in place"), status.stdout)
+        XCTAssertFalse(status.stdout.contains("Skipped ("), status.stdout)
+        XCTAssertTrue(status.stdout.contains("Conflicts (1):"), status.stdout)
+        XCTAssertTrue(status.stdout.contains("transcribe transcripts import <path>"), "the conflict still needs a decision")
+
+        // The conflict is the same recording as alpha: importing it replaces
+        // alpha in place, keeping alpha's ID.
+        let replaced = try run(["transcripts", "import", conflict.path])
+        XCTAssertEqual(replaced.status, 0, replaced.stderr)
+        XCTAssertTrue(replaced.stdout.contains("as \(idA.uuidString.lowercased()), replacing the saved transcript of the same recording"), replaced.stdout)
+        status = try run(["transcripts", "migration-status"])
+        XCTAssertTrue(status.stdout.contains("Imported later with transcripts import (2):"), status.stdout)
+        XCTAssertFalse(status.stdout.contains("Conflicts ("), status.stdout)
+        XCTAssertFalse(status.stdout.contains("Files not imported"), status.stdout)
+
+        // Both files stay where they are, are never archived, and are not
+        // mistaken for files an older binary recreated.
+        StateStore.closeShared()
+        let database = try StateDatabase()
+        let rows = try manifest(database)
+        for url in [bad, conflict] {
+            XCTAssertTrue(exists(url))
+            XCTAssertEqual(row(rows, url)?.status, StateMigration.importedLaterStatus)
+            XCTAssertNil(row(rows, url)?.archivedPath)
+            XCTAssertFalse(rows.contains { $0.filePath == url.path && $0.isReappeared })
+        }
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: idA).basename, "dupe")
+        let tsv = try String(contentsOf: archive.appendingPathComponent("MANIFEST.tsv"), encoding: .utf8)
+        XCTAssertTrue(tsv.contains("\(bad.path)\t\(StateMigration.importedLaterStatus)\t\t"), tsv)
+    }
 }

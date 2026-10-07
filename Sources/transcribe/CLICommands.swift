@@ -305,7 +305,7 @@ struct SourceCommandDispatcher {
           speakers <subcommand>        Review and confirm persistent speaker identities.
           export <transcript|id>      Render a saved transcript without inference.
           inspect <transcript|id>     Show saved transcript metadata and speakers.
-          transcripts                  List paths to saved canonical transcripts.
+          transcripts [<subcommand>]   List, import, or export saved transcripts.
           history [--count <n>]         Show recent transcription/import history.
           config <subcommand>           View or edit JSON-backed user defaults (see `transcribe config --help`).
 

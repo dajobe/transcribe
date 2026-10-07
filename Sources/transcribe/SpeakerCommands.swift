@@ -17,6 +17,25 @@ struct TranscriptExportArguments: ParsableArguments {
     var refresh: Bool = false
 }
 
+struct TranscriptExportDocumentArguments: ParsableArguments {
+    @Argument(help: "Saved document ID (from transcribe transcripts); any unique prefix works.")
+    var transcript: String
+    @Argument(help: "Destination .transcript.json file.")
+    var path: String
+    @Flag(name: .long, help: "Replace an existing file.")
+    var overwrite: Bool = false
+}
+
+struct TranscriptImportArguments: ParsableArguments {
+    @Argument(help: "Portable .transcript.json file to store as a saved document.")
+    var path: String
+}
+
+struct TranscriptExportLegacyArguments: ParsableArguments {
+    @Argument(help: "New or empty directory to write the 2.x state files into.")
+    var directory: String
+}
+
 struct SpeakerReviewArguments: ParsableArguments {
     @Argument(help: "Saved document ID (from transcribe transcripts) or path; omit to review all saved transcripts.")
     var transcript: String?
@@ -49,16 +68,59 @@ struct SpeakerClearArguments: ParsableArguments {
 enum SpeakerCommands {
     private static let color = Terminal.stdout
 
+    static func transcriptsHelpText() -> String {
+        """
+        USAGE: transcribe transcripts
+               transcribe transcripts migration-status
+               transcribe transcripts export-document <id> <path> [--overwrite]
+               transcribe transcripts import <path>
+               transcribe transcripts export-legacy <directory>
+
+        Lists saved canonical transcripts: title and ID. Pass the ID (any unique
+        prefix works) to inspect, speakers review/confirm/clear, or export;
+        those commands also accept a path to a portable .transcript.json file.
+
+        migration-status shows what the move from 2.x JSON state files into the
+        state database imported, archived, skipped, or left in place.
+
+        export-document writes a saved document to <path> as a portable
+        .transcript.json file. --overwrite replaces an existing file.
+
+        import stores a portable .transcript.json file as a saved document and
+        prints its ID. A saved document for the same recording is replaced and
+        keeps its ID, confirmed speakers, unidentifiable marks, and recorded
+        exports. This is also how to retry a file migration skipped.
+
+        export-legacy writes the complete state as 2.x files into a new or
+        empty directory: transcripts/<id>.transcript.json,
+        speaker_profiles.json, processing_history.jsonl, and
+        timing_history.jsonl (empty when there is no history). It fails,
+        writing nothing, if any state has no 2.x form. Use it to go back to a
+        2.x release: stop every transcribe process, replace the state
+        directory's files with the export, and delete state.db*.
+        """
+    }
+
     static func transcripts(_ args: [String]) throws {
         if args == ["--help"] || args == ["-h"] {
-            print("USAGE: transcribe transcripts\n       transcribe transcripts migration-status\nLists saved canonical transcripts: title and ID. Pass the ID (any unique prefix works) to inspect, speakers review/confirm/clear, or export; those commands also accept a path to a portable .transcript.json file.\nmigration-status shows what the move from 2.x JSON state files into the state database imported, archived, skipped, or left in place.")
+            print(transcriptsHelpText())
             return
         }
-        if args.first == "migration-status" {
-            try migrationStatus(Array(args.dropFirst()))
+        if let subcommand = args.first, ["migration-status", "export-document", "import", "export-legacy"].contains(subcommand) {
+            let rest = Array(args.dropFirst())
+            if rest == ["--help"] || rest == ["-h"] {
+                print(transcriptsHelpText())
+                return
+            }
+            switch subcommand {
+            case "migration-status": try migrationStatus(rest)
+            case "export-document": try exportDocument(parse(TranscriptExportDocumentArguments.self, rest), arguments: rest)
+            case "import": try importDocument(parse(TranscriptImportArguments.self, rest), arguments: rest)
+            default: try exportLegacy(parse(TranscriptExportLegacyArguments.self, rest))
+            }
             return
         }
-        try require(args.isEmpty, "Usage: transcribe transcripts [migration-status]")
+        try require(args.isEmpty, "Usage: transcribe transcripts [migration-status | export-document | import | export-legacy]. Run transcribe transcripts --help.")
         let listing = try CanonicalTranscriptStore.listing(order: .id)
         if listing.isEmpty { print("No saved canonical transcripts.") }
         for entry in listing {
@@ -126,6 +188,7 @@ enum SpeakerCommands {
             ("Imported", original.filter { $0.status == "imported" }),
             ("Skipped", original.filter { $0.status == "skipped" }),
             ("Conflicts", original.filter { $0.status == "conflict" }),
+            ("Imported later with transcripts import", original.filter { $0.status == StateMigration.importedLaterStatus }),
         ]
         for (title, members) in sections where !members.isEmpty {
             print("\n\(title) (\(members.count)):")
@@ -135,9 +198,136 @@ enum SpeakerCommands {
             print("\nReappeared after migration (\(reappeared.count)):")
             reappeared.forEach { print(line($0, showStatus: true)) }
         }
-        if rows.contains(where: { $0.status != "imported" }) {
+        if rows.contains(where: { $0.status == "skipped" || $0.status == "conflict" }) {
             print("\nFiles not imported were left where they are. After repairing one, import it with transcribe transcripts import <path>.")
         }
+    }
+
+    /// `transcripts export-document`: the portable JSON of a saved document,
+    /// byte for byte what an explicit-destination save writes.
+    private static func exportDocument(_ options: TranscriptExportDocumentArguments, arguments: [String]) throws {
+        let ref = try transcriptRef(options.transcript, arguments: arguments)
+        guard case .managed(let id) = ref else {
+            throw usage("export-document takes a saved document ID; \(safeText(ref.displayName)) is already a portable file.")
+        }
+        let document = try loadTranscript(ref, arguments: arguments)
+        // Write through a symlink to its target rather than replacing the link.
+        let destination = URL(fileURLWithPath: (options.path as NSString).expandingTildeInPath)
+            .resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory) {
+            guard !isDirectory.boolValue else {
+                throw usage("\(safeText(destination.path)) is a directory; give the path of the .transcript.json file to write.")
+            }
+            guard options.overwrite else {
+                throw TranscribeError(
+                    message: "Output file already exists: \(safeText(destination.path)). Use --overwrite to replace.",
+                    exitCode: .outputWrite
+                )
+            }
+        }
+        do {
+            let data = try CanonicalTranscriptStore.portableData(document)
+            let parent = destination.deletingLastPathComponent()
+            // An existing directory keeps the permissions the user chose for it.
+            if !FileManager.default.fileExists(atPath: parent.path) {
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            }
+            let parentFD = open(parent.path, O_RDONLY | O_DIRECTORY)
+            guard parentFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            defer { close(parentFD) }
+            // Without --overwrite the publish never replaces a file that
+            // appeared after the check above.
+            try publishPrivateFile(
+                data: data, named: destination.lastPathComponent, inDirectory: parentFD,
+                displayPath: destination.path, replace: options.overwrite
+            )
+        } catch is DestinationExistsError {
+            throw TranscribeError(
+                message: "Output file already exists: \(safeText(destination.path)). Use --overwrite to replace.",
+                exitCode: .outputWrite
+            )
+        } catch {
+            throw TranscribeError(
+                message: "Cannot write \(safeText(destination.path)): \(safeText(errorText(error)))",
+                exitCode: .outputWrite
+            )
+        }
+        print(color.green("Exported \(id.uuidString.lowercased()) to \(safeText(destination.path))."))
+    }
+
+    /// Test seam: runs after import has read its file and before it opens
+    /// the write transaction.
+    static var afterImportRead: (() throws -> Void)?
+
+    /// `transcripts import`: stores a portable file with managed-save
+    /// semantics (see `CanonicalTranscriptStore.importPortable`), and marks a
+    /// file migration had skipped or set aside as imported later.
+    private static func importDocument(_ options: TranscriptImportArguments, arguments: [String]) throws {
+        let url = URL(fileURLWithPath: (options.path as NSString).expandingTildeInPath).resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            throw TranscribeError(
+                message: withSplitPathHint("No transcript file at \(safeText(url.path)).", arguments),
+                exitCode: .inputFile
+            )
+        }
+        // No document lock: import only reads the file, and portable saves
+        // replace it atomically, so the read sees one whole version. The
+        // identity comes from the descriptor that read it, so a file swapped
+        // in afterwards is never the one marked imported in the manifest.
+        let document: CanonicalTranscript
+        let identity: FileID
+        do {
+            let fd = open(url.path, O_RDONLY)
+            guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            var info = stat()
+            guard fstat(fd, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            identity = FileID(info)
+            let data = try handle.readToEnd() ?? Data()
+            try handle.close()
+            document = try CanonicalTranscriptStore.load(data: data)
+        } catch {
+            throw unreadable(.portable(url), error, arguments: arguments)
+        }
+        try afterImportRead?()
+        let (outcome, manifestRows) = try inWriteTransaction { () -> (CanonicalTranscriptStore.ImportOutcome, Int) in
+            let outcome = try CanonicalTranscriptStore.importPortable(document)
+            let rows = try StateStore.withDatabase {
+                try StateMigration.recordLaterImport(ofFileWithIdentity: identity, as: outcome.id, in: $0)
+            }
+            return (outcome, rows)
+        }
+        if manifestRows > 0 {
+            // Best effort, as on every open: the dirty flag committed with
+            // the rows, so a failed rewrite is retried next time.
+            try? StateStore.withDatabase { try StateMigration.writeManifest($0) }
+        }
+        let id = outcome.id.uuidString.lowercased()
+        if outcome.replacedExisting {
+            print(color.green("Imported \(safeText(url.path)) as \(id), replacing the saved transcript of the same recording; its confirmed speakers, unidentifiable marks, and recorded exports carry forward."))
+        } else if let previous = outcome.reassignedFrom {
+            print(color.green("Imported \(safeText(url.path)) as \(id).") + " Its own ID \(previous.uuidString.lowercased()) belongs to a different saved recording, so it was given a new one.")
+        } else {
+            print(color.green("Imported \(safeText(url.path)) as \(id)."))
+        }
+        if manifestRows > 0 {
+            print("Recorded in the migration manifest; transcribe transcripts migration-status lists it as imported later.")
+        }
+    }
+
+    /// `transcripts export-legacy`: see `LegacyExport`.
+    private static func exportLegacy(_ options: TranscriptExportLegacyArguments) throws {
+        let directory = URL(fileURLWithPath: (options.directory as NSString).expandingTildeInPath, isDirectory: true)
+        // Fail on a non-empty destination before reading any state.
+        try LegacyExport.checkDestination(directory)
+        let snapshot = try LegacyExport.snapshot()
+        try LegacyExport.write(snapshot, to: directory)
+        func count(_ n: Int, _ noun: String) -> String { "\(n) \(noun)\(n == 1 ? "" : "s")" }
+        print(color.green(
+            "Exported \(count(snapshot.documents.count, "transcript")), \(count(snapshot.profileCount, "speaker profile")), \(count(snapshot.processingLines.count, "processing history row")), and \(count(snapshot.timingLines.count, "timing history row")) as 2.x files to \(safeText(directory.path))."
+        ))
     }
 
     static func helpText() -> String {

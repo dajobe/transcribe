@@ -1,0 +1,30 @@
+{
+  "profiles" : [
+    {
+      "examples" : [
+        {
+          "embedding" : [
+            0.25,
+            0.75
+          ],
+          "model_id" : "argmax-speakerkit-1.1.0\/pyannote-v3\/speaker_embedder\/W8A16",
+          "source_hashes" : [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "speaker_id" : "SPEAKER_0",
+          "transcript_id" : "sha256:ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
+        }
+      ],
+      "id" : "p-ada",
+      "name" : "Ada"
+    },
+    {
+      "examples" : [
+
+      ],
+      "id" : "p-bob",
+      "name" : "Bob"
+    }
+  ],
+  "schema_version" : 1
+}
