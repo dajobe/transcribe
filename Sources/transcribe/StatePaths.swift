@@ -19,12 +19,15 @@ enum StatePaths {
 #endif
     }
 
-    /// JSON Lines file of completed run timing records.
+    /// The 2.x JSON Lines timing ledger, superseded by the state database's
+    /// `timing_history` table; kept as the legacy location migration reads.
     static func timingHistoryURL() throws -> URL {
         try stateDirectoryURL().appendingPathComponent("timing_history.jsonl", isDirectory: false)
     }
 
-    /// JSON Lines file of completed processing records for idempotent runs.
+    /// The 2.x JSON Lines processing ledger, superseded by the state
+    /// database's `processing_history` table; kept as the legacy location
+    /// migration reads.
     static func processingHistoryURL() throws -> URL {
         try stateDirectoryURL().appendingPathComponent("processing_history.jsonl", isDirectory: false)
     }

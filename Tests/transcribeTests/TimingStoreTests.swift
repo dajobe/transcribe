@@ -323,4 +323,138 @@ final class TimingStoreTests: XCTestCase {
         let loaded = try TimingStore.loadRecent(model: "alpha", diarizationEnabled: false, limit: 100)
         XCTAssertEqual(loaded.count, totalRecords)
     }
+
+    // MARK: - Database-backed ledger
+
+    private func timingRecord(_ name: String, model: String = "alpha", diarization: Bool = false) -> RunTimingRecord {
+        RunTimingRecord(
+            endedAt: Date(timeIntervalSince1970: 1_780_000_000),
+            transcribeVersion: "2.7.0",
+            model: model,
+            diarizationEnabled: diarization,
+            inputBasename: name,
+            fileBytes: 100,
+            audioDurationS: 60,
+            segmentCount: 1,
+            speakersDetected: diarization ? 2 : nil,
+            phases: PhaseTimings(),
+            writeOutputsMs: 1,
+            totalMs: 6000
+        )
+    }
+
+    private func withTemporaryState(_ body: () throws -> Void) throws {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcribe-timing-db-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        let prev = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+        setenv("XDG_STATE_HOME", temp.path, 1)
+        defer {
+            if let prev { setenv("XDG_STATE_HOME", prev, 1) } else { unsetenv("XDG_STATE_HOME") }
+            try? FileManager.default.removeItem(at: temp)
+        }
+        try body()
+    }
+
+    func testAppendStoresTodaysEncodedLineAndLiftedKeys() throws {
+        try withTemporaryState {
+            let record = timingRecord("a.wav", model: "beta", diarization: true)
+            try TimingStore.append(record)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let expected = String(decoding: try encoder.encode(record), as: UTF8.self)
+            let rows = try StateStore.withDatabase { database in
+                try database.query("SELECT recorded_at, model, diarization, record FROM timing_history") {
+                    [$0.text(0) ?? "", $0.text(1) ?? "", String($0.int(2) ?? -1), $0.text(3) ?? ""]
+                }
+            }
+            XCTAssertEqual(rows, [[record.ended_at, "beta", "1", expected]])
+        }
+    }
+
+    func testUnknownFieldsSurviveVerbatim() throws {
+        try withTemporaryState {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let known = String(decoding: try encoder.encode(timingRecord("a.wav")), as: UTF8.self)
+            let line = "{\"unknown_field\": \"kept\", " + known.dropFirst()
+            try TimingStore.appendVerbatim(line: line)
+
+            let stored = try StateStore.withDatabase { database in
+                try database.query("SELECT record FROM timing_history") { $0.text(0) }
+            }
+            XCTAssertEqual(stored, [line])
+            XCTAssertEqual(try TimingStore.loadRecent(model: "alpha", diarizationEnabled: false).map(\.input_basename), ["a.wav"])
+        }
+    }
+
+    func testModelNamesMatchAcrossUnicodeNormalizationForms() throws {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcribe-nfc-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        let prev = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+        setenv("XDG_STATE_HOME", temp.path, 1)
+        defer {
+            if let prev {
+                setenv("XDG_STATE_HOME", prev, 1)
+            } else {
+                unsetenv("XDG_STATE_HOME")
+            }
+            try? FileManager.default.removeItem(at: temp)
+        }
+
+        // Swift == matches by canonical equivalence; the lifted SQL column
+        // must not quietly diverge for NFD-spelled model names.
+        let nfd = "mod\u{65}\u{300}le"
+        let nfc = "mod\u{E8}le"
+        try TimingStore.append(record(model: nfd, diarizationEnabled: false, phases: PhaseTimings(), totalMs: 10))
+        XCTAssertEqual(
+            try TimingStore.loadRecent(model: nfc, diarizationEnabled: false).count, 1,
+            "an NFC query must find the NFD-recorded model"
+        )
+    }
+
+    /// Same contract as the JSONL reader: the newest `limit` decodable,
+    /// matching records, returned oldest first; undecodable rows neither
+    /// error nor take a slot.
+    func testLoadRecentKeepsNewestDecodableRecordsInLedgerOrder() throws {
+        try withTemporaryState {
+            for index in 0 ..< 5 {
+                try TimingStore.append(timingRecord("r\(index).wav"))
+                try TimingStore.append(timingRecord("d\(index).wav", diarization: true))
+                try TimingStore.append(timingRecord("o\(index).wav", model: "other"))
+            }
+            // Torn or foreign rows carrying the queried keys.
+            try TimingStore.appendVerbatim(line: "{\"model\":\"alpha\",\"diarization_enabled\":false,\"ended_")
+            try TimingStore.appendVerbatim(line: "{\"model\":\"alpha\",\"diarization_enabled\":false}")
+            try TimingStore.appendVerbatim(line: "garbage")
+
+            XCTAssertEqual(
+                try TimingStore.loadRecent(model: "alpha", diarizationEnabled: false, limit: 3).map(\.input_basename),
+                ["r2.wav", "r3.wav", "r4.wav"]
+            )
+            XCTAssertEqual(
+                try TimingStore.loadRecent(model: "alpha", diarizationEnabled: true, limit: 50).map(\.input_basename),
+                ["d0.wav", "d1.wav", "d2.wav", "d3.wav", "d4.wav"]
+            )
+            XCTAssertEqual(
+                try TimingStore.loadRecent(model: "alpha", limit: 4).map(\.input_basename),
+                ["r3.wav", "d3.wav", "r4.wav", "d4.wav"]
+            )
+            XCTAssertEqual(try TimingStore.loadRecent(model: "alpha", diarizationEnabled: false, limit: 0), [])
+            XCTAssertEqual(try TimingStore.loadRecent(model: "missing"), [])
+        }
+    }
+
+    func testHistoricalRatiosFromStoredHistory() throws {
+        try withTemporaryState {
+            try TimingStore.append(timingRecord("a.wav"))
+            try TimingStore.append(timingRecord("b.wav"))
+            let ratios = TimingStore.historicalRatios(
+                totalRecords: try TimingStore.loadRecent(model: "alpha", diarizationEnabled: false),
+                phaseRecords: try TimingStore.loadRecent(model: "alpha")
+            )
+            XCTAssertEqual(try XCTUnwrap(ratios.totalSecondsPerAudioSecond), 0.1, accuracy: 1e-9)
+        }
+    }
 }

@@ -2,6 +2,20 @@ import XCTest
 @testable import transcribe
 
 final class CLITests: XCTestCase {
+    private var previousState: String?
+
+    /// Every subprocess inherits this environment, so a test that does not
+    /// choose a state directory still never reads or creates the user's real
+    /// state database. Tests that pass XDG_STATE_HOME explicitly override it.
+    override func setUpWithError() throws {
+        previousState = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+        setenv("XDG_STATE_HOME", try makeTempDir().path, 1)
+    }
+
+    override func tearDownWithError() throws {
+        if let previousState { setenv("XDG_STATE_HOME", previousState, 1) } else { unsetenv("XDG_STATE_HOME") }
+    }
+
     /// Path to the built transcribe executable (relative to package root).
     /// `.build/debug` is the symlink every SwiftPM build system maintains to
     /// its current products directory; the arch-specific paths are fallbacks
@@ -388,22 +402,25 @@ final class CLITests: XCTestCase {
 
         XCTAssertEqual(process.terminationStatus, 0)
         XCTAssertTrue(stdout.contains("No processing history yet"), "stdout: \(stdout)")
-        XCTAssertTrue(stdout.contains("processing_history.jsonl"), "stdout: \(stdout)")
+        XCTAssertTrue(stdout.contains("state database"), "stdout: \(stdout)")
+        XCTAssertTrue(stdout.contains("state.db"), "stdout: \(stdout)")
+        XCTAssertFalse(stdout.contains("processing_history.jsonl"), "stdout: \(stdout)")
     }
 
     func testHistoryShowsRecentEntriesNewestFirstWithCount() throws {
         let state = try makeTempDir()
-        let ledgerDir = state.appendingPathComponent("transcribe", isDirectory: true)
-        try FileManager.default.createDirectory(at: ledgerDir, withIntermediateDirectories: true)
-        let ledger = ledgerDir.appendingPathComponent("processing_history.jsonl")
 
         // Three records with descending completed_at; --count 2 should drop the oldest.
         let lines = [
             historyLine(completedAtMinutesAgo: 60, kind: "voice_memos", filename: "old.m4a", recordedAt: "2014-05-13T00:30:35Z"),
             historyLine(completedAtMinutesAgo: 30, kind: "file", filename: "mid.m4a", recordedAt: nil),
             historyLine(completedAtMinutesAgo: 5, kind: "voice_memos", filename: "fresh.m4a", recordedAt: "2026-05-09T14:30:00Z"),
-        ].joined(separator: "\n") + "\n"
-        try Data(lines.utf8).write(to: ledger)
+        ]
+        try withXDGStateHome(state.path) {
+            for line in lines {
+                try ProcessingStore.appendVerbatim(line: line)
+            }
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.transcribePath)
@@ -533,8 +550,7 @@ final class CLITests: XCTestCase {
         let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(process.terminationStatus, 0, "stderr: \(err)")
         XCTAssertTrue(out.contains("mark-imported\tfile"), "stdout: \(out)")
-        let ledger = state.appendingPathComponent("transcribe").appendingPathComponent("processing_history.jsonl")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: ledger.path))
+        XCTAssertEqual(try processingHistoryLines(state: state), [])
     }
 
     func testRootAliasFileDispatchDryRun() throws {
@@ -910,8 +926,7 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(process.terminationStatus, 0, "stderr: \(err)")
         XCTAssertTrue(out.contains("would be marked imported"), "stdout: \(out)")
         XCTAssertTrue(out.contains("mark-imported\tvoice_memos"), "stdout: \(out)")
-        let ledger = state.appendingPathComponent("transcribe").appendingPathComponent("processing_history.jsonl")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: ledger.path))
+        XCTAssertEqual(try processingHistoryLines(state: state), [])
     }
 
     func testVoiceMemosMarkImportedWritesVoiceMemosBaseline() throws {
@@ -932,8 +947,7 @@ final class CLITests: XCTestCase {
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0)
 
-        let ledger = state.appendingPathComponent("transcribe").appendingPathComponent("processing_history.jsonl")
-        let raw = try String(contentsOf: ledger, encoding: .utf8)
+        let raw = try processingHistoryLines(state: state).joined(separator: "\n")
         XCTAssertTrue(raw.contains("\"source_kind\":\"voice_memos_baseline\""), "ledger: \(raw)")
         XCTAssertTrue(raw.contains("\"history_reason\":\"imported\""), "ledger: \(raw)")
         XCTAssertFalse(raw.contains("\"source_kind\":\"imported_baseline\""), "should not write generic baseline kind for Voice Memos: \(raw)")
@@ -946,8 +960,9 @@ final class CLITests: XCTestCase {
         duplicate.waitUntilExit()
         XCTAssertEqual(duplicate.terminationStatus, 0)
 
-        let rawAfterDuplicate = try String(contentsOf: ledger, encoding: .utf8)
-        XCTAssertEqual(rawAfterDuplicate.split(separator: "\n").count, 1, "baseline duplicate skips should not flood history: \(rawAfterDuplicate)")
+        let linesAfterDuplicate = try processingHistoryLines(state: state)
+        let rawAfterDuplicate = linesAfterDuplicate.joined(separator: "\n")
+        XCTAssertEqual(linesAfterDuplicate.count, 1, "baseline duplicate skips should not flood history: \(rawAfterDuplicate)")
         XCTAssertFalse(rawAfterDuplicate.contains("\"history_reason\":\"skip_duplicate\""), "ledger: \(rawAfterDuplicate)")
 
         // history should render the new reason and compact source kind.
@@ -1268,6 +1283,16 @@ final class CLITests: XCTestCase {
             VALUES (1, 789000000, 12.5, '\(title)', '\(path)', '\(uniqueID)');
             """
         )
+    }
+
+    /// Stored processing-history lines in the state directory a subprocess
+    /// used, read the way the store reads them.
+    private func processingHistoryLines(state: URL) throws -> [String] {
+        var lines: [String] = []
+        try withXDGStateHome(state.path) {
+            lines = try ProcessingStore.recordLines()
+        }
+        return lines
     }
 
     private func withXDGStateHome(_ path: String, _ body: () throws -> Void) throws {

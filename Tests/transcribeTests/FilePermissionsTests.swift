@@ -3,33 +3,33 @@ import XCTest
 @testable import transcribe
 
 final class FilePermissionsTests: XCTestCase {
-    func testLockedAppendWriterCreatesOwnerOnlyFile() throws {
+    /// The ledgers used to be owner-only JSONL files; their rows now live in
+    /// the state database, which must be just as private.
+    func testLedgerAppendsCreateOwnerOnlyStateDatabase() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("transcribe-perms-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
+        let previous = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+        setenv("XDG_STATE_HOME", dir.path, 1)
+        defer {
+            if let previous { setenv("XDG_STATE_HOME", previous, 1) } else { unsetenv("XDG_STATE_HOME") }
+        }
 
-        let url = dir.appendingPathComponent("history.jsonl")
-        try LockedAppendWriter.append(Data("{\"ok\":true}\n".utf8), to: url)
+        try ProcessingStore.appendVerbatim(line: "{\"ok\":true}")
+        try TimingStore.appendVerbatim(line: "{\"ok\":true}")
 
-        let mode = try XCTUnwrap(fileModeBits(atPath: url.path))
-        XCTAssertEqual(mode & 0o777, 0o600, "expected owner-only mode, got \(String(mode, radix: 8))")
-    }
-
-    func testLockedAppendWriterTightensExistingWorldReadableFile() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("transcribe-perms-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-
-        let url = dir.appendingPathComponent("history.jsonl")
-        try Data("{\"old\":true}\n".utf8).write(to: url)
-        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
-
-        try LockedAppendWriter.append(Data("{\"new\":true}\n".utf8), to: url)
-
-        let mode = try XCTUnwrap(fileModeBits(atPath: url.path))
-        XCTAssertEqual(mode & 0o777, 0o600)
+        let state = try StatePaths.stateDirectoryURL()
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: state.path)) & 0o777, 0o700)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try StatePaths.stateDatabaseURL().path))
+        for name in ["state.db", "state.db-wal", "state.db-shm", "init.lock"] {
+            let path = state.appendingPathComponent(name).path
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            let mode = try XCTUnwrap(fileModeBits(atPath: path))
+            XCTAssertEqual(mode & 0o777, 0o600, "\(name): expected owner-only mode, got \(String(mode, radix: 8))")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try StatePaths.processingHistoryURL().path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try StatePaths.timingHistoryURL().path))
     }
 
     func testTightenPermissionsAppliesOwnerOnlyMode() throws {

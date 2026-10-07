@@ -381,7 +381,7 @@ struct PipelineRunner {
         }
 
         let historicalRatios: HistoricalTimingRatios = {
-            guard options.timingStatsEnabled else { return HistoricalTimingRatios() }
+            guard usesTimingHistory else { return HistoricalTimingRatios() }
             let totalRecords = (try? TimingStore.loadRecent(
                 model: resolvedModel,
                 diarizationEnabled: options.speakersEnabled
@@ -719,7 +719,7 @@ struct PipelineRunner {
                 ))
             }
 
-            if options.timingStatsEnabled {
+            if usesTimingHistory {
                 let fileBytes: Int64 = session.files.reduce(into: Int64(0)) { total, p in
                     let n = (try? FileManager.default.attributesOfItem(atPath: p)[.size] as? NSNumber)?.int64Value ?? 0
                     total += n
@@ -856,6 +856,13 @@ struct PipelineRunner {
     /// True when this run may append to the processing-history ledger.
     var recordsProcessingHistory: Bool {
         !options.stateless && !options.noOutputs
+    }
+
+    /// True when this run reads and appends timing history for ETA hints.
+    /// `--stateless` must not open the state database at all, so it also
+    /// turns ETA-from-history off, whatever the eta-hints setting says.
+    var usesTimingHistory: Bool {
+        options.timingStatsEnabled && !options.stateless
     }
 
     func processingDecision(

@@ -173,7 +173,7 @@ final class ProcessingStoreTests: XCTestCase {
                 outputPaths: [transcript.path]
             ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
 
-            try FileManager.default.removeItem(at: try StatePaths.processingHistoryURL())
+            try StateStore.withDatabase { try $0.execute("DELETE FROM processing_history") }
             try writeLegacyProcessingRecord(
                 sourceID: sourceID,
                 fingerprint: fingerprint,
@@ -564,6 +564,240 @@ final class ProcessingStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - Database-backed ledger
+
+    func testAppendStoresTodaysEncodedLineAndLiftedKeys() throws {
+        try withXDGStateHome(try makeTempDir().path) {
+            let record = sampleRecord(kind: .voiceMemos, sourceID: "voice_memos:abc", completedAt: "2026-06-01T10:00:00Z")
+            try ProcessingStore.append(record)
+
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let expected = String(decoding: try encoder.encode(record), as: UTF8.self)
+            let rows = try StateStore.withDatabase { database in
+                try database.query("SELECT completed_at, source_kind, source_id, record FROM processing_history") {
+                    [$0.text(0), $0.text(1), $0.text(2), $0.text(3)]
+                }
+            }
+            XCTAssertEqual(rows, [["2026-06-01T10:00:00Z", "voice_memos", "voice_memos:abc", expected]])
+            XCTAssertFalse(expected.contains("\n"))
+        }
+    }
+
+    func testUnknownFieldsSurviveVerbatim() throws {
+        try withXDGStateHome(try makeTempDir().path) {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let known = String(decoding: try encoder.encode(sampleRecord(kind: .file, sourceID: "file:/a.m4a")), as: UTF8.self)
+            // A field this binary does not know, in a position a re-encode
+            // would not reproduce, plus spacing a re-encode would drop.
+            let line = "{\"unknown_field\": {\"nested\": [1, 2.50]}, " + known.dropFirst()
+            try ProcessingStore.appendVerbatim(line: line)
+
+            XCTAssertEqual(try ProcessingStore.recordLines(), [line])
+            let loaded = try ProcessingStore.loadRecords()
+            XCTAssertEqual(loaded.map(\.source_id), ["file:/a.m4a"])
+            let lifted = try StateStore.withDatabase { database in
+                try database.query("SELECT source_kind, source_id FROM processing_history") { [$0.text(0), $0.text(1)] }
+            }
+            XCTAssertEqual(lifted, [["file", "file:/a.m4a"]])
+        }
+    }
+
+    func testUndecodableRowsAreSkippedNotErrors() throws {
+        try withXDGStateHome(try makeTempDir().path) {
+            let state = try makeTempDir()
+            let audio = state.appendingPathComponent("clip.m4a")
+            try Data("audio".utf8).write(to: audio)
+            let transcript = state.appendingPathComponent("clip.json")
+            try Data("{}".utf8).write(to: transcript)
+            let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+            let sourceID = sourceIDForFiles(kind: .file, files: [audio.path])
+            try ProcessingStore.append(sampleRecord(
+                kind: .file, sourceID: sourceID, fingerprint: fingerprint,
+                settings: sampleSettings(), outputPaths: [transcript.path]
+            ))
+            // Newer rows for the same source that cannot decode: a truncated
+            // line (torn final JSONL write) with lifted keys, a record missing
+            // a required field, and plain garbage with placeholder keys.
+            try ProcessingStore.appendVerbatim(line: "{\"source_kind\":\"file\",\"source_id\":\"\(sourceID)\",\"source_fing")
+            try ProcessingStore.appendVerbatim(line: "{\"source_kind\":\"file\",\"source_id\":\"\(sourceID)\",\"warning_count\":0}")
+            try ProcessingStore.appendVerbatim(line: "not json")
+
+            XCTAssertEqual(try ProcessingStore.recordLines().count, 4)
+            XCTAssertEqual(try ProcessingStore.loadRecords().count, 1)
+            // The newest decodable record for the source still decides.
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file,
+                sourceID: sourceID,
+                fingerprint: fingerprint,
+                settings: sampleSettings(),
+                outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
+            XCTAssertEqual(try ProcessingStore.contentDecision(
+                fingerprint: fingerprint,
+                settings: sampleSettings()
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
+        }
+    }
+
+    func testCompletionDecisionUsesNewestRecordForSourceOnly() throws {
+        try withXDGStateHome(try makeTempDir().path) {
+            let dir = try makeTempDir()
+            let audio = dir.appendingPathComponent("clip.m4a")
+            try Data("audio".utf8).write(to: audio)
+            let transcript = dir.appendingPathComponent("clip.json")
+            try Data("{}".utf8).write(to: transcript)
+            let fingerprint = try ProcessingStore.fingerprint(files: [audio.path])
+            let stale = SourceFingerprint(files: [FileFingerprint(path: audio.path, sha256: "00", bytes: 1, mtime: nil)])
+            let sourceID = sourceIDForFiles(kind: .file, files: [audio.path])
+
+            try ProcessingStore.append(sampleRecord(
+                kind: .file, sourceID: sourceID, fingerprint: fingerprint,
+                settings: sampleSettings(), outputPaths: [transcript.path]
+            ))
+            // Same source ID under another kind, and another source: neither
+            // may influence the decision for (.file, sourceID).
+            try ProcessingStore.append(sampleRecord(kind: .directorySession, sourceID: sourceID, fingerprint: stale))
+            try ProcessingStore.append(sampleRecord(kind: .file, sourceID: "file:/elsewhere.m4a", fingerprint: stale))
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file, sourceID: sourceID, fingerprint: fingerprint,
+                settings: sampleSettings(), outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .skip, reason: .skipDuplicate))
+
+            try ProcessingStore.append(sampleRecord(kind: .file, sourceID: sourceID, fingerprint: stale))
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file, sourceID: sourceID, fingerprint: fingerprint,
+                settings: sampleSettings(), outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .process, reason: .changedFile))
+            XCTAssertEqual(try ProcessingStore.completionDecision(
+                sourceKind: .file, sourceID: "file:/never-seen.m4a", fingerprint: fingerprint,
+                settings: sampleSettings(), outputPaths: [transcript.path]
+            ), ProcessingDecision(action: .process, reason: .firstRun))
+        }
+    }
+
+    func testSourceIDsMatchAcrossUnicodeNormalizationForms() throws {
+        try withXDGStateHome(try makeTempDir().path) {
+            // Filename-derived IDs can arrive NFD (HFS/APFS) or NFC. Swift ==
+            // treats them as equal; the lifted SQL column must too.
+            let nfc = "voice_memos:caf\u{E9}.m4a"
+            let nfd = "voice_memos:cafe\u{301}.m4a"
+            let fingerprint = SourceFingerprint(files: [FileFingerprint(path: "/a.m4a", sha256: "aa", bytes: 1, mtime: nil)])
+            try ProcessingStore.append(sampleRecord(kind: .importedBaseline, sourceID: nfd, fingerprint: fingerprint))
+            XCTAssertEqual(
+                try ProcessingStore.importedBaselineDecision(sourceID: nfc, fingerprint: fingerprint),
+                ProcessingDecision(action: .skip, reason: .skipDuplicate, recordsSkipHistory: false),
+                "an NFC query must find the NFD-recorded baseline"
+            )
+        }
+    }
+
+    func testImportedBaselineMatchesBothBaselineKindsNewestFirst() throws {
+        try withXDGStateHome(try makeTempDir().path) {
+            let fingerprint = SourceFingerprint(files: [FileFingerprint(path: "/a.m4a", sha256: "aa", bytes: 1, mtime: nil)])
+            let changed = SourceFingerprint(files: [FileFingerprint(path: "/a.m4a", sha256: "bb", bytes: 1, mtime: nil)])
+
+            // A completed (non-baseline) record never counts as a baseline.
+            try ProcessingStore.append(sampleRecord(kind: .voiceMemos, sourceID: "voice_memos:a", fingerprint: fingerprint))
+            XCTAssertEqual(
+                try ProcessingStore.importedBaselineDecision(sourceID: "voice_memos:a", fingerprint: fingerprint),
+                ProcessingDecision(action: .process, reason: .firstRun)
+            )
+
+            try ProcessingStore.append(sampleRecord(kind: .importedBaseline, sourceID: "voice_memos:a", fingerprint: changed))
+            XCTAssertEqual(
+                try ProcessingStore.importedBaselineDecision(sourceID: "voice_memos:a", fingerprint: fingerprint),
+                ProcessingDecision(action: .process, reason: .changedFile)
+            )
+
+            try ProcessingStore.append(sampleRecord(kind: .voiceMemosBaseline, sourceID: "voice_memos:a", fingerprint: fingerprint))
+            XCTAssertEqual(
+                try ProcessingStore.importedBaselineDecision(sourceID: "voice_memos:a", fingerprint: fingerprint),
+                ProcessingDecision(action: .skip, reason: .skipDuplicate, recordsSkipHistory: false)
+            )
+        }
+    }
+
+    /// The database-backed store must return exactly what the 2.x JSONL store
+    /// returned for the same appends: today's encoder, one line per record,
+    /// decoded line by line.
+    func testAppendThenLoadMatchesFileBackedBehavior() throws {
+        try withXDGStateHome(try makeTempDir().path) {
+            let fingerprint = SourceFingerprint(files: [
+                FileFingerprint(path: "/rec/a.m4a", sha256: "aa", bytes: 10, mtime: "2026-01-01T00:00:00Z"),
+                FileFingerprint(path: "/rec/b.m4a", sha256: "bb", bytes: 20, mtime: nil),
+            ])
+            let legacyStdout = ProcessingSettingsSignature(
+                model: "m", language: nil, diarization_enabled: true, speaker_strategy: "segment",
+                min_speakers: 2, max_speakers: 4, formats: ["txt", "srt"], transcribe_version: "2.4.0",
+                legacy_write_txt_to_stdout: true
+            )
+            let records = [
+                sampleRecord(kind: .file, sourceID: "file:/rec/a.m4a", completedAt: "2026-01-01T00:00:00Z"),
+                sampleRecord(
+                    kind: .directorySession, sourceID: "directory_session:/rec/a.m4a\u{1f}/rec/b.m4a",
+                    fingerprint: fingerprint, settings: legacyStdout, outputPaths: ["/out/s.txt", "/out/s.srt"],
+                    reason: .settingsChanged, completedAt: "2026-01-02T00:00:00Z"
+                ),
+                ProcessingRecord(
+                    completed_at: "2026-01-03T00:00:00Z", history_reason: nil, source_kind: .voiceMemosBaseline,
+                    source_id: "voice_memos:x", source_fingerprint: SourceFingerprint(files: []),
+                    settings_signature: nil, output_dir: nil, basename: nil, output_paths: [],
+                    audio_duration_s: nil, warning_count: 0, recording_title: "Memo \"quoted\" ünïcode",
+                    recorded_at: "2014-05-13T00:30:35Z", voice_memos_unique_id: "x", voice_memos_path: "/vm/x.m4a"
+                ),
+                sampleRecord(kind: .importedBaseline, sourceID: "file:/rec/c.m4a", reason: .imported),
+            ]
+            for record in records {
+                try ProcessingStore.append(record)
+            }
+
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            var file = ""
+            for record in records {
+                file += String(decoding: try encoder.encode(record), as: UTF8.self) + "\n"
+            }
+            let fileBacked = file.split(separator: "\n", omittingEmptySubsequences: true).compactMap {
+                try? JSONDecoder().decode(ProcessingRecord.self, from: Data($0.utf8))
+            }
+
+            XCTAssertEqual(try ProcessingStore.loadRecords(), fileBacked)
+            XCTAssertEqual(try ProcessingStore.recordLines().joined(separator: "\n") + "\n", file)
+            // The legacy stdout flag is decode-only, exactly as with the file.
+            XCTAssertEqual(try ProcessingStore.loadRecords()[1].settings_signature?.legacy_write_txt_to_stdout, false)
+        }
+    }
+
+    private func sampleRecord(
+        kind: ProcessingSourceKind,
+        sourceID: String,
+        fingerprint: SourceFingerprint = SourceFingerprint(files: [FileFingerprint(path: "/a.m4a", sha256: "aa", bytes: 1, mtime: nil)]),
+        settings: ProcessingSettingsSignature? = nil,
+        outputPaths: [String] = [],
+        reason: ProcessingHistoryReason = .firstRun,
+        completedAt: String = "2026-06-01T00:00:00Z"
+    ) -> ProcessingRecord {
+        ProcessingRecord(
+            completed_at: completedAt,
+            history_reason: reason,
+            source_kind: kind,
+            source_id: sourceID,
+            source_fingerprint: fingerprint,
+            settings_signature: settings,
+            output_dir: outputPaths.isEmpty ? nil : "/out",
+            basename: "clip",
+            output_paths: outputPaths,
+            audio_duration_s: 1.5,
+            warning_count: 0,
+            recording_title: nil,
+            recorded_at: nil,
+            voice_memos_unique_id: nil,
+            voice_memos_path: nil
+        )
+    }
+
     private func sampleSettings(model: String = "model", version: String = "1.0.0") -> ProcessingSettingsSignature {
         ProcessingSettingsSignature(
             model: model,
@@ -584,8 +818,6 @@ final class ProcessingStoreTests: XCTestCase {
         transcript: URL,
         writeTxtToStdout: Bool
     ) throws {
-        let url = try StatePaths.processingHistoryURL()
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let files = fingerprint.files.map { file -> [String: Any] in
             var row: [String: Any] = [
                 "path": file.path,
@@ -620,9 +852,7 @@ final class ProcessingStoreTests: XCTestCase {
             "warning_count": 0,
         ]
         let data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
-        var line = data
-        line.append(Data("\n".utf8))
-        try line.write(to: url)
+        try ProcessingStore.appendVerbatim(line: String(decoding: data, as: UTF8.self))
     }
 
     private func withXDGStateHome(_ path: String, _ body: () throws -> Void) throws {

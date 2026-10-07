@@ -158,35 +158,95 @@ struct ProcessingRecord: Codable, Equatable {
     let voice_memos_path: String?
 }
 
+/// The processing-history ledger, stored as rows of `processing_history`.
+///
+/// Each row's `record` column is the exact single-line JSON the 2.x JSONL
+/// ledger held, never a decode/re-encode: rows may carry fields this binary
+/// does not know, and they must survive for a newer binary or a legacy
+/// export. The lifted `source_kind` and `source_id` columns only narrow the
+/// per-source queries; every decision still runs on the decoded record.
 enum ProcessingStore {
     static func append(_ record: ProcessingRecord) throws {
-        let url = try StatePaths.processingHistoryURL()
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(record)
-        guard var line = String(data: data, encoding: .utf8) else {
+        guard let line = String(data: data, encoding: .utf8) else {
             throw TranscribeError(message: "Failed to encode processing record.", exitCode: .outputWrite)
         }
-        line.append("\n")
-        try LockedAppendWriter.append(Data(line.utf8), to: url)
+        try insert(
+            line: line,
+            completedAt: record.completed_at,
+            sourceKind: record.source_kind.rawValue,
+            sourceID: record.source_id
+        )
     }
 
-    static func loadRecords() throws -> [ProcessingRecord] {
-        let url = try StatePaths.processingHistoryURL()
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        let data = try Data(contentsOf: url)
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-        let decoder = JSONDecoder()
-        var out: [ProcessingRecord] = []
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let row = line.data(using: .utf8),
-                  let record = try? decoder.decode(ProcessingRecord.self, from: row) else {
-                continue
+    /// Stores one ledger line verbatim, lifting its key columns leniently.
+    /// This is the path for lines written by other binaries (legacy ledger
+    /// files); a line whose keys cannot be read is kept with placeholder
+    /// keys, and is then skipped on read like any undecodable row.
+    static func appendVerbatim(line: String) throws {
+        let fields = StateStore.ledgerFields(line)
+        try insert(
+            line: line,
+            completedAt: fields["completed_at"] as? String ?? "",
+            sourceKind: fields["source_kind"] as? String ?? "",
+            sourceID: fields["source_id"] as? String ?? ""
+        )
+    }
+
+    private static func insert(line: String, completedAt: String, sourceKind: String, sourceID: String) throws {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                try database.execute(
+                    "INSERT INTO processing_history (completed_at, source_kind, source_id, record) VALUES (?, ?, ?, ?)",
+                    [
+                        .text(completedAt),
+                        .text(StateStore.normalizedKey(sourceKind)),
+                        .text(StateStore.normalizedKey(sourceID)),
+                        .text(line),
+                    ]
+                )
             }
-            out.append(record)
         }
-        return out
+    }
+
+    /// Every decodable record, oldest first (ledger order). Rows that fail to
+    /// decode are skipped, as unreadable JSONL lines were.
+    static func loadRecords() throws -> [ProcessingRecord] {
+        decode(try recordLines())
+    }
+
+    /// The stored lines, oldest first, exactly as written.
+    static func recordLines() throws -> [String] {
+        try lines("SELECT record FROM processing_history ORDER BY rowid")
+    }
+
+    /// Records for one source key set, newest first, via the
+    /// `(source_kind, source_id, rowid)` index.
+    private static func recordsNewestFirst(sourceKinds: [ProcessingSourceKind], sourceID: String) throws -> [ProcessingRecord] {
+        let placeholders = Array(repeating: "?", count: sourceKinds.count).joined(separator: ", ")
+        let bindings = sourceKinds.map { SQLValue.text(StateStore.normalizedKey($0.rawValue)) }
+            + [.text(StateStore.normalizedKey(sourceID))]
+        return decode(try lines(
+            "SELECT record FROM processing_history WHERE source_kind IN (\(placeholders)) AND source_id = ? ORDER BY rowid DESC",
+            bindings
+        ))
+    }
+
+    private static func lines(_ sql: String, _ bindings: [SQLValue] = []) throws -> [String] {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                try database.query(sql, bindings) { $0.text(0) ?? "" }
+            }
+        }
+    }
+
+    private static func decode(_ lines: [String]) -> [ProcessingRecord] {
+        let decoder = JSONDecoder()
+        return lines.compactMap { line in
+            try? decoder.decode(ProcessingRecord.self, from: Data(line.utf8))
+        }
     }
 
     static func shouldSkipCompleted(
@@ -212,8 +272,8 @@ enum ProcessingStore {
         settings: ProcessingSettingsSignature,
         outputPaths: [String]
     ) throws -> ProcessingDecision {
-        let records = try loadRecords()
-        for record in records.reversed() {
+        let records = try recordsNewestFirst(sourceKinds: [sourceKind], sourceID: sourceID)
+        for record in records {
             guard record.source_kind == sourceKind,
                   record.source_id == sourceID else {
                 continue
@@ -245,8 +305,8 @@ enum ProcessingStore {
         sourceID: String,
         fingerprint: SourceFingerprint
     ) throws -> ProcessingDecision {
-        let records = try loadRecords()
-        for record in records.reversed() {
+        let records = try recordsNewestFirst(sourceKinds: [.importedBaseline, .voiceMemosBaseline], sourceID: sourceID)
+        for record in records {
             guard record.source_kind == .importedBaseline || record.source_kind == .voiceMemosBaseline,
                   record.source_id == sourceID else {
                 continue

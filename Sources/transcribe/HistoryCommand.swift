@@ -16,8 +16,8 @@ enum HistoryCommand {
         let recent = Array(sorted.prefix(count))
 
         if recent.isEmpty {
-            let path = (try? StatePaths.processingHistoryURL().path) ?? "<unknown>"
-            HistoryCommand.write("No processing history yet (\(path)).\n")
+            let path = (try? StatePaths.stateDatabaseURL().path) ?? "<unknown>"
+            HistoryCommand.write("No processing history yet (state database \(path)).\n")
             return
         }
 

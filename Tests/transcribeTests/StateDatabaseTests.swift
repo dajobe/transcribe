@@ -395,6 +395,20 @@ final class StateDatabaseTests: XCTestCase {
         XCTAssertEqual(try mode(of: URL(fileURLWithPath: databaseURL.path + "-wal")), 0o600)
     }
 
+    func testLegacyJSONStateRefusesFreshDatabaseUntilMigrationExists() throws {
+        let state = try StatePaths.stateDirectoryURL()
+        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+        let legacy = try StatePaths.processingHistoryURL()
+        try Data("{}\n".utf8).write(to: legacy)
+        XCTAssertThrowsError(try StateDatabase()) {
+            XCTAssertEqual($0 as? StateDatabaseError, .legacyStatePresent(legacy.path))
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: try StatePaths.stateDatabaseURL().path),
+            "no empty database may shadow unmigrated legacy state"
+        )
+    }
+
     func testTextWithEmbeddedNulRoundTrips() throws {
         let database = try StateDatabase()
         let value = "abc\u{0}def"

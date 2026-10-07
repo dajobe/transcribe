@@ -11,6 +11,7 @@ enum StateDatabaseError: Error, LocalizedError, Equatable {
     case transactionAborted
     case invalidVectorBlob(byteCount: Int)
     case insecurePath(String)
+    case legacyStatePresent(String)
     case sqlite(code: Int32, message: String)
 
     var errorDescription: String? {
@@ -19,6 +20,8 @@ enum StateDatabaseError: Error, LocalizedError, Equatable {
             return "Another transcribe process is writing to the state database; retry when it finishes."
         case .insecurePath(let path):
             return "The state database path \(path) is a symbolic link; refusing to open it."
+        case .legacyStatePresent(let path):
+            return "Found existing transcribe state at \(path), but this build cannot migrate it yet; refusing to start a separate empty state database."
         case .newerSchema(let found, let supported):
             return "The state database uses schema version \(found), but this transcribe understands up to version \(supported). A newer transcribe is required."
         case .unexpectedSchema(let found):
@@ -168,6 +171,14 @@ final class StateDatabase {
             closeConnection()
             try removeDatabaseFiles()
         }
+        // StateMigration hook: when legacy JSON state exists, the import
+        // replaces this refusal, and `import_complete` is written only after
+        // that import commits; the archive phase then sets `archive_complete`.
+        // Until then, creating a fresh database here would set markers that
+        // permanently hide the legacy files from the future migration.
+        if let legacy = try Self.legacyStatePath() {
+            throw StateDatabaseError.legacyStatePresent(legacy)
+        }
         try createDatabaseFile()
         try openConnection()
         try inTransaction(.write) {
@@ -175,9 +186,6 @@ final class StateDatabase {
             try exec("PRAGMA user_version = \(Self.schemaVersion)")
             try setMeta("schema_version", String(Self.schemaVersion))
             try setMeta("created_by", Transcribe.version)
-            // StateMigration hook: when legacy JSON state exists, import it
-            // here instead, and write `import_complete` only after that
-            // import commits; the archive phase then sets `archive_complete`.
             try setMeta("import_complete", "fresh")
             try setMeta("archive_complete", "fresh")
         }
@@ -194,6 +202,20 @@ final class StateDatabase {
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { Darwin.close(fd) }
         try tightenPermissions(ofFileDescriptor: fd, at: path, to: privateFileMode)
+    }
+
+    /// The first legacy JSON state location that still exists, or nil on a
+    /// genuinely fresh machine. Used to refuse fresh creation until
+    /// StateMigration can import these files. Only stores the database has
+    /// already superseded count: the profile store and transcripts directory
+    /// are still live JSON stores, and a run legitimately creates them before
+    /// its first history append reaches here.
+    private static func legacyStatePath() throws -> String? {
+        let candidates = [
+            try StatePaths.processingHistoryURL().path,
+            try StatePaths.timingHistoryURL().path,
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0) }
     }
 
     private func removeDatabaseFiles() throws {

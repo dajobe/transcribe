@@ -175,6 +175,14 @@ func tightenPermissions(ofFileDescriptor fd: Int32, at path: String, to mode: mo
     try handlePermissionFailure(code: errno, path: path)
 }
 
+/// Full `st_mode` of `path` (following symlinks), or nil when it cannot be
+/// stat'ed.
+func fileModeBits(atPath path: String) -> mode_t? {
+    var info = stat()
+    guard stat(path, &info) == 0 else { return nil }
+    return info.st_mode
+}
+
 /// Network and FUSE mounts reject chmod with ENOTSUP, or EPERM when the mount
 /// maps ownership to another user. Files there cannot be made owner-only, but
 /// refusing to read or update state at all is worse than saying so once and

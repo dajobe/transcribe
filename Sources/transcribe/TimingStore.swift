@@ -41,23 +41,57 @@ struct HistoricalTimingRatios: Sendable, Equatable {
     }
 }
 
-/// Append-only JSON Lines store and helpers for ETA prediction.
+/// Run-timing history, stored as rows of `timing_history`, and helpers for
+/// ETA prediction.
+///
+/// As with `ProcessingStore`, the `record` column is the verbatim single-line
+/// JSON of the 2.x JSONL ledger; the lifted `model` and `diarization` columns
+/// only narrow the query. Callers gate both reads and writes on
+/// `TRANSCRIBE_ETA_HINTS` / `--eta-hints` (and `--stateless`).
 enum TimingStore {
     private static let recentLimit = 50
 
-    /// Append one record; creates parent directory if needed.
     static func append(_ record: RunTimingRecord) throws {
-        let url = try StatePaths.timingHistoryURL()
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(record)
-        guard var line = String(data: data, encoding: .utf8) else {
+        guard let line = String(data: data, encoding: .utf8) else {
             throw TranscribeError(message: "Failed to encode timing record.", exitCode: .outputWrite)
         }
-        line.append("\n")
-        guard let out = line.data(using: .utf8) else { return }
-        try LockedAppendWriter.append(out, to: url)
+        try insert(
+            line: line,
+            recordedAt: record.ended_at,
+            model: record.model,
+            diarization: record.diarization_enabled
+        )
+    }
+
+    /// Stores one ledger line verbatim, lifting its key columns leniently;
+    /// see `ProcessingStore.appendVerbatim(line:)`.
+    static func appendVerbatim(line: String) throws {
+        let fields = StateStore.ledgerFields(line)
+        try insert(
+            line: line,
+            recordedAt: fields["ended_at"] as? String ?? "",
+            model: fields["model"] as? String ?? "",
+            diarization: fields["diarization_enabled"] as? Bool ?? false
+        )
+    }
+
+    private static func insert(line: String, recordedAt: String, model: String, diarization: Bool) throws {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                try database.execute(
+                    "INSERT INTO timing_history (recorded_at, model, diarization, record) VALUES (?, ?, ?, ?)",
+                    [
+                        .text(recordedAt),
+                        .text(StateStore.normalizedKey(model)),
+                        .integer(diarization ? 1 : 0),
+                        .text(line),
+                    ]
+                )
+            }
+        }
     }
 
     /// Reads up to `limit` recent records matching model and diarization flag (newest last).
@@ -66,7 +100,11 @@ enum TimingStore {
         diarizationEnabled: Bool,
         limit: Int = recentLimit
     ) throws -> [RunTimingRecord] {
-        try loadRecent(limit: limit) { r in
+        try loadRecent(
+            where: "model = ? AND diarization = ?",
+            [.text(StateStore.normalizedKey(model)), .integer(diarizationEnabled ? 1 : 0)],
+            limit: limit
+        ) { r in
             r.model == model && r.diarization_enabled == diarizationEnabled
         }
     }
@@ -76,28 +114,35 @@ enum TimingStore {
         model: String,
         limit: Int = recentLimit
     ) throws -> [RunTimingRecord] {
-        try loadRecent(limit: limit) { $0.model == model }
+        try loadRecent(where: "model = ?", [.text(StateStore.normalizedKey(model))], limit: limit) { $0.model == model }
     }
 
+    /// The limit counts decoded, matching records, so it cannot be a SQL
+    /// `LIMIT`: an undecodable row must not take a slot. The predicate is
+    /// re-applied to the decoded record so a row stored with placeholder keys
+    /// can never match by accident.
     private static func loadRecent(
+        where condition: String,
+        _ bindings: [SQLValue],
         limit: Int,
         matching predicate: (RunTimingRecord) -> Bool
     ) throws -> [RunTimingRecord] {
-        let url = try StatePaths.timingHistoryURL()
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        let data = try Data(contentsOf: url)
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-        var records: [RunTimingRecord] = []
-        let decoder = JSONDecoder()
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let row = line.data(using: .utf8) else { continue }
-            guard let r = try? decoder.decode(RunTimingRecord.self, from: row) else { continue }
-            if predicate(r) {
-                records.append(r)
+        let lines = try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                try database.query(
+                    "SELECT record FROM timing_history WHERE \(condition) ORDER BY rowid DESC",
+                    bindings
+                ) { $0.text(0) ?? "" }
             }
         }
-        if records.count <= limit { return records }
-        return Array(records.suffix(limit))
+        var records: [RunTimingRecord] = []
+        let decoder = JSONDecoder()
+        for line in lines {
+            guard records.count < limit else { break }
+            guard let r = try? decoder.decode(RunTimingRecord.self, from: Data(line.utf8)), predicate(r) else { continue }
+            records.append(r)
+        }
+        return records.reversed()
     }
 
     /// Median of `total_ms / (1000 * audio_duration_s)` = wall seconds per second of audio.
