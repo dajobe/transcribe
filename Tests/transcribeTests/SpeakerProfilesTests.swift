@@ -158,42 +158,103 @@ final class SpeakerProfilesTests: XCTestCase {
         XCTAssertEqual(try SpeakerProfileStore.profiles().flatMap(\.examples).map(\.transcriptID), ["two"])
     }
 
-    func testCorruptAndUnknownSchemaStoresRemainUntouched() throws {
-        try confirm("one")
-        let url = try StatePaths.stateDirectoryURL().appendingPathComponent("speaker_profiles.json")
-        for contents in ["not JSON", "{\"schema_version\":99,\"profiles\":[]}"] {
-            let bytes = Data(contents.utf8)
-            try bytes.write(to: url)
-            XCTAssertThrowsError(try SpeakerProfileStore.profiles())
-            XCTAssertThrowsError(try confirm("two"))
-            XCTAssertEqual(try Data(contentsOf: url), bytes)
+    // MARK: - Stored rows
+
+    private func execute(_ sql: String, _ bindings: [SQLValue] = []) throws {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) { try database.execute(sql, bindings) }
         }
     }
 
-    func testDuplicateProfilesAreRejected() throws {
-        try confirm("one")
-        let url = try StatePaths.stateDirectoryURL().appendingPathComponent("speaker_profiles.json")
-        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
-        let profile = try XCTUnwrap((json["profiles"] as? [[String: Any]])?.first)
-        json["profiles"] = [profile, profile]
-        try JSONSerialization.data(withJSONObject: json).write(to: url)
-        XCTAssertThrowsError(try SpeakerProfileStore.profiles())
+    private func exampleRows() throws -> [[String]] {
+        try StateStore.withDatabase { database in
+            try database.query(
+                "SELECT profile_id, transcript_id, speaker_id, hex(vector) FROM profile_examples ORDER BY rowid"
+            ) { row in (0..<4).map { row.text(Int32($0)) ?? "" } }
+        }
     }
 
-    func testStoreAndLockArePrivateAndNoTemporaryFilesRemain() throws {
+    /// Rows can be edited outside this tool; an invalid one must fail loudly
+    /// rather than be matched against, and must not be rewritten.
+    func testInvalidStoredRowsAreRejectedAndLeftUntouched() throws {
+        let alice = try confirm("one")
+        for (vector, label) in [
+            (Data([1, 2, 3]), "not whole float32 values"),
+            (Float32Blob.encode([0, 0]), "zero vector"),
+            (Float32Blob.encode([.nan, 1]), "non-finite vector"),
+        ] {
+            try execute(
+                "UPDATE profile_examples SET vector = ? WHERE profile_id = ?",
+                [.blob(vector), .text(alice.profileID)]
+            )
+            let before = try exampleRows()
+            XCTAssertThrowsError(try SpeakerProfileStore.profiles(), label)
+            XCTAssertThrowsError(try confirm("two"), label)
+            XCTAssertThrowsError(try match(), label)
+            XCTAssertEqual(try exampleRows(), before, "\(label): stored rows stay as they were")
+        }
+        try execute(
+            "UPDATE profile_examples SET vector = ?, source_hashes = '[]' WHERE profile_id = ?",
+            [.blob(Float32Blob.encode([1, 0])), .text(alice.profileID)]
+        )
+        XCTAssertThrowsError(try SpeakerProfileStore.profiles(), "an example without source evidence is invalid")
+    }
+
+    /// One voice, one person: the unique index rejects the duplicate example
+    /// identity the JSON validator rejected.
+    func testDuplicateExampleIdentityIsRejectedByTheDatabase() throws {
+        let alice = try confirm("one")
+        try execute("INSERT INTO profiles (id, name) VALUES ('other', 'Bob')")
+        XCTAssertThrowsError(try execute(
+            """
+            INSERT INTO profile_examples (profile_id, transcript_id, speaker_id, model_id, vector, source_hashes)
+            VALUES ('other', 'one', 'SPEAKER_0', 'm', ?, '["one"]')
+            """,
+            [.blob(Float32Blob.encode([1, 0]))]
+        ))
+        let profiles = try SpeakerProfileStore.profiles()
+        XCTAssertEqual(profiles.first { $0.id == alice.profileID }?.examples.count, 1)
+        XCTAssertEqual(profiles.first { $0.id == "other" }?.examples.count, 0)
+    }
+
+    func testVectorsRoundTripBitForBit() throws {
+        let vector: [Float] = [0.1, -0.2, 3.4028235e38, 1.0e-7]
+        try confirm("one", vector: vector)
+        XCTAssertEqual(try SpeakerProfileStore.profiles().first?.examples.first?.embedding, vector)
+    }
+
+    /// Profile methods called inside a document edit join its transaction,
+    /// so a document save that fails afterwards takes the profile change
+    /// with it.
+    func testProfileChangesJoinAnOuterTransaction() throws {
+        struct DocumentSaveFailed: Error {}
+        XCTAssertThrowsError(try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                try confirm("one")
+                XCTAssertEqual(try SpeakerProfileStore.profiles().count, 1, "visible inside the transaction")
+                throw DocumentSaveFailed()
+            }
+        })
+        XCTAssertTrue(try SpeakerProfileStore.profiles().isEmpty, "rolled back with the outer transaction")
+    }
+
+    func testStoreIsPrivateAndWritesNoLegacyFiles() throws {
         try confirm("one")
         try confirm("two")
         let directory = try StatePaths.stateDirectoryURL()
-        for name in ["speaker_profiles.json", "speaker_profiles.json.lock"] {
-            let mode = try XCTUnwrap(fileModeBits(atPath: directory.appendingPathComponent(name).path))
-            XCTAssertEqual(mode & 0o777, 0o600)
+        for name in ["state.db", "state.db-wal", "state.db-shm"] {
+            let path = directory.appendingPathComponent(name).path
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: path)) & 0o777, 0o600, name)
         }
         XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: directory.path)) & 0o777, 0o700)
-        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.hasSuffix(".tmp") })
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        XCTAssertFalse(names.contains { $0.hasPrefix("speaker_profiles.json") }, "\(names)")
+        XCTAssertFalse(names.contains { $0.hasSuffix(".tmp") }, "\(names)")
     }
 
-    /// The state directory is shared with timing and processing history, so
-    /// its permissions belong to the user once it exists.
+    /// The state directory is shared with every store, so its permissions
+    /// belong to the user once it exists.
     func testExistingStateDirectoryKeepsItsPermissions() throws {
         let directory = try StatePaths.stateDirectoryURL()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -203,7 +264,7 @@ final class SpeakerProfilesTests: XCTestCase {
         XCTAssertEqual(try SpeakerProfileStore.profiles().count, 1)
 
         XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: directory.path)) & 0o777, 0o755)
-        let store = directory.appendingPathComponent("speaker_profiles.json")
-        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: store.path)) & 0o777, 0o600)
+        let database = try StatePaths.stateDatabaseURL()
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: database.path)) & 0o777, 0o600)
     }
 }

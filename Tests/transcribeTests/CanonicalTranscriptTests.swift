@@ -176,19 +176,29 @@ final class CanonicalTranscriptTests: XCTestCase {
         XCTAssertFalse(matcherCalled)
     }
 
-    private func storedFiles() throws -> [String] {
-        let directory = try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts")
-        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
-        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasSuffix(".transcript.json") }.map(path(of:)).sorted()
+
+    // MARK: - Managed store
+
+    private func storedIDs() throws -> [UUID] {
+        try CanonicalTranscriptStore.listing().compactMap(\.id)
     }
 
-    /// The temporary directory is reached through a symlink, so saved and
-    /// enumerated URLs for one file differ textually until they are resolved.
-    private func path(of url: URL) -> String { url.resolvingSymlinksInPath().path }
+    private func execute(_ sql: String, _ bindings: [SQLValue] = []) throws {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) { try database.execute(sql, bindings) }
+        }
+    }
+
+    private func updatedAt(_ id: UUID) throws -> String {
+        try StateStore.withDatabase { database in
+            try database.query(
+                "SELECT updated_at FROM documents WHERE id = ?", [.text(id.uuidString.lowercased())]
+            ) { $0.text(0) ?? "" }.first ?? ""
+        }
+    }
 
     /// Returns the fixture output with the first segment's text replaced, so
-    /// two saves of the same evidence are distinguishable on disk.
+    /// two saves of the same evidence are distinguishable.
     private func output(saying text: String) -> TranscriptionOutput {
         var output = self.output()
         output.segments[0] = TranscriptSegment(speaker: "SPEAKER_0", start: 0, end: 1.5, text: text, words: nil)
@@ -196,73 +206,311 @@ final class CanonicalTranscriptTests: XCTestCase {
     }
 
     func testManagedSaveReplacesTheStoredDocumentWithTheSameEvidenceID() throws {
-        let first = try CanonicalTranscriptStore.save(document(output: output(saying: "First")))
-        let second = try CanonicalTranscriptStore.save(
+        let first = try CanonicalTranscriptStore.saveManaged(document(output: output(saying: "First")))
+        let second = try CanonicalTranscriptStore.saveManaged(
             document(id: UUID(), output: output(saying: "Second"))
         )
 
-        XCTAssertEqual(try storedFiles(), [path(of: first)])
-        XCTAssertEqual(path(of: second), path(of: first))
-        let stored = try CanonicalTranscriptStore.load(from: second)
+        XCTAssertEqual(try storedIDs(), [first])
+        // The replacement keeps the stored ID rather than the fresh run's, so
+        // the handle users already hold stays valid.
+        XCTAssertEqual(second, first)
+        let stored = try CanonicalTranscriptStore.load(id: second)
         XCTAssertEqual(stored.output.segments.map(\.text), ["Second"])
-        // Managed filenames encode the document id, so the replacement keeps
-        // the id already in the filename rather than the fresh run's id.
-        XCTAssertEqual(second.lastPathComponent, "\(stored.id.uuidString.lowercased()).transcript.json")
-        let mode = try XCTUnwrap(
-            FileManager.default.attributesOfItem(atPath: second.path)[.posixPermissions] as? NSNumber
-        )
-        XCTAssertEqual(mode.intValue & 0o777, 0o600)
+        XCTAssertEqual(stored.id, first)
+        let database = try StatePaths.stateDatabaseURL()
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: database.path)) & 0o777, 0o600)
     }
 
     func testReplacementKeepsConfirmedMatchesForSpeakersTheNewRunStillHas() throws {
         let confirmed = SpeakerMatch(profileID: "a", name: "Alice", distance: 0.1, margin: nil, confirmedExampleCount: 2, status: .confirmed)
         let suggested = SpeakerMatch(profileID: "b", name: "Bob", distance: 0.4, margin: nil, confirmedExampleCount: 1, status: .suggested)
-        _ = try CanonicalTranscriptStore.save(
+        _ = try CanonicalTranscriptStore.saveManaged(
             document(output: twoSpeakerOutput(), matches: ["SPEAKER_0": confirmed])
         )
 
-        let url = try CanonicalTranscriptStore.save(
+        let id = try CanonicalTranscriptStore.saveManaged(
             document(id: UUID(), output: twoSpeakerOutput(), matches: ["SPEAKER_1": suggested])
         )
 
-        let stored = try CanonicalTranscriptStore.load(from: url)
+        let stored = try CanonicalTranscriptStore.load(id: id)
         XCTAssertEqual(stored.speakerMatches, ["SPEAKER_0": confirmed, "SPEAKER_1": suggested])
     }
 
     func testReplacementDropsConfirmedMatchesForSpeakersTheNewRunNoLongerHas() throws {
         let confirmed = SpeakerMatch(profileID: "a", name: "Alice", distance: 0.1, margin: nil, confirmedExampleCount: 2, status: .confirmed)
-        _ = try CanonicalTranscriptStore.save(
+        _ = try CanonicalTranscriptStore.saveManaged(
             document(output: twoSpeakerOutput(), matches: ["SPEAKER_1": confirmed])
         )
 
         // The second run diarized only SPEAKER_0, so nothing carries the
         // SPEAKER_1 decision and validation would reject a dangling match.
-        let url = try CanonicalTranscriptStore.save(document(id: UUID()))
+        let id = try CanonicalTranscriptStore.saveManaged(document(id: UUID()))
 
-        XCTAssertEqual(try storedFiles().count, 1)
-        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).speakerMatches, [:])
+        XCTAssertEqual(try storedIDs().count, 1)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).speakerMatches, [:])
     }
 
-    func testSavesWithDifferentEvidenceIDsKeepSeparateFiles() throws {
-        let first = try CanonicalTranscriptStore.save(document())
-        let second = try CanonicalTranscriptStore.save(document(id: UUID(), hash: "b"))
+    func testSavesWithDifferentEvidenceIDsKeepSeparateDocuments() throws {
+        let first = try CanonicalTranscriptStore.saveManaged(document())
+        let second = try CanonicalTranscriptStore.saveManaged(document(id: UUID(), hash: "b"))
 
-        XCTAssertNotEqual(path(of: second), path(of: first))
-        XCTAssertEqual(try storedFiles().count, 2)
+        XCTAssertNotEqual(second, first)
+        XCTAssertEqual(try storedIDs().count, 2)
     }
 
-    func testUnreadableStoredFileIsNeitherADuplicateNorASaveFailure() throws {
-        let directory = try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let corrupt = directory.appendingPathComponent("\(UUID().uuidString.lowercased()).transcript.json")
-        try Data("{ not json".utf8).write(to: corrupt)
+    func testUnreadableStoredDocumentIsStillReplacedWithoutCarryForward() throws {
+        let confirmed = SpeakerMatch(profileID: "a", name: "Alice", distance: 0.1, margin: nil, confirmedExampleCount: 2, status: .confirmed)
+        let stored = try CanonicalTranscriptStore.saveManaged(
+            document(output: output(saying: "First"), matches: ["SPEAKER_0": confirmed])
+        )
+        try execute(
+            "UPDATE document_segments SET payload = ? WHERE document_id = ?",
+            [.blob(Data("{ not json".utf8)), .text(stored.uuidString.lowercased())]
+        )
+        XCTAssertThrowsError(try CanonicalTranscriptStore.load(id: stored))
 
-        let url = try CanonicalTranscriptStore.save(document())
+        let id = try CanonicalTranscriptStore.saveManaged(document(id: UUID(), output: output(saying: "Second")))
 
-        XCTAssertNotEqual(path(of: url), path(of: corrupt))
-        XCTAssertEqual(try storedFiles().count, 2)
-        XCTAssertEqual(try Data(contentsOf: corrupt), Data("{ not json".utf8))
+        XCTAssertEqual(id, stored)
+        XCTAssertEqual(try storedIDs(), [stored])
+        let replaced = try CanonicalTranscriptStore.load(id: id)
+        XCTAssertEqual(replaced.output.segments.map(\.text), ["Second"])
+        XCTAssertEqual(replaced.speakerMatches, [:], "a document that no longer loads carries nothing forward")
     }
+
+    func testManagedReplacementCarriesForwardExportRecords() throws {
+        var first = document()
+        // Whole seconds: ISO 8601 storage drops sub-second precision.
+        first.exports = [
+            ExportRecord(path: "/notes/meeting.txt", format: "txt", sha256: String(repeating: "b", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_100)),
+        ]
+        _ = try CanonicalTranscriptStore.saveManaged(first)
+
+        let id = try CanonicalTranscriptStore.saveManaged(document(id: UUID(), output: output(saying: "Second")))
+
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).exports, first.exports, "a rerun of the same audio must not orphan recorded exports")
+    }
+
+    /// Records carry forward only when the incoming value is nil; an empty
+    /// list is a statement ("no exports") and both survive storage distinct.
+    func testManagedExportsKeepNilDistinctFromEmptyAcrossReplacement() throws {
+        let record = ExportRecord(path: "/notes/meeting.txt", format: "txt", sha256: String(repeating: "b", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_100))
+
+        let id = try CanonicalTranscriptStore.saveManaged(document())
+        XCTAssertNil(try CanonicalTranscriptStore.load(id: id).exports, "never-recorded stays nil")
+
+        var empty = document(id: UUID())
+        empty.exports = []
+        _ = try CanonicalTranscriptStore.saveManaged(empty)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).exports, [], "an empty list is stored as empty, not nil")
+
+        _ = try CanonicalTranscriptStore.saveManaged(document(id: UUID()))
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).exports, [], "nil incoming carries the empty list forward")
+
+        var recorded = document(id: UUID())
+        recorded.exports = [record]
+        _ = try CanonicalTranscriptStore.saveManaged(recorded)
+        var cleared = document(id: UUID())
+        cleared.exports = []
+        _ = try CanonicalTranscriptStore.saveManaged(cleared)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).exports, [], "a non-nil incoming value replaces the stored records")
+    }
+
+    func testManagedReplacementCarriesForwardDismissedSpeakersTheNewRunStillHas() throws {
+        var first = document(output: twoSpeakerOutput())
+        first.dismissedSpeakers = ["SPEAKER_0", "SPEAKER_1"]
+        _ = try CanonicalTranscriptStore.saveManaged(first)
+
+        // The second run diarized only SPEAKER_0, so only that dismissal can
+        // carry; a dangling one would fail validation.
+        let id = try CanonicalTranscriptStore.saveManaged(document(id: UUID()))
+
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).dismissedSpeakers, ["SPEAKER_0"])
+    }
+
+    func testManagedMutationsBumpUpdatedAt() throws {
+        let id = try CanonicalTranscriptStore.saveManaged(document())
+        let key = id.uuidString.lowercased()
+        let stale = "2001-01-01T00:00:00Z"
+        try execute("UPDATE documents SET updated_at = ? WHERE id = ?", [.text(stale), .text(key)])
+
+        var edited = try CanonicalTranscriptStore.load(id: id)
+        edited.dismissedSpeakers = ["SPEAKER_0"]
+        try CanonicalTranscriptStore.save(edited, to: .managed(id: id))
+        XCTAssertNotEqual(try updatedAt(id), stale, "a speaker-state edit bumps updated_at")
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).dismissedSpeakers, ["SPEAKER_0"])
+
+        try execute("UPDATE documents SET updated_at = ? WHERE id = ?", [.text(stale), .text(key)])
+        let record = ExportRecord(path: "/notes/meeting.txt", format: "txt", sha256: String(repeating: "c", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_200))
+        try CanonicalTranscriptStore.mergeExports([record], into: .managed(id: id))
+        XCTAssertNotEqual(try updatedAt(id), stale, "an export-record update bumps updated_at")
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).exports, [record])
+    }
+
+    func testManagedEditOfAMissingDocumentFails() throws {
+        let id = UUID()
+        XCTAssertThrowsError(try CanonicalTranscriptStore.save(document(id: id), to: .managed(id: id))) {
+            XCTAssertEqual($0 as? CanonicalTranscriptStore.StoreError, .notFound(id.uuidString.lowercased()))
+        }
+        XCTAssertThrowsError(try CanonicalTranscriptStore.load(id: id))
+    }
+
+    func testListingSummaryNeverReadTheSegmentPayload() throws {
+        let id = try CanonicalTranscriptStore.saveManaged(document(output: twoSpeakerOutput()))
+        // With the payload gone, anything that reads it fails; listing and
+        // summaries must not notice.
+        try execute("DELETE FROM document_segments WHERE document_id = ?", [.text(id.uuidString.lowercased())])
+
+        XCTAssertEqual(try CanonicalTranscriptStore.listing().map(\.basename), ["meeting"])
+        let summary = try CanonicalTranscriptStore.summary(id: id)
+        XCTAssertEqual(summary.segmentCount, 2)
+        XCTAssertEqual(summary.segmentSpeakers, ["SPEAKER_0", "SPEAKER_1"])
+        XCTAssertEqual(Set(summary.speakerEmbeddings.keys), ["SPEAKER_0", "SPEAKER_1"])
+        XCTAssertThrowsError(try CanonicalTranscriptStore.load(id: id))
+    }
+
+    /// Every optional populated and every scalar off its default, so a field
+    /// the database forgets fails the equality below.
+    private func exhaustiveDocument() -> CanonicalTranscript {
+        var output = twoSpeakerOutput()
+        output.segments.append(TranscriptSegment(speaker: nil, start: 3, end: 3.25, text: "(music)", words: []))
+        output.language = "de"
+        output.durationSeconds = 3.333333333333333
+        output.speakerStrategy = "segment"
+        output.warnings = ["first warning", "second / warning"]
+        output.speakerEmbeddings["SPEAKER_0"] = [0.1, -0.2, 3.4028235e38]
+        output.speakerEmbeddings["SPEAKER_1"] = [1.0e-7, 0.5, 0.25]
+        let sourceHashes = [String(repeating: "a", count: 64), String(repeating: "b", count: 64)]
+        let recording = VoiceMemoOutputRecording(
+            title: "Standup", titleSource: .customLabel, titleForSorting: "standup",
+            recordedAt: "2026-01-02T03:04:05Z", durationSeconds: 61.5, uniqueID: "memo-id",
+            path: "/memo/path.m4a", folderID: 3, flags: 1, audioDigestHex: "ABCDEF",
+            enhancements: VoiceMemoEnhancements(
+                audioFutureFlags: 1, sharedFlags: 2, silenceRemoverEnabled: true,
+                skipSilenceEnabled: false, studioMixEnabled: true, studioMixLevel: 0.5
+            )
+        )
+        return CanonicalTranscript(
+            id: UUID(uuidString: "aaaaaaaa-2222-3333-4444-555555555555")!,
+            evidenceID: CanonicalTranscript.evidenceID(forSourceHashes: sourceHashes),
+            sourceHashes: sourceHashes,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            model: "whisper-test",
+            transcribeVersion: "2.7.0",
+            audioPath: "/audio/meeting dir",
+            audioFiles: ["part-1.m4a", "part-2.m4a"],
+            basename: "meeting",
+            sourceMetadata: OutputSourceMetadata(
+                source: "voice_memos", recordedAt: "2026-01-02T03:04:05Z",
+                recordingTitle: "Standup", voiceMemosUniqueID: "memo-id",
+                voiceMemosPath: "/memo/path",
+                voiceMemos: VoiceMemosOutputMetadata(sessionTitle: "Standup", recordingCount: 1, recordings: [recording])
+            ),
+            output: output,
+            embeddingModelID: "model/with/slashes",
+            speakerMatches: [
+                "SPEAKER_0": SpeakerMatch(profileID: "p0", name: "Alice", distance: 0.125, margin: 0.3, confirmedExampleCount: 2, status: .automatic),
+                "SPEAKER_1": SpeakerMatch(profileID: "p1", name: "Bob", distance: 0.25, margin: nil, confirmedExampleCount: 1, status: .suggested),
+            ],
+            dismissedSpeakers: ["SPEAKER_1"],
+            exports: [
+                ExportRecord(path: "/notes/z.txt", format: "txt", sha256: String(repeating: "1", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_300)),
+                ExportRecord(path: "/notes/a.srt", format: "srt", sha256: String(repeating: "2", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_100)),
+            ]
+        )
+    }
+
+    func testManagedAndPortableRoundTripPreservesEveryField() throws {
+        let original = exhaustiveDocument()
+        // Guard the fixture itself: a populated field must differ from the
+        // value a dropped column would decode as.
+        XCTAssertNotNil(original.audioFiles)
+        XCTAssertNotNil(original.sourceMetadata?.voiceMemos)
+        XCTAssertNotNil(original.output.speakersDetected)
+        XCTAssertNotEqual(original.output.speakerStrategy, TranscriptionOutput(segments: [], language: nil, durationSeconds: 0).speakerStrategy)
+
+        let id = try CanonicalTranscriptStore.saveManaged(original)
+        let managed = try CanonicalTranscriptStore.load(id: id)
+        XCTAssertEqual(managed, original, "managed storage round-trips every field")
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("copy.transcript.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        _ = try CanonicalTranscriptStore.save(managed, to: url)
+        let portable = try CanonicalTranscriptStore.load(from: url)
+        XCTAssertEqual(portable, managed, "portable JSON of a managed document decodes identically")
+        XCTAssertEqual(portable.createdAt, original.createdAt)
+        XCTAssertEqual(portable.exports?.map(\.exportedAt), original.exports?.map(\.exportedAt))
+    }
+
+    func testStoredDatesAreWholeSecondsLikePortableJSON() throws {
+        let base = document()
+        let fractional = CanonicalTranscript(
+            id: base.id, evidenceID: base.evidenceID, sourceHashes: base.sourceHashes,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000.75), model: base.model,
+            transcribeVersion: base.transcribeVersion, audioPath: base.audioPath,
+            basename: base.basename, output: base.output
+        )
+        let id = try CanonicalTranscriptStore.saveManaged(fractional)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("copy.transcript.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        _ = try CanonicalTranscriptStore.save(fractional, to: url)
+
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).createdAt, Date(timeIntervalSince1970: 1_700_000_000))
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).createdAt, try CanonicalTranscriptStore.load(from: url).createdAt)
+    }
+
+    /// A document spans several tables. Materializing it inside one read
+    /// transaction pins one snapshot, so a writer committing between the
+    /// reader's queries cannot yield a document mixing two generations.
+    func testMaterializationInsideAReadTransactionSeesOneGeneration() throws {
+        let suggested = SpeakerMatch(profileID: "a", name: "Alice", distance: 0.2, margin: nil, confirmedExampleCount: 1, status: .suggested)
+        let id = try CanonicalTranscriptStore.saveManaged(document(matches: ["SPEAKER_0": suggested]))
+        let reader = try StateDatabase()
+        defer { reader.close() }
+
+        let seen = try reader.inTransaction(.read) { () -> CanonicalTranscript in
+            // The first query fixes the snapshot, as materialize's first
+            // query does.
+            let before = try reader.query("SELECT count(*) FROM documents") { $0.int(0) ?? 0 }
+            XCTAssertEqual(before, [1])
+
+            // Another connection commits a new generation: different
+            // matches, dismissals, and exports.
+            var edited = try CanonicalTranscriptStore.load(id: id)
+            edited.speakerMatches = [:]
+            edited.dismissedSpeakers = ["SPEAKER_0"]
+            edited.exports = []
+            try CanonicalTranscriptStore.save(edited, to: .managed(id: id))
+
+            return try CanonicalTranscriptStore.materialize(id: id, in: reader)
+        }
+        XCTAssertEqual(seen.speakerMatches, ["SPEAKER_0": suggested], "the snapshot predates the commit")
+        XCTAssertNil(seen.dismissedSpeakers, "no table is read from the later generation")
+        XCTAssertNil(seen.exports)
+
+        let after = try reader.inTransaction(.read) { try CanonicalTranscriptStore.materialize(id: id, in: reader) }
+        XCTAssertEqual(after.speakerMatches, [:])
+        XCTAssertEqual(after.dismissedSpeakers, ["SPEAKER_0"])
+        XCTAssertEqual(after.exports, [])
+    }
+
+    func testExplicitDestinationSaveDoesNotTouchTheManagedStore() throws {
+        let managed = try CanonicalTranscriptStore.saveManaged(document(output: output(saying: "Managed")))
+        let external = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("copy.transcript.json")
+        defer { try? FileManager.default.removeItem(at: external.deletingLastPathComponent()) }
+
+        let written = try CanonicalTranscriptStore.save(document(output: output(saying: "Copy")), to: external)
+
+        XCTAssertEqual(written, external)
+        XCTAssertEqual(try storedIDs(), [managed])
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: managed).output.segments.map(\.text), ["Managed"])
+    }
+
+    // MARK: - Portable fields
 
     func testExportRecordsRoundTripAndDecodeAsNilWhenAbsent() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -278,31 +526,6 @@ final class CanonicalTranscriptTests: XCTestCase {
         _ = try CanonicalTranscriptStore.save(document(), to: plain)
         XCTAssertFalse(try String(contentsOf: plain).contains("\"exports\""), "absent records add no key")
         XCTAssertNil(try CanonicalTranscriptStore.load(from: plain).exports, "documents from before the feature decode with nil records")
-    }
-
-    func testManagedReplacementCarriesForwardExportRecords() throws {
-        var first = document()
-        // Whole seconds: ISO 8601 storage drops sub-second precision.
-        first.exports = [
-            ExportRecord(path: "/notes/meeting.txt", format: "txt", sha256: String(repeating: "b", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_100)),
-        ]
-        _ = try CanonicalTranscriptStore.save(first)
-
-        let url = try CanonicalTranscriptStore.save(document(id: UUID(), output: output(saying: "Second")))
-
-        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).exports, first.exports, "a rerun of the same audio must not orphan recorded exports")
-    }
-
-    func testManagedReplacementCarriesForwardDismissedSpeakersTheNewRunStillHas() throws {
-        var first = document(output: twoSpeakerOutput())
-        first.dismissedSpeakers = ["SPEAKER_0", "SPEAKER_1"]
-        _ = try CanonicalTranscriptStore.save(first)
-
-        // The second run diarized only SPEAKER_0, so only that dismissal can
-        // carry; a dangling one would fail validation.
-        let url = try CanonicalTranscriptStore.save(document(id: UUID()))
-
-        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).dismissedSpeakers, ["SPEAKER_0"])
     }
 
     func testDismissedSpeakersRoundTripAndStayAbsentWhenUnset() throws {
@@ -338,18 +561,8 @@ final class CanonicalTranscriptTests: XCTestCase {
             var invalid = document()
             invalid.exports = [record]
             XCTAssertThrowsError(try CanonicalTranscriptStore.validate(invalid), record.path)
+            XCTAssertThrowsError(try CanonicalTranscriptStore.saveManaged(invalid), "managed saves validate too: \(record.path)")
         }
-    }
-
-    func testExplicitDestinationSaveDoesNotTouchTheManagedStore() throws {
-        let managed = try CanonicalTranscriptStore.save(document(output: output(saying: "Managed")))
-        let external = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString).appendingPathComponent("copy.transcript.json")
-
-        let written = try CanonicalTranscriptStore.save(document(output: output(saying: "Copy")), to: external)
-
-        XCTAssertEqual(written, external)
-        XCTAssertEqual(try storedFiles(), [path(of: managed)])
-        XCTAssertEqual(try CanonicalTranscriptStore.load(from: managed).output.segments.map(\.text), ["Managed"])
+        XCTAssertTrue(try storedIDs().isEmpty)
     }
 }

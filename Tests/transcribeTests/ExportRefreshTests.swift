@@ -196,6 +196,27 @@ final class ExportRefreshTests: XCTestCase {
 
     func testStaleExportHintRebuildsTheExportCommandFromHistory() throws {
         let (document, url) = try document("meeting", hash: "a")
+        try appendHistoryForHashA()
+
+        let hint = try XCTUnwrap(ExportRefresh.staleExportHint(for: document, at: .portable(url)))
+        XCTAssertTrue(hint.contains("transcribe export \(url.path)"), hint)
+        XCTAssertTrue(hint.contains("--format md,srt"), hint)
+        XCTAssertTrue(hint.contains("-o /notes"), hint)
+        XCTAssertTrue(hint.contains("--overwrite"), hint)
+    }
+
+    /// Managed documents have no path; the hint names the ID export takes.
+    func testStaleExportHintNamesAManagedDocumentByID() throws {
+        let (document, _) = try document("meeting", hash: "a")
+        let id = try CanonicalTranscriptStore.saveManaged(document)
+        try appendHistoryForHashA()
+
+        let hint = try XCTUnwrap(ExportRefresh.staleExportHint(for: document, at: .managed(id: id)))
+        XCTAssertTrue(hint.contains("transcribe export \(id.uuidString.lowercased()) --format md,srt"), hint)
+        XCTAssertFalse(hint.contains(directory.path), hint)
+    }
+
+    private func appendHistoryForHashA() throws {
         let fingerprint = SourceFingerprint(files: [
             FileFingerprint(path: "/audio/meeting.m4a", sha256: String(repeating: "a", count: 64), bytes: 5, mtime: nil),
         ])
@@ -216,19 +237,69 @@ final class ExportRefreshTests: XCTestCase {
             voice_memos_unique_id: nil,
             voice_memos_path: nil
         ))
-
-        let hint = try XCTUnwrap(ExportRefresh.staleExportHint(for: document, at: url))
-        XCTAssertTrue(hint.contains("transcribe export \(url.path)"), hint)
-        XCTAssertTrue(hint.contains("--format md,srt"), hint)
-        XCTAssertTrue(hint.contains("-o /notes"), hint)
-        XCTAssertTrue(hint.contains("--overwrite"), hint)
     }
 
     func testStaleExportHintFallsBackWithoutMatchingHistory() throws {
         let (document, url) = try document("meeting", hash: "b")
         XCTAssertEqual(
-            ExportRefresh.staleExportHint(for: document, at: url),
+            ExportRefresh.staleExportHint(for: document, at: .portable(url)),
             "Export again to update rendered files."
         )
+    }
+
+    // MARK: - Managed documents
+
+    /// A managed refresh commits only the export records, so a speaker
+    /// change committed after the refresh loaded its copy (no render lock is
+    /// needed for that) is not overwritten by the refresh's older state.
+    func testManagedRunCommitsOnlyExportRecords() throws {
+        let (loaded, _) = try document("meeting", hash: "a", matches: ["SPEAKER_0": confirmedMatch("Dave")])
+        let id = try CanonicalTranscriptStore.saveManaged(loaded)
+        let path = directory.appendingPathComponent("meeting.txt").path
+        var plain = loaded
+        plain.speakerMatches = [:]
+        let record = try seededExport(try localLabelData(plain, format: "txt"), at: path, format: "txt")
+        try CanonicalTranscriptStore.mergeExports([record], into: .managed(id: id))
+        let snapshot = try CanonicalTranscriptStore.load(id: id)
+
+        // Committed after the refresh's load.
+        var concurrent = snapshot
+        concurrent.dismissedSpeakers = ["SPEAKER_0"]
+        try CanonicalTranscriptStore.save(concurrent, to: .managed(id: id))
+
+        var output = ""
+        let io = InteractiveIO(readLine: { nil }, write: { output += $0 })
+        let summary = ExportRefresh.run(document: snapshot, at: .managed(id: id), io: io, color: .disabled)
+
+        XCTAssertEqual(summary.refreshedFormats, ["txt"])
+        XCTAssertTrue(output.contains("Refreshed 1 export"), output)
+        XCTAssertTrue(try String(contentsOfFile: path).contains("Dave"))
+        let stored = try CanonicalTranscriptStore.load(id: id)
+        XCTAssertEqual(stored.exports?.first?.sha256, sha256Hex(try Data(contentsOf: URL(fileURLWithPath: path))))
+        XCTAssertEqual(stored.dismissedSpeakers, ["SPEAKER_0"], "the concurrent change survives the refresh")
+    }
+
+    func testManagedRunDropsRecordsOfDeletedFilesAndKeepsModifiedOnes() throws {
+        let (loaded, _) = try document("meeting", hash: "a", matches: ["SPEAKER_0": confirmedMatch("Dave")])
+        let id = try CanonicalTranscriptStore.saveManaged(loaded)
+        let edited = directory.appendingPathComponent("meeting.txt").path
+        var record = try seededExport(try localLabelData(loaded, format: "txt"), at: edited, format: "txt")
+        try Data("hand edits\n".utf8).write(to: URL(fileURLWithPath: edited))
+        record.sha256 = sha256Hex(try localLabelData(loaded, format: "txt"))
+        let deleted = ExportRecord(
+            path: directory.appendingPathComponent("gone.srt").path, format: "srt",
+            sha256: String(repeating: "0", count: 64), exportedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        try CanonicalTranscriptStore.mergeExports([record, deleted], into: .managed(id: id))
+
+        let summary = ExportRefresh.run(
+            document: try CanonicalTranscriptStore.load(id: id), at: .managed(id: id),
+            io: InteractiveIO(readLine: { nil }, write: { _ in }), color: .disabled
+        )
+
+        XCTAssertEqual(summary.modifiedPaths, [edited])
+        XCTAssertEqual(summary.droppedPaths, [deleted.path])
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id).exports?.map(\.path), [edited])
+        XCTAssertEqual(try String(contentsOfFile: edited), "hand edits\n")
     }
 }

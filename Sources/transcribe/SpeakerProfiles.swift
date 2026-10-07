@@ -1,5 +1,4 @@
 import Foundation
-import Darwin
 
 enum SpeakerMatchStatus: String, Codable { case suggested, automatic, confirmed }
 
@@ -62,21 +61,15 @@ enum SpeakerProfileError: Error, LocalizedError, Equatable {
     }
 }
 
+/// Confirmed speaker profiles, stored as `profiles` and `profile_examples`
+/// rows in the state database. Every method runs in a transaction that joins
+/// a caller's, so a profile change made while a managed document is being
+/// edited commits or rolls back together with the document rows.
 enum SpeakerProfileStore {
     // Conservative starting heuristics, not calibrated identity probabilities.
     static let suggestionThreshold = 0.30
     static let automaticThreshold = 0.15
     static let marginThreshold = 0.10
-    private static let schemaVersion = 1
-
-    private struct StoreFile: Codable {
-        let schemaVersion: Int
-        var profiles: [SpeakerProfile]
-        enum CodingKeys: String, CodingKey {
-            case schemaVersion = "schema_version"
-            case profiles
-        }
-    }
 
     private struct Candidate {
         let profile: SpeakerProfile
@@ -86,7 +79,12 @@ enum SpeakerProfileStore {
     }
 
     static func profiles() throws -> [SpeakerProfile] {
-        try withLock { try load().profiles.sorted { $0.id < $1.id } }
+        try StateStore.withDatabase { database in
+            // Profiles and their examples are separate queries; one read
+            // transaction keeps a concurrent confirmation from landing
+            // between them.
+            try database.inTransaction(.read) { try loadProfiles(in: database) }
+        }
     }
 
     static func matches(
@@ -162,6 +160,7 @@ enum SpeakerProfileStore {
         return result
     }
 
+
     static func confirm(
         name: String, profileID: String?, transcriptID: String, speakerID: String,
         embedding: [Float], modelID: String, sourceHashes: [String] = []
@@ -171,35 +170,48 @@ enum SpeakerProfileStore {
             try validateIdentifier(value)
         }
         try validateVector(embedding)
-        return try withLock {
-            var file = try load()
+        return try write { database in
+            var profiles = try loadProfiles(in: database)
             // --name is idempotent, but a different name corrects this example
             // instead of renaming the original person and all their examples.
-            let named = file.profiles.filter { $0.name == cleanName }
+            let named = profiles.filter { $0.name == cleanName }
             guard profileID != nil || named.count <= 1 else {
                 throw SpeakerProfileError.invalidStore("name is ambiguous; select --profile")
             }
             let id = profileID ?? named.first?.id ?? UUID().uuidString
-            if profileID != nil && !file.profiles.contains(where: { $0.id == id }) {
+            if profileID != nil && !profiles.contains(where: { $0.id == id }) {
                 throw SpeakerProfileError.profileNotFound
             }
-            if !file.profiles.contains(where: { $0.id == id }) {
-                file.profiles.append(SpeakerProfile(id: id, name: cleanName, examples: []))
+            let isNewProfile = !profiles.contains(where: { $0.id == id })
+            if isNewProfile {
+                profiles.append(SpeakerProfile(id: id, name: cleanName, examples: []))
             }
             // A correction moves this evidence rather than teaching two people
             // the same confirmed local speaker.
-            for index in file.profiles.indices {
-                file.profiles[index].examples.removeAll {
+            for index in profiles.indices {
+                profiles[index].examples.removeAll {
                     $0.transcriptID == transcriptID && $0.speakerID == speakerID
                 }
             }
-            let index = file.profiles.firstIndex { $0.id == id }!
-            file.profiles[index].examples.append(SpeakerProfileExample(
+            let index = profiles.firstIndex { $0.id == id }!
+            let example = SpeakerProfileExample(
                 transcriptID: transcriptID, speakerID: speakerID, modelID: modelID,
                 embedding: embedding, sourceHashes: sourceHashes
-            ))
-            try save(file)
-            let profile = file.profiles[index]
+            )
+            profiles[index].examples.append(example)
+            // The whole resulting store must still be valid (per-model
+            // dimensions in particular) before any row changes.
+            try validate(profiles)
+
+            if isNewProfile {
+                try database.execute("INSERT INTO profiles (id, name) VALUES (?, ?)", [.text(id), .text(cleanName)])
+            }
+            try database.execute(
+                "DELETE FROM profile_examples WHERE transcript_id = ? AND speaker_id = ?",
+                [.text(transcriptID), .text(speakerID)]
+            )
+            try insert(example, profileID: id, in: database)
+            let profile = profiles[index]
             return SpeakerMatch(
                 profileID: id, name: profile.name, distance: 0, margin: nil,
                 confirmedExampleCount: Set(profile.examples.filter { $0.modelID == modelID }.map(\.transcriptID)).count,
@@ -211,49 +223,38 @@ enum SpeakerProfileStore {
     static func rename(profileID: String, name: String) throws {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         try validateIdentifier(cleanName)
-        try withLock {
-            var file = try load()
-            guard let index = file.profiles.firstIndex(where: { $0.id == profileID }) else {
-                throw SpeakerProfileError.profileNotFound
-            }
-            file.profiles[index].name = cleanName
-            try save(file)
+        try write { database in
+            try database.execute("UPDATE profiles SET name = ? WHERE id = ?", [.text(cleanName), .text(profileID)])
+            guard database.changes > 0 else { throw SpeakerProfileError.profileNotFound }
         }
     }
 
     static func delete(profileID: String) throws {
-        try withLock {
-            var file = try load()
-            guard file.profiles.contains(where: { $0.id == profileID }) else {
-                throw SpeakerProfileError.profileNotFound
-            }
-            file.profiles.removeAll { $0.id == profileID }
-            try save(file)
+        try write { database in
+            // Examples go with the profile (ON DELETE CASCADE). Saved
+            // transcripts keep their match name snapshots: speaker_matches
+            // deliberately has no foreign key to profiles.
+            try database.execute("DELETE FROM profiles WHERE id = ?", [.text(profileID)])
+            guard database.changes > 0 else { throw SpeakerProfileError.profileNotFound }
         }
     }
 
     static func removeExample(profileID: String, transcriptID: String, speakerID: String) throws {
-        try withLock {
-            var file = try load()
-            guard let index = file.profiles.firstIndex(where: { $0.id == profileID }) else {
-                throw SpeakerProfileError.profileNotFound
-            }
-            file.profiles[index].examples.removeAll {
-                $0.transcriptID == transcriptID && $0.speakerID == speakerID
-            }
-            try save(file)
+        try write { database in
+            guard try profileExists(profileID, in: database) else { throw SpeakerProfileError.profileNotFound }
+            try database.execute(
+                "DELETE FROM profile_examples WHERE profile_id = ? AND transcript_id = ? AND speaker_id = ?",
+                [.text(profileID), .text(transcriptID), .text(speakerID)]
+            )
         }
     }
 
     static func clearExamples(transcriptID: String, speakerID: String) throws {
-        try withLock {
-            var file = try load()
-            for index in file.profiles.indices {
-                file.profiles[index].examples.removeAll {
-                    $0.transcriptID == transcriptID && $0.speakerID == speakerID
-                }
-            }
-            try save(file)
+        try write { database in
+            try database.execute(
+                "DELETE FROM profile_examples WHERE transcript_id = ? AND speaker_id = ?",
+                [.text(transcriptID), .text(speakerID)]
+            )
         }
     }
 
@@ -277,53 +278,85 @@ enum SpeakerProfileStore {
         return 1 - max(-1, min(1, dot / (na * nb)))
     }
 
-    private static func url() throws -> URL {
-        try StatePaths.stateDirectoryURL().appendingPathComponent("speaker_profiles.json")
+    // MARK: - Rows
+
+    /// Runs `body` in a write transaction, joining the caller's when one is
+    /// open (a managed document edit), so profile and document rows commit
+    /// together.
+    private static func write<T>(_ body: (StateDatabase) throws -> T) throws -> T {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) { try body(database) }
+        }
     }
 
-    private static func withLock<T>(_ body: () throws -> T) throws -> T {
-        let directory = try StatePaths.stateDirectoryURL()
-        // Only tighten a directory this store creates. The state directory is
-        // shared with timing and processing history, so an existing one keeps
-        // whatever permissions the user chose for it.
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try tightenPermissions(ofPath: directory.path, to: privateDirectoryMode)
-        }
-        let lock = try url().appendingPathExtension("lock")
-        let fd = open(lock.path, O_CREAT | O_RDWR | O_NOFOLLOW, privateFileMode)
-        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { close(fd) }
-        try tightenPermissions(ofFileDescriptor: fd, at: lock.path, to: privateFileMode)
-        guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { _ = flock(fd, LOCK_UN) }
-        return try body()
+    private static func profileExists(_ id: String, in database: StateDatabase) throws -> Bool {
+        !(try database.query("SELECT 1 FROM profiles WHERE id = ?", [.text(id)]) { _ in true }.isEmpty)
     }
 
-    private static func load() throws -> StoreFile {
-        let target = try url()
-        guard FileManager.default.fileExists(atPath: target.path) else {
-            return StoreFile(schemaVersion: schemaVersion, profiles: [])
-        }
+    private static func insert(_ example: SpeakerProfileExample, profileID: String, in database: StateDatabase) throws {
+        let hashes = String(decoding: try JSONEncoder().encode(example.sourceHashes), as: UTF8.self)
+        try database.execute(
+            """
+            INSERT INTO profile_examples (profile_id, transcript_id, speaker_id, model_id, vector, source_hashes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .text(profileID), .text(example.transcriptID), .text(example.speakerID),
+                .text(example.modelID), .blob(Float32Blob.encode(example.embedding)), .text(hashes),
+            ]
+        )
+    }
+
+    /// Every profile with its examples, sorted by ID, examples in the order
+    /// they were confirmed. The stored rows get the same semantic validation
+    /// the JSON store applied on every load: rows can be edited outside this
+    /// tool, and matching must never compare against an invalid vector.
+    private static func loadProfiles(in database: StateDatabase) throws -> [SpeakerProfile] {
+        var profiles: [SpeakerProfile]
         do {
-            let file = try JSONDecoder().decode(StoreFile.self, from: Data(contentsOf: target))
-            guard file.schemaVersion == schemaVersion else {
-                throw SpeakerProfileError.invalidStore("unsupported schema version")
+            profiles = try database.query("SELECT id, name FROM profiles") {
+                SpeakerProfile(id: $0.text(0) ?? "", name: $0.text(1) ?? "", examples: [])
             }
-            try validate(file)
-            return file
-        } catch let error as SpeakerProfileError {
-            throw error
-        } catch {
+            let positions = Dictionary(
+                profiles.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first }
+            )
+            let examples = try database.query(
+                """
+                SELECT profile_id, transcript_id, speaker_id, model_id, vector, source_hashes
+                FROM profile_examples ORDER BY rowid
+                """
+            ) { row -> (String, SpeakerProfileExample) in
+                let transcriptID = row.text(1) ?? ""
+                let hashes = try JSONDecoder().decode([String].self, from: Data((row.text(5) ?? "").utf8))
+                guard !hashes.isEmpty else { throw SpeakerProfileError.invalidStore("missing source evidence") }
+                return (row.text(0) ?? "", SpeakerProfileExample(
+                    transcriptID: transcriptID, speakerID: row.text(2) ?? "", modelID: row.text(3) ?? "",
+                    embedding: try Float32Blob.decode(row.blob(4) ?? Data()), sourceHashes: hashes
+                ))
+            }
+            for (profileID, example) in examples {
+                // The foreign key makes an orphan impossible while
+                // foreign_keys is on; one inserted without it is ignored, as a
+                // dangling row would be by any reader.
+                guard let position = positions[profileID] else { continue }
+                profiles[position].examples.append(example)
+            }
+        } catch let error as DecodingError {
             throw SpeakerProfileError.invalidStore(error.localizedDescription)
+        } catch StateDatabaseError.invalidVectorBlob(let byteCount) {
+            throw SpeakerProfileError.invalidStore(
+                StateDatabaseError.invalidVectorBlob(byteCount: byteCount).localizedDescription
+            )
         }
+        try validate(profiles)
+        return profiles.sorted { $0.id < $1.id }
     }
 
-    private static func validate(_ file: StoreFile) throws {
+    private static func validate(_ profiles: [SpeakerProfile]) throws {
         var profileIDs = Set<String>()
         var identities = Set<[String]>()
         var dimensions: [String: Int] = [:]
-        for profile in file.profiles {
+        for profile in profiles {
             try validateIdentifier(profile.id)
             try validateIdentifier(profile.name)
             guard profileIDs.insert(profile.id).inserted else {
@@ -346,12 +379,5 @@ enum SpeakerProfileStore {
                 dimensions[example.modelID] = example.embedding.count
             }
         }
-    }
-
-    private static func save(_ file: StoreFile) throws {
-        try validate(file)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        try writePrivateAtomically(data: try encoder.encode(file), to: try url())
     }
 }

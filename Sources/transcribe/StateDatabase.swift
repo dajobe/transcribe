@@ -206,14 +206,15 @@ final class StateDatabase {
 
     /// The first legacy JSON state location that still exists, or nil on a
     /// genuinely fresh machine. Used to refuse fresh creation until
-    /// StateMigration can import these files. Only stores the database has
-    /// already superseded count: the profile store and transcripts directory
-    /// are still live JSON stores, and a run legitimately creates them before
-    /// its first history append reaches here.
+    /// StateMigration can import these files. Every 2.x store is superseded
+    /// now — both ledgers, the profile store, and the managed transcripts
+    /// directory — and nothing in this build creates any of them.
     private static func legacyStatePath() throws -> String? {
         let candidates = [
             try StatePaths.processingHistoryURL().path,
             try StatePaths.timingHistoryURL().path,
+            try StatePaths.legacySpeakerProfilesURL().path,
+            try StatePaths.legacyTranscriptsDirectoryURL().path,
         ]
         return candidates.first { FileManager.default.fileExists(atPath: $0) }
     }

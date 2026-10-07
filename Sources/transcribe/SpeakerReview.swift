@@ -107,16 +107,18 @@ enum SpeakerReview {
         /// With --all, speakers that are already confirmed are revisited too.
         var includeConfirmed: Bool = false
         /// When on, each document's recorded exports are regenerated right
-        /// after its decisions are applied, inside the same lock.
+        /// after its decisions are applied: inside the file lock for a
+        /// portable document, under the render lock after the commit for a
+        /// managed one.
         var refreshExports: Bool = true
 
         /// Walks the documents in order, prompting for each speaker that
         /// needs attention. Returns after the last document or when the user
         /// quits; decisions are applied per document either way.
-        func run(documents: [URL]) throws {
+        func run(documents: [TranscriptRef]) throws {
             var changedAnything = false
-            for url in documents {
-                let outcome = try review(documentAt: url)
+            for ref in documents {
+                let outcome = try review(document: ref)
                 changedAnything = changedAnything || outcome.changed
                 if outcome.quit { break }
             }
@@ -128,19 +130,37 @@ enum SpeakerReview {
         /// Whether any speaker in the document would be prompted, without
         /// any I/O; used to pass over settled documents silently.
         func needsAttention(_ document: CanonicalTranscript) -> Bool {
-            !promptableSpeakers(of: document).isEmpty
+            needsAttention(TranscriptSummary(document))
+        }
+
+        /// The payload-free form planning uses, so walking every saved
+        /// document never reads segment text.
+        func needsAttention(_ summary: TranscriptSummary) -> Bool {
+            !promptableSpeakers(
+                embedded: summary.speakerEmbeddings.keys, matches: summary.speakerMatches,
+                isDismissed: summary.isDismissed
+            ).isEmpty
         }
 
         func promptableSpeakers(of document: CanonicalTranscript) -> [String] {
-            document.output.speakerEmbeddings.keys.sorted().filter { speaker in
+            promptableSpeakers(
+                embedded: document.output.speakerEmbeddings.keys, matches: document.speakerMatches,
+                isDismissed: document.isDismissed
+            )
+        }
+
+        private func promptableSpeakers(
+            embedded: Dictionary<String, [Float]>.Keys, matches: [String: SpeakerMatch],
+            isDismissed: (String) -> Bool
+        ) -> [String] {
+            embedded.sorted().filter { speaker in
                 includeConfirmed
-                    || (document.speakerMatches[speaker]?.status != .confirmed
-                        && !document.isDismissed(speaker))
+                    || (matches[speaker]?.status != .confirmed && !isDismissed(speaker))
             }
         }
 
-        private func review(documentAt url: URL) throws -> (changed: Bool, quit: Bool) {
-            let document = try SpeakerCommands.refreshedDocument(at: url)
+        private func review(document ref: TranscriptRef) throws -> (changed: Bool, quit: Bool) {
+            let document = try SpeakerCommands.refreshedDocument(ref)
             let pending = promptableSpeakers(of: document)
             guard !pending.isEmpty else { return (false, false) }
             let profiles = try SpeakerProfileStore.profiles()
@@ -160,7 +180,7 @@ enum SpeakerReview {
                 if quit { break }
             }
             let changed = try SpeakerReview.apply(
-                decisions, to: url, io: io, color: color, refreshExports: refreshExports
+                decisions, to: ref, io: io, color: color, refreshExports: refreshExports
             )
             // The ID is what speakers confirm/clear take to revise a
             // decision, so leave it on screen when the session moves on.
@@ -301,71 +321,111 @@ enum SpeakerReview {
 
     // MARK: - Applying decisions
 
+
     /// Applies the collected decisions for one document. Prompting holds no
-    /// locks — a session can wait on a human indefinitely — so the document
-    /// is reloaded under its lock here and each decision re-checked against
-    /// the fresh content before confirming, in the standard document-then-
-    /// profile lock order. Returns whether anything changed.
+    /// locks or transactions — a session can wait on a human indefinitely —
+    /// so the document is reloaded here and each decision re-checked against
+    /// the fresh content before confirming. Returns whether anything changed.
+    ///
+    /// A managed document applies the whole batch in one write transaction
+    /// covering its rows and the profile rows, and reports each decision only
+    /// after the commit: a batch failing part-way rolls back every decision
+    /// and must not claim any of them. A portable document stays two stores
+    /// under its file lock, as before: profile changes commit one by one and
+    /// are reported as they happen.
     static func apply(
         _ decisions: [(speaker: String, decision: SpeakerDecision)],
-        to url: URL, io: InteractiveIO, color: TerminalColor,
+        to ref: TranscriptRef, io: InteractiveIO, color: TerminalColor,
         refreshExports: Bool = false
     ) throws -> Bool {
         guard !decisions.isEmpty else { return false }
-        return try SpeakerCommands.withDocumentLock(at: url) {
-            var document = try CanonicalTranscriptStore.load(from: url)
-            let profiles = try SpeakerProfileStore.profiles()
-            var changedAny = false
-            for (speaker, decision) in decisions {
-                guard let embedding = document.output.speakerEmbeddings[speaker] else {
-                    emitWarning("No embedding for local speaker '\(speaker)' in this document any more; not confirmed.")
-                    continue
+        switch ref {
+        case .portable(let url):
+            return try SpeakerCommands.withDocumentLock(at: url) {
+                var document = try CanonicalTranscriptStore.load(from: url)
+                let changed = try applyDecisions(decisions, to: &document, color: color) {
+                    io.write($0 + "\n")
                 }
-                let name: String
-                var profileID: String?
-                switch decision {
-                case .dismiss:
-                    // Dismissing a previously confirmed speaker withdraws the
-                    // confirmation from the profile store too, as `speakers
-                    // clear` would; the user has decided the identification
-                    // was not supportable.
-                    if document.speakerMatches[speaker]?.status == .confirmed {
-                        try SpeakerProfileStore.clearExamples(
-                            transcriptID: document.evidenceID, speakerID: speaker
-                        )
+                if changed {
+                    try CanonicalTranscriptStore.save(document, to: ref)
+                    if refreshExports {
+                        ExportRefresh.run(document: document, at: ref, io: io, color: color)
                     }
-                    document.speakerMatches.removeValue(forKey: speaker)
-                    document.markDismissed(speaker)
-                    changedAny = true
-                    io.write(color.green("Marked \(safeText(speaker)) as unidentifiable; review will not prompt for it again (--all revisits).") + "\n")
-                    continue
-                case .existingProfile(let id):
-                    guard let profile = profiles.first(where: { $0.id == id }) else {
-                        emitWarning("Profile \(id) no longer exists; speaker '\(speaker)' not confirmed.")
-                        continue
-                    }
-                    name = profile.name
-                    profileID = id
-                case .newProfile(let newName):
-                    name = newName
                 }
-                let match = try SpeakerProfileStore.confirm(
-                    name: name, profileID: profileID, transcriptID: document.evidenceID,
-                    speakerID: speaker, embedding: embedding, modelID: document.embeddingModelID,
-                    sourceHashes: document.sourceHashes
-                )
-                document.speakerMatches[speaker] = match
-                document.clearDismissed(speaker)
-                changedAny = true
-                io.write(color.green("Confirmed \(safeText(speaker)) as \(safeText(match.name)) (\(match.profileID)).") + "\n")
+                return changed
             }
-            if changedAny {
-                _ = try CanonicalTranscriptStore.save(document, to: url)
-                if refreshExports {
-                    ExportRefresh.run(document: document, at: url, io: io, color: color)
+        case .managed(let id):
+            var lines: [String] = []
+            let changed = try StateStore.withDatabase { database in
+                try database.inTransaction(.write) {
+                    var document = try CanonicalTranscriptStore.load(id: id)
+                    let changed = try applyDecisions(decisions, to: &document, color: color) {
+                        lines.append($0)
+                    }
+                    if changed { try CanonicalTranscriptStore.save(document, to: ref) }
+                    return changed
                 }
             }
-            return changedAny
+            for line in lines { io.write(line + "\n") }
+            if changed && refreshExports {
+                SpeakerCommands.refreshManagedExports(id: id, io: io, color: color)
+            }
+            return changed
         }
+    }
+
+    /// Applies each decision to `document` and the profile store, passing
+    /// one confirmation line per applied decision to `report`.
+    private static func applyDecisions(
+        _ decisions: [(speaker: String, decision: SpeakerDecision)],
+        to document: inout CanonicalTranscript, color: TerminalColor,
+        report: (String) -> Void
+    ) throws -> Bool {
+        let profiles = try SpeakerProfileStore.profiles()
+        var changedAny = false
+        for (speaker, decision) in decisions {
+            guard let embedding = document.output.speakerEmbeddings[speaker] else {
+                emitWarning("No embedding for local speaker '\(speaker)' in this document any more; not confirmed.")
+                continue
+            }
+            let name: String
+            var profileID: String?
+            switch decision {
+            case .dismiss:
+                // Dismissing a previously confirmed speaker withdraws the
+                // confirmation from the profile store too, as `speakers
+                // clear` would; the user has decided the identification
+                // was not supportable.
+                if document.speakerMatches[speaker]?.status == .confirmed {
+                    try SpeakerProfileStore.clearExamples(
+                        transcriptID: document.evidenceID, speakerID: speaker
+                    )
+                }
+                document.speakerMatches.removeValue(forKey: speaker)
+                document.markDismissed(speaker)
+                changedAny = true
+                report(color.green("Marked \(safeText(speaker)) as unidentifiable; review will not prompt for it again (--all revisits)."))
+                continue
+            case .existingProfile(let id):
+                guard let profile = profiles.first(where: { $0.id == id }) else {
+                    emitWarning("Profile \(id) no longer exists; speaker '\(speaker)' not confirmed.")
+                    continue
+                }
+                name = profile.name
+                profileID = id
+            case .newProfile(let newName):
+                name = newName
+            }
+            let match = try SpeakerProfileStore.confirm(
+                name: name, profileID: profileID, transcriptID: document.evidenceID,
+                speakerID: speaker, embedding: embedding, modelID: document.embeddingModelID,
+                sourceHashes: document.sourceHashes
+            )
+            document.speakerMatches[speaker] = match
+            document.clearDismissed(speaker)
+            changedAny = true
+            report(color.green("Confirmed \(safeText(speaker)) as \(safeText(match.name)) (\(match.profileID))."))
+        }
+        return changedAny
     }
 }

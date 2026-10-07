@@ -395,18 +395,35 @@ final class StateDatabaseTests: XCTestCase {
         XCTAssertEqual(try mode(of: URL(fileURLWithPath: databaseURL.path + "-wal")), 0o600)
     }
 
+    /// Every 2.x store is superseded by the database — both ledgers, the
+    /// profile store, and the managed transcripts directory — so any one of
+    /// them must stop a fresh database from hiding it from the future
+    /// migration.
     func testLegacyJSONStateRefusesFreshDatabaseUntilMigrationExists() throws {
         let state = try StatePaths.stateDirectoryURL()
-        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
-        let legacy = try StatePaths.processingHistoryURL()
-        try Data("{}\n".utf8).write(to: legacy)
-        XCTAssertThrowsError(try StateDatabase()) {
-            XCTAssertEqual($0 as? StateDatabaseError, .legacyStatePresent(legacy.path))
+        let candidates: [(URL, isDirectory: Bool)] = [
+            (try StatePaths.processingHistoryURL(), false),
+            (try StatePaths.timingHistoryURL(), false),
+            (try StatePaths.legacySpeakerProfilesURL(), false),
+            (try StatePaths.legacyTranscriptsDirectoryURL(), true),
+        ]
+        for (legacy, isDirectory) in candidates {
+            try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+            if isDirectory {
+                try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+            } else {
+                try Data("{}\n".utf8).write(to: legacy)
+            }
+            XCTAssertThrowsError(try StateDatabase(), legacy.lastPathComponent) {
+                XCTAssertEqual($0 as? StateDatabaseError, .legacyStatePresent(legacy.path))
+            }
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: try StatePaths.stateDatabaseURL().path),
+                "no empty database may shadow unmigrated legacy state: \(legacy.lastPathComponent)"
+            )
+            try FileManager.default.removeItem(at: legacy)
         }
-        XCTAssertFalse(
-            FileManager.default.fileExists(atPath: try StatePaths.stateDatabaseURL().path),
-            "no empty database may shadow unmigrated legacy state"
-        )
+        XCTAssertNoThrow(try StateDatabase().close(), "with no legacy state left, a fresh database is created")
     }
 
     func testTextWithEmbeddedNulRoundTrips() throws {

@@ -117,8 +117,9 @@ struct CanonicalTranscript: Codable, Equatable {
     }
 
     /// Returns a copy carrying another document's identity and speaker matches.
-    /// Managed store filenames embed the document id, so replacing a stored
-    /// file means adopting the id encoded in its name.
+    /// A managed save that replaces the stored document for the same
+    /// evidence keeps that document's id, so the ID users already hold for it
+    /// stays valid.
     func adopting(id: UUID, speakerMatches: [String: SpeakerMatch]) -> CanonicalTranscript {
         CanonicalTranscript(
             schemaVersion: schemaVersion, id: id, evidenceID: evidenceID, sourceHashes: sourceHashes,
@@ -165,62 +166,201 @@ struct CanonicalTranscript: Codable, Equatable {
     }
 }
 
+/// One row of the saved-transcripts listing, read without touching segment
+/// payloads or embedding vectors.
+struct TranscriptListing: Equatable {
+    /// The stored ID text as written. `id` is nil when it does not parse as
+    /// a UUID; callers report that row unreadable in place rather than
+    /// letting one damaged row hide the whole listing.
+    let rawID: String
+    let id: UUID?
+    let basename: String
+    let updatedAt: String
+}
+
+/// A canonical document without its segment payload: everything review
+/// planning, the read-only review table, and inspect consume. Managed
+/// documents build it from lifted columns (`segment_count`,
+/// `segment_speakers`), so those commands never read the payload.
+struct TranscriptSummary: Equatable {
+    let id: UUID
+    let basename: String
+    let model: String
+    let durationSeconds: Double
+    let segmentCount: Int
+    /// Distinct segment speaker labels, sorted.
+    let segmentSpeakers: [String]
+    let evidenceID: String
+    let sourceHashes: [String]
+    let embeddingModelID: String
+    let speakerEmbeddings: [String: [Float]]
+    var speakerMatches: [String: SpeakerMatch]
+    var dismissedSpeakers: [String]?
+
+    init(
+        id: UUID, basename: String, model: String, durationSeconds: Double,
+        segmentCount: Int, segmentSpeakers: [String], evidenceID: String,
+        sourceHashes: [String], embeddingModelID: String,
+        speakerEmbeddings: [String: [Float]], speakerMatches: [String: SpeakerMatch],
+        dismissedSpeakers: [String]?
+    ) {
+        self.id = id
+        self.basename = basename
+        self.model = model
+        self.durationSeconds = durationSeconds
+        self.segmentCount = segmentCount
+        self.segmentSpeakers = segmentSpeakers
+        self.evidenceID = evidenceID
+        self.sourceHashes = sourceHashes
+        self.embeddingModelID = embeddingModelID
+        self.speakerEmbeddings = speakerEmbeddings
+        self.speakerMatches = speakerMatches
+        self.dismissedSpeakers = dismissedSpeakers
+    }
+
+    init(_ document: CanonicalTranscript) {
+        self.init(
+            id: document.id, basename: document.basename, model: document.model,
+            durationSeconds: document.output.durationSeconds,
+            segmentCount: document.output.segments.count,
+            segmentSpeakers: CanonicalTranscriptStore.segmentSpeakers(of: document.output.segments),
+            evidenceID: document.evidenceID, sourceHashes: document.sourceHashes,
+            embeddingModelID: document.embeddingModelID,
+            speakerEmbeddings: document.output.speakerEmbeddings,
+            speakerMatches: document.speakerMatches, dismissedSpeakers: document.dismissedSpeakers
+        )
+    }
+
+    func isDismissed(_ speaker: String) -> Bool {
+        dismissedSpeakers?.contains(speaker) ?? false
+    }
+}
+
+/// Stores canonical transcripts. Managed documents are rows in the state
+/// database (`documents` plus its child tables); portable documents are
+/// `.transcript.json` files at a caller-chosen path, written and read with
+/// the schema version 1 JSON coding. Validation runs on load and before save
+/// for both.
 enum CanonicalTranscriptStore {
     enum StoreError: Error, LocalizedError, Equatable {
         case unsupportedSchema(Int)
         case invalidData(String)
+        case notFound(String)
 
         var errorDescription: String? {
             switch self {
             case .unsupportedSchema(let version): return "Unsupported canonical transcript schema version: \(version)"
             case .invalidData(let reason): return "Invalid canonical transcript: \(reason)"
+            case .notFound(let id): return "No saved transcript has ID \(id)."
             }
         }
     }
 
-    /// The only field the duplicate scan compares. Decoding this instead of the
-    /// whole canonical document keeps one damaged, truncated or newer-schema
-    /// file from failing every later save, and avoids reading stored embedding
-    /// vectors just to compare one identity string.
-    private struct EvidenceListing: Decodable {
-        let evidenceID: String
+    // MARK: - References
+
+    static func load(_ ref: TranscriptRef) throws -> CanonicalTranscript {
+        switch ref {
+        case .managed(let id): return try load(id: id)
+        case .portable(let url): return try load(from: url)
+        }
     }
 
-    static func save(_ document: CanonicalTranscript, to url: URL? = nil) throws -> URL {
-        try validate(document)
-        let isManagedDestination = url == nil
-        // Evidence IDs are derived from the source audio, so re-running the
-        // same recording produces the same one. A managed save replaces the
-        // stored document for that evidence instead of adding a second file,
-        // which would grow the transcripts listing without end. An explicit
-        // destination is a portable copy the caller placed, so it is written
-        // as asked and never deduped.
-        var document = document
-        var destination: URL
-        if let url {
-            destination = url
-        } else if let existing = existingManagedFile(forEvidenceID: document.evidenceID) {
-            let previous = try? load(from: existing.url)
-            document = document.adopting(
-                id: existing.id, speakerMatches: confirmedMatchesCarriedForward(to: document, from: previous)
-            )
-            // A rerun of the same audio (a --no-outputs enrollment run, say)
-            // knows nothing about files earlier runs exported; dropping their
-            // records here would orphan those files from future refreshes.
-            if document.exports == nil { document.exports = previous?.exports }
-            document.dismissedSpeakers = dismissalsCarriedForward(to: document, from: previous)
-            destination = existing.url
-        } else {
-            destination = try defaultURL(for: document.id)
+    /// Persists a command's edit of a document it loaded from `ref`. A
+    /// portable save rewrites the file. A managed save writes only the state
+    /// commands change — speaker matches, dismissals, and export records —
+    /// so confirming a speaker touches a few rows rather than the segment
+    /// payload; a stored document's transcription content changes only
+    /// through `saveManaged`.
+    static func save(_ document: CanonicalTranscript, to ref: TranscriptRef) throws {
+        switch ref {
+        case .portable(let url):
+            _ = try save(document, to: url)
+        case .managed(let id):
+            try validate(document)
+            guard document.id == id else {
+                throw StoreError.invalidData("document ID does not match the saved transcript it replaces")
+            }
+            try StateStore.withDatabase { database in
+                try database.inTransaction(.write) {
+                    let key = idKey(id)
+                    try requireDocument(key, in: database)
+                    try writeMutableState(document, key: key, in: database)
+                }
+            }
         }
-        let directory = destination.deletingLastPathComponent()
-        // Only a managed directory this store creates is tightened; an
-        // existing one keeps the permissions the user chose for it.
+    }
+
+    /// Persists only `document.exports`. Export refresh renders under the
+    /// document's render lock but not inside a database transaction, so a
+    /// speaker change can commit meanwhile; writing just the records keeps
+    /// that change instead of overwriting it with the refresh's older copy.
+    /// A portable file has no such split and is saved whole.
+    static func saveExports(of document: CanonicalTranscript, to ref: TranscriptRef) throws {
+        switch ref {
+        case .portable(let url):
+            _ = try save(document, to: url)
+        case .managed(let id):
+            try validate(document)
+            try StateStore.withDatabase { database in
+                try database.inTransaction(.write) {
+                    let key = idKey(id)
+                    try requireDocument(key, in: database)
+                    try writeExports(document.exports, key: key, in: database)
+                }
+            }
+        }
+    }
+
+    /// Merges freshly written export records into the document's stored
+    /// ones, by path: rewriting a destination replaces its record, a new
+    /// destination adds one. The merge reads the current records, so the
+    /// caller's copy of the document may be stale. A portable document is
+    /// reloaded and saved whole, under the caller's document lock.
+    static func mergeExports(_ records: [ExportRecord], into ref: TranscriptRef) throws {
+        switch ref {
+        case .portable(let url):
+            var document = try load(from: url)
+            document.exports = merging(records, into: document.exports)
+            _ = try save(document, to: url)
+        case .managed(let id):
+            try StateStore.withDatabase { database in
+                try database.inTransaction(.write) {
+                    let key = idKey(id)
+                    let recorded = try database.query(
+                        "SELECT exports_recorded FROM documents WHERE id = ?", [.text(key)]
+                    ) { $0.int(0) ?? 0 }
+                    guard let flag = recorded.first else { throw StoreError.notFound(key) }
+                    let existing = flag != 0 ? try readExports(key: key, in: database) : nil
+                    let merged = merging(records, into: existing)
+                    try validateExports(merged)
+                    try writeExports(merged, key: key, in: database)
+                }
+            }
+        }
+    }
+
+    static func merging(_ records: [ExportRecord], into existing: [ExportRecord]?) -> [ExportRecord] {
+        var merged = existing ?? []
+        for record in records {
+            if let index = merged.firstIndex(where: { $0.path == record.path }) {
+                merged[index] = record
+            } else {
+                merged.append(record)
+            }
+        }
+        return merged
+    }
+
+    // MARK: - Portable files
+
+    /// Writes the portable JSON form to an explicit destination. A copy the
+    /// caller placed is written as asked and never deduplicated.
+    static func save(_ document: CanonicalTranscript, to url: URL) throws -> URL {
+        try validate(document)
+        let directory = url.deletingLastPathComponent()
+        // An existing directory keeps the permissions the user chose for it.
         if !FileManager.default.fileExists(atPath: directory.path) {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            if isManagedDestination {
-                try tightenPermissions(ofPath: directory.path, to: privateDirectoryMode)
-            }
         }
 
         let encoder = JSONEncoder()
@@ -229,8 +369,8 @@ enum CanonicalTranscriptStore {
         var data = try encoder.encode(document)
         data.append(0x0A)
 
-        try writePrivateAtomically(data: data, to: destination)
-        return destination
+        try writePrivateAtomically(data: data, to: url)
+        return url
     }
 
     static func load(from url: URL) throws -> CanonicalTranscript {
@@ -241,28 +381,400 @@ enum CanonicalTranscriptStore {
         return document
     }
 
-    /// Returns the stored file already holding `evidenceID`, with the id its
-    /// name encodes. Only files this store named are candidates: replacing a
-    /// file in place keeps the filename, so the replacement has to adopt that
-    /// id, which a foreign filename cannot supply. Anything unreadable at this
-    /// depth is skipped rather than failing the save it was scanned for.
-    private static func existingManagedFile(forEvidenceID evidenceID: String) -> (url: URL, id: UUID)? {
-        guard let directory = try? transcriptsDirectoryURL(),
-              let files = try? FileManager.default.contentsOfDirectory(
-                  at: directory, includingPropertiesForKeys: nil
-              ) else { return nil }
-        let suffix = ".transcript.json"
-        // Sorted so a directory that somehow holds several files for one
-        // evidence ID collapses onto the same one on every run.
-        for file in files.sorted(by: { $0.path < $1.path }) where file.lastPathComponent.hasSuffix(suffix) {
-            guard let id = UUID(uuidString: String(file.lastPathComponent.dropLast(suffix.count))),
-                  let data = try? Data(contentsOf: file),
-                  let listing = try? JSONDecoder().decode(EvidenceListing.self, from: data),
-                  listing.evidenceID == evidenceID else { continue }
-            return (file, id)
+    // MARK: - Managed documents
+
+    /// Saves a newly produced document into the state database and returns
+    /// the ID it is stored under. Evidence IDs are derived from the source
+    /// audio, so re-running the same recording produces the same one: the
+    /// save replaces the stored document for that evidence, adopting its ID,
+    /// instead of adding a second document that would grow the listing
+    /// without end.
+    @discardableResult
+    static func saveManaged(_ document: CanonicalTranscript) throws -> UUID {
+        try validate(document)
+        return try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                var document = document
+                let existing = try database.query(
+                    "SELECT id FROM documents WHERE evidence_id = ?", [.text(document.evidenceID)]
+                ) { $0.text(0) ?? "" }.first
+                if let existing {
+                    guard let existingID = UUID(uuidString: existing) else {
+                        throw StoreError.invalidData("stored document ID \(existing) is not a UUID")
+                    }
+                    // A stored document that no longer loads in full is still
+                    // replaced, only without its carried-forward state. Read
+                    // directly, not through a joined transaction, so the
+                    // failure stays local instead of dooming this save.
+                    let previous = try? materialize(id: existingID, in: database)
+                    let validPrevious = previous.flatMap { (try? validate($0)) != nil ? $0 : nil }
+                    document = document.adopting(
+                        id: existingID,
+                        speakerMatches: confirmedMatchesCarriedForward(to: document, from: validPrevious)
+                    )
+                    // A rerun of the same audio (a --no-outputs enrollment run,
+                    // say) knows nothing about files earlier runs exported;
+                    // dropping their records here would orphan those files
+                    // from future refreshes.
+                    if document.exports == nil { document.exports = validPrevious?.exports }
+                    document.dismissedSpeakers = dismissalsCarriedForward(to: document, from: validPrevious)
+                    try validate(document)
+                }
+                // Replacing by ID too keeps a re-save of a loaded document
+                // (or any colliding ID) a replacement, as a same-named file
+                // overwrite was.
+                try database.execute("DELETE FROM documents WHERE id = ?", [.text(idKey(document.id))])
+                try insertDocument(document, in: database)
+                return document.id
+            }
         }
-        return nil
     }
+
+    static func load(id: UUID) throws -> CanonicalTranscript {
+        // One read transaction: the document spans several tables, and a
+        // writer committing between the queries would otherwise produce a
+        // mixed-generation document.
+        let document = try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                try materialize(id: id, in: database)
+            }
+        }
+        try validate(document)
+        return document
+    }
+
+    /// Builds the full document from its rows. The caller provides the
+    /// transaction; no validation happens here.
+    static func materialize(id: UUID, in database: StateDatabase) throws -> CanonicalTranscript {
+        let key = idKey(id)
+        let rows = try database.query(
+            """
+            SELECT evidence_id, source_hashes, created_at, model, transcribe_version,
+                   audio_path, audio_files, basename, source_metadata, embedding_model_id,
+                   language, duration_seconds, diarization_enabled, speakers_detected,
+                   speaker_strategy, warnings, exports_recorded
+            FROM documents WHERE id = ?
+            """,
+            [.text(key)]
+        ) { row -> CanonicalTranscript in
+            let segments = try readSegments(key: key, in: database)
+            let output = TranscriptionOutput(
+                segments: segments,
+                language: row.text(10),
+                durationSeconds: row.double(11) ?? 0,
+                diarizationEnabled: (row.int(12) ?? 0) != 0,
+                speakersDetected: row.int(13).map { Int($0) },
+                speakerStrategy: row.text(14) ?? "",
+                warnings: try decodeJSON([String].self, row.text(15)),
+                speakerEmbeddings: try readEmbeddings(key: key, in: database)
+            )
+            return CanonicalTranscript(
+                id: id,
+                evidenceID: row.text(0) ?? "",
+                sourceHashes: try decodeJSON([String].self, row.text(1)),
+                createdAt: try parseDate(row.text(2)),
+                model: row.text(3) ?? "",
+                transcribeVersion: row.text(4) ?? "",
+                audioPath: row.text(5) ?? "",
+                audioFiles: try row.text(6).map { try decodeJSON([String].self, $0) },
+                basename: row.text(7) ?? "",
+                sourceMetadata: try row.text(8).map { try decodeJSON(OutputSourceMetadata.self, $0) },
+                output: output,
+                embeddingModelID: row.text(9) ?? "",
+                speakerMatches: try readMatches(key: key, in: database),
+                dismissedSpeakers: try readDismissed(key: key, in: database),
+                exports: (row.int(16) ?? 0) != 0 ? try readExports(key: key, in: database) : nil
+            )
+        }
+        guard let document = rows.first else { throw StoreError.notFound(key) }
+        return document
+    }
+
+    /// The payload-free view of a stored document.
+    static func summary(id: UUID) throws -> TranscriptSummary {
+        let key = idKey(id)
+        return try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                let rows = try database.query(
+                    """
+                    SELECT basename, model, duration_seconds, segment_count, segment_speakers,
+                           evidence_id, source_hashes, embedding_model_id
+                    FROM documents WHERE id = ?
+                    """,
+                    [.text(key)]
+                ) { row in
+                    TranscriptSummary(
+                        id: id,
+                        basename: row.text(0) ?? "",
+                        model: row.text(1) ?? "",
+                        durationSeconds: row.double(2) ?? 0,
+                        segmentCount: Int(row.int(3) ?? 0),
+                        segmentSpeakers: try decodeJSON([String].self, row.text(4)),
+                        evidenceID: row.text(5) ?? "",
+                        sourceHashes: try decodeJSON([String].self, row.text(6)),
+                        embeddingModelID: row.text(7) ?? "",
+                        speakerEmbeddings: try readEmbeddings(key: key, in: database),
+                        speakerMatches: try readMatches(key: key, in: database),
+                        dismissedSpeakers: try readDismissed(key: key, in: database)
+                    )
+                }
+                guard let summary = rows.first else { throw StoreError.notFound(key) }
+                try validate(summary)
+                return summary
+            }
+        }
+    }
+
+    enum ListingOrder {
+        /// By document ID, the `transcripts` listing order.
+        case id
+        /// Most recently updated first, so an all-documents review reaches
+        /// recent recordings before the backlog.
+        case recentlyUpdated
+    }
+
+    /// Every stored document's ID, title, and update time, read from the
+    /// `documents` table alone.
+    static func listing(order: ListingOrder = .id) throws -> [TranscriptListing] {
+        let orderBy = order == .id ? "id" : "updated_at DESC, id DESC"
+        return try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                try database.query("SELECT id, basename, updated_at FROM documents ORDER BY \(orderBy)") { row in
+                    let text = row.text(0) ?? ""
+                    return TranscriptListing(
+                        rawID: text, id: UUID(uuidString: text),
+                        basename: row.text(1) ?? "", updatedAt: row.text(2) ?? ""
+                    )
+                }
+            }
+        }
+    }
+
+    /// Stored document IDs beginning with `prefix` (lowercase hex and
+    /// dashes), sorted.
+    static func documentIDs(withPrefix prefix: String) throws -> [String] {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                try database.query(
+                    "SELECT id FROM documents WHERE substr(id, 1, ?) = ? ORDER BY id",
+                    [.integer(Int64(prefix.count)), .text(prefix)]
+                ) { $0.text(0) ?? "" }
+            }
+        }
+    }
+
+    /// Distinct segment speaker labels, sorted: the lifted
+    /// `segment_speakers` column.
+    static func segmentSpeakers(of segments: [TranscriptSegment]) -> [String] {
+        Set(segments.compactMap(\.speaker)).sorted()
+    }
+
+    // MARK: - Rows
+
+    private static func idKey(_ id: UUID) -> String { id.uuidString.lowercased() }
+
+    private static func requireDocument(_ key: String, in database: StateDatabase) throws {
+        let found = try database.query("SELECT 1 FROM documents WHERE id = ?", [.text(key)]) { _ in true }
+        guard !found.isEmpty else { throw StoreError.notFound(key) }
+    }
+
+    private static func insertDocument(_ document: CanonicalTranscript, in database: StateDatabase) throws {
+        let key = idKey(document.id)
+        let output = document.output
+        try database.execute(
+            """
+            INSERT INTO documents (
+              id, evidence_id, source_hashes, created_at, model, transcribe_version,
+              audio_path, audio_files, basename, source_metadata, embedding_model_id,
+              language, duration_seconds, diarization_enabled, speakers_detected,
+              speaker_strategy, warnings, segment_count, segment_speakers,
+              exports_recorded, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            """,
+            [
+                .text(key),
+                .text(document.evidenceID),
+                .text(try jsonText(document.sourceHashes)),
+                .text(iso8601String(document.createdAt)),
+                .text(document.model),
+                .text(document.transcribeVersion),
+                .text(document.audioPath),
+                try document.audioFiles.map { .text(try jsonText($0)) } ?? .null,
+                .text(document.basename),
+                try document.sourceMetadata.map { .text(try jsonText($0)) } ?? .null,
+                .text(document.embeddingModelID),
+                output.language.map { .text($0) } ?? .null,
+                .real(output.durationSeconds),
+                .integer(output.diarizationEnabled ? 1 : 0),
+                output.speakersDetected.map { .integer(Int64($0)) } ?? .null,
+                .text(output.speakerStrategy),
+                .text(try jsonText(output.warnings)),
+                .integer(Int64(output.segments.count)),
+                .text(try jsonText(segmentSpeakers(of: output.segments))),
+                .text(iso8601String(Date())),
+            ]
+        )
+        try database.execute(
+            "INSERT INTO document_segments (document_id, encoding, payload) VALUES (?, 'json', ?)",
+            [.text(key), .blob(try jsonEncoder().encode(output.segments))]
+        )
+        for (speaker, vector) in output.speakerEmbeddings.sorted(by: { $0.key < $1.key }) {
+            try database.execute(
+                "INSERT INTO document_embeddings (document_id, speaker_id, vector) VALUES (?, ?, ?)",
+                [.text(key), .text(speaker), .blob(Float32Blob.encode(vector))]
+            )
+        }
+        try writeMutableState(document, key: key, in: database)
+    }
+
+    /// Replaces the rows commands edit and bumps `updated_at`.
+    private static func writeMutableState(
+        _ document: CanonicalTranscript, key: String, in database: StateDatabase
+    ) throws {
+        try database.execute("DELETE FROM speaker_matches WHERE document_id = ?", [.text(key)])
+        for (speaker, match) in document.speakerMatches.sorted(by: { $0.key < $1.key }) {
+            try database.execute(
+                """
+                INSERT INTO speaker_matches
+                  (document_id, speaker_id, profile_id, name, distance, margin, example_count, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .text(key), .text(speaker), .text(match.profileID), .text(match.name),
+                    .real(match.distance), match.margin.map { .real($0) } ?? .null,
+                    .integer(Int64(match.confirmedExampleCount)), .text(match.status.rawValue),
+                ]
+            )
+        }
+        try database.execute("DELETE FROM dismissed_speakers WHERE document_id = ?", [.text(key)])
+        for speaker in document.dismissedSpeakers ?? [] {
+            try database.execute(
+                "INSERT INTO dismissed_speakers (document_id, speaker_id) VALUES (?, ?)",
+                [.text(key), .text(speaker)]
+            )
+        }
+        try writeExports(document.exports, key: key, in: database)
+    }
+
+    /// Replaces the export records, keeping nil (no records ever) distinct
+    /// from an empty list, and bumps `updated_at`; every mutation path ends
+    /// here.
+    private static func writeExports(
+        _ exports: [ExportRecord]?, key: String, in database: StateDatabase
+    ) throws {
+        try database.execute("DELETE FROM exports WHERE document_id = ?", [.text(key)])
+        for (position, record) in (exports ?? []).enumerated() {
+            try database.execute(
+                """
+                INSERT INTO exports (document_id, position, path, format, sha256, exported_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .text(key), .integer(Int64(position)), .text(record.path), .text(record.format),
+                    .text(record.sha256), .text(iso8601String(record.exportedAt)),
+                ]
+            )
+        }
+        try database.execute(
+            "UPDATE documents SET exports_recorded = ?, updated_at = ? WHERE id = ?",
+            [.integer(exports == nil ? 0 : 1), .text(iso8601String(Date())), .text(key)]
+        )
+    }
+
+    private static func readSegments(key: String, in database: StateDatabase) throws -> [TranscriptSegment] {
+        let rows = try database.query(
+            "SELECT encoding, payload FROM document_segments WHERE document_id = ?", [.text(key)]
+        ) { ($0.text(0) ?? "", $0.blob(1) ?? Data()) }
+        guard let (encoding, payload) = rows.first else {
+            throw StoreError.invalidData("segment payload is missing")
+        }
+        guard encoding == "json" else {
+            throw StoreError.invalidData("unsupported segment encoding '\(encoding)'")
+        }
+        return try JSONDecoder().decode([TranscriptSegment].self, from: payload)
+    }
+
+    private static func readEmbeddings(key: String, in database: StateDatabase) throws -> [String: [Float]] {
+        let rows = try database.query(
+            "SELECT speaker_id, vector FROM document_embeddings WHERE document_id = ?", [.text(key)]
+        ) { ($0.text(0) ?? "", try Float32Blob.decode($0.blob(1) ?? Data())) }
+        return Dictionary(rows, uniquingKeysWith: { first, _ in first })
+    }
+
+    private static func readMatches(key: String, in database: StateDatabase) throws -> [String: SpeakerMatch] {
+        let rows = try database.query(
+            """
+            SELECT speaker_id, profile_id, name, distance, margin, example_count, status
+            FROM speaker_matches WHERE document_id = ?
+            """,
+            [.text(key)]
+        ) { row -> (String, SpeakerMatch) in
+            let statusText = row.text(6) ?? ""
+            guard let status = SpeakerMatchStatus(rawValue: statusText) else {
+                throw StoreError.invalidData("speaker match status '\(statusText)' is unknown")
+            }
+            return (row.text(0) ?? "", SpeakerMatch(
+                profileID: row.text(1) ?? "", name: row.text(2) ?? "",
+                distance: row.double(3) ?? 0, margin: row.double(4),
+                confirmedExampleCount: Int(row.int(5) ?? 0), status: status
+            ))
+        }
+        return Dictionary(rows, uniquingKeysWith: { first, _ in first })
+    }
+
+    private static func readDismissed(key: String, in database: StateDatabase) throws -> [String]? {
+        let speakers = try database.query(
+            "SELECT speaker_id FROM dismissed_speakers WHERE document_id = ?", [.text(key)]
+        ) { $0.text(0) ?? "" }
+        return speakers.isEmpty ? nil : speakers.sorted()
+    }
+
+    private static func readExports(key: String, in database: StateDatabase) throws -> [ExportRecord] {
+        try database.query(
+            "SELECT path, format, sha256, exported_at FROM exports WHERE document_id = ? ORDER BY position",
+            [.text(key)]
+        ) { row in
+            ExportRecord(
+                path: row.text(0) ?? "", format: row.text(1) ?? "", sha256: row.text(2) ?? "",
+                exportedAt: try parseDate(row.text(3))
+            )
+        }
+    }
+
+    // MARK: - Encoding
+
+    /// Compact JSON for stored columns; same key order and slash handling as
+    /// the portable writer, without its indentation.
+    private static func jsonEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return encoder
+    }
+
+    private static func jsonText<T: Encodable>(_ value: T) throws -> String {
+        String(decoding: try jsonEncoder().encode(value), as: UTF8.self)
+    }
+
+    private static func decodeJSON<T: Decodable>(_ type: T.Type, _ text: String?) throws -> T {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(type, from: Data((text ?? "").utf8))
+    }
+
+    /// Stored timestamps are the whole-second strings `.iso8601` coding
+    /// writes, so a stored document round-trips through portable JSON
+    /// unchanged.
+    private static func parseDate(_ text: String?) throws -> Date {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let text, let date = formatter.date(from: text) else {
+            throw StoreError.invalidData("timestamp '\(text ?? "")' is invalid")
+        }
+        return date
+    }
+
+    // MARK: - Carry-forward
 
     /// Merges the confirmed assignments of the previously stored document into
     /// the matches of a new run over the same evidence. Confirmations are keyed by
@@ -270,7 +782,7 @@ enum CanonicalTranscriptStore {
     /// across a re-run of the same audio, but only where the new run still
     /// produced an embedding for that speaker: a speaker the new diarization
     /// did not emit has nothing to attach the decision to. Everything else
-    /// keeps the fresh suggested or automatic match. A stored file that no
+    /// keeps the fresh suggested or automatic match. A stored document that no
     /// longer loads in full is still replaced, only without its confirmations.
     private static func confirmedMatchesCarriedForward(
         to document: CanonicalTranscript, from previous: CanonicalTranscript?
@@ -299,14 +811,7 @@ enum CanonicalTranscriptStore {
         return merged.isEmpty ? nil : merged.sorted()
     }
 
-    private static func transcriptsDirectoryURL() throws -> URL {
-        try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts", isDirectory: true)
-    }
-
-    private static func defaultURL(for id: UUID) throws -> URL {
-        try transcriptsDirectoryURL()
-            .appendingPathComponent("\(id.uuidString.lowercased()).transcript.json", isDirectory: false)
-    }
+    // MARK: - Validation
 
     static func validate(_ document: CanonicalTranscript) throws {
         guard document.schemaVersion == CanonicalTranscript.currentSchemaVersion else {
@@ -343,18 +848,63 @@ enum CanonicalTranscriptStore {
             }
         }
         let localIDs = Set(document.output.segments.compactMap(\.speaker).filter(isLocalSpeakerID))
-        for (speakerID, vector) in document.output.speakerEmbeddings {
+        try validateSpeakerState(
+            embeddings: document.output.speakerEmbeddings,
+            matches: document.speakerMatches,
+            dismissed: document.dismissedSpeakers,
+            localIDs: localIDs
+        )
+        try validateExports(document.exports ?? [])
+    }
+
+    /// The summary-accessible slice of `validate(_:)`: a payload-free read
+    /// (inspect, the review table) must reject the same bad embeddings,
+    /// matches and dismissals a full load rejects, with the lifted
+    /// `segment_speakers` standing in for the segment-derived local IDs.
+    static func validate(_ summary: TranscriptSummary) throws {
+        guard summary.evidenceID.hasPrefix("sha256:"), summary.evidenceID.count == 71,
+              summary.evidenceID.dropFirst(7).allSatisfy({ $0.isHexDigit }),
+              !summary.model.isEmpty, !summary.basename.isEmpty,
+              !summary.embeddingModelID.isEmpty else {
+            throw StoreError.invalidData("required string is empty")
+        }
+        guard summary.sourceHashes == Set(summary.sourceHashes).sorted(),
+              summary.sourceHashes.allSatisfy({
+                  $0.count == 64 && $0.allSatisfy(\.isHexDigit) && $0 == $0.lowercased()
+              }),
+              summary.evidenceID == CanonicalTranscript.evidenceID(forSourceHashes: summary.sourceHashes) else {
+            throw StoreError.invalidData("source hash evidence is invalid")
+        }
+        guard summary.durationSeconds.isFinite, summary.durationSeconds >= 0,
+              summary.segmentCount >= 0 else {
+            throw StoreError.invalidData("duration is not finite and non-negative")
+        }
+        try validateSpeakerState(
+            embeddings: summary.speakerEmbeddings,
+            matches: summary.speakerMatches,
+            dismissed: summary.dismissedSpeakers,
+            localIDs: Set(summary.segmentSpeakers.filter(isLocalSpeakerID))
+        )
+    }
+
+    private static func validateSpeakerState(
+        embeddings: [String: [Float]],
+        matches: [String: SpeakerMatch],
+        dismissed: [String]?,
+        localIDs: Set<String>
+    ) throws {
+        for (speakerID, vector) in embeddings {
             guard isLocalSpeakerID(speakerID), localIDs.contains(speakerID), !vector.isEmpty,
                   vector.allSatisfy(\.isFinite), vector.contains(where: { $0 != 0 }) else {
                 throw StoreError.invalidData("speaker embedding reference or vector is invalid")
             }
         }
-        for speakerID in document.speakerMatches.keys {
+        for speakerID in matches.keys {
             guard isLocalSpeakerID(speakerID), localIDs.contains(speakerID),
-                  document.output.speakerEmbeddings[speakerID] != nil else {
+                  embeddings[speakerID] != nil else {
                 throw StoreError.invalidData("speaker match reference is invalid")
             }
-            let match = document.speakerMatches[speakerID]!
+            let match = matches[speakerID]!
             guard !match.profileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   match.profileID.rangeOfCharacter(from: .controlCharacters) == nil,
                   !match.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -365,18 +915,21 @@ enum CanonicalTranscriptStore {
                 throw StoreError.invalidData("speaker match evidence is invalid")
             }
         }
-        if let dismissed = document.dismissedSpeakers {
+        if let dismissed {
             guard dismissed == Set(dismissed).sorted(), !dismissed.isEmpty else {
                 throw StoreError.invalidData("dismissed speaker list is not sorted and unique")
             }
             for speakerID in dismissed {
                 guard isLocalSpeakerID(speakerID), localIDs.contains(speakerID),
-                      document.output.speakerEmbeddings[speakerID] != nil else {
+                      embeddings[speakerID] != nil else {
                     throw StoreError.invalidData("dismissed speaker reference is invalid")
                 }
             }
         }
-        for record in document.exports ?? [] {
+    }
+
+    static func validateExports(_ records: [ExportRecord]) throws {
+        for record in records {
             guard record.path.hasPrefix("/"),
                   record.path.rangeOfCharacter(from: .controlCharacters) == nil,
                   validOutputFormats.contains(record.format),

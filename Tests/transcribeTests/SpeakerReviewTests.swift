@@ -164,7 +164,7 @@ final class SpeakerReviewTests: XCTestCase {
     func testTypedNameCreatesProfileAndConfirms() throws {
         let url = try document("one", hash: "a")
         let scripted = ScriptedIO(["Siva"])
-        try session(scripted).run(documents: [url])
+        try session(scripted).run(documents: [.portable(url)])
         let profiles = try SpeakerProfileStore.profiles()
         XCTAssertEqual(profiles.map(\.name), ["Siva"])
         XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"]?.status, .confirmed)
@@ -174,9 +174,9 @@ final class SpeakerReviewTests: XCTestCase {
 
     func testTypedNameMatchesExistingProfileCaseInsensitively() throws {
         let one = try document("one", hash: "a")
-        try session(ScriptedIO(["Dave"])).run(documents: [one])
+        try session(ScriptedIO(["Dave"])).run(documents: [.portable(one)])
         let two = try document("two", hash: "b")
-        try session(ScriptedIO(["dave"])).run(documents: [two])
+        try session(ScriptedIO(["dave"])).run(documents: [.portable(two)])
         let profiles = try SpeakerProfileStore.profiles()
         XCTAssertEqual(profiles.count, 1, "case-variant name must not create a duplicate profile")
         XCTAssertEqual(profiles.first?.examples.count, 2)
@@ -184,26 +184,26 @@ final class SpeakerReviewTests: XCTestCase {
 
     func testEmptyInputAcceptsSuggestionAndSkipsWithoutOne() throws {
         let one = try document("one", hash: "a")
-        try session(ScriptedIO(["Dave"])).run(documents: [one])
+        try session(ScriptedIO(["Dave"])).run(documents: [.portable(one)])
         let two = try document("two", hash: "b")
         let scripted = ScriptedIO([""])
-        try session(scripted).run(documents: [two])
+        try session(scripted).run(documents: [.portable(two)])
         XCTAssertTrue(scripted.output.contains("suggested: Dave"))
         XCTAssertEqual(try CanonicalTranscriptStore.load(from: two).speakerMatches["SPEAKER_0"]?.status, .confirmed)
         XCTAssertEqual(try SpeakerProfileStore.profiles().first?.examples.count, 2)
 
         let three = try document("three", hash: "c", embeddings: ["SPEAKER_0": [0, 1]])
         let noSuggestion = ScriptedIO([""])
-        try session(noSuggestion).run(documents: [three])
+        try session(noSuggestion).run(documents: [.portable(three)])
         XCTAssertNil(try CanonicalTranscriptStore.load(from: three).speakerMatches["SPEAKER_0"], "empty input without a suggestion skips")
     }
 
     func testProfileMenuSelection() throws {
         let one = try document("one", hash: "a")
-        try session(ScriptedIO(["Dave"])).run(documents: [one])
+        try session(ScriptedIO(["Dave"])).run(documents: [.portable(one)])
         let two = try document("two", hash: "b", embeddings: ["SPEAKER_0": [0, 1]])
         let scripted = ScriptedIO(["l", "9", "1"])
-        try session(scripted).run(documents: [two])
+        try session(scripted).run(documents: [.portable(two)])
         XCTAssertTrue(scripted.output.contains("1  Dave"), "menu lists profiles")
         XCTAssertTrue(scripted.output.contains("No profile numbered 9"))
         XCTAssertEqual(try CanonicalTranscriptStore.load(from: two).speakerMatches["SPEAKER_0"]?.name, "Dave")
@@ -220,7 +220,7 @@ final class SpeakerReviewTests: XCTestCase {
         )
         let two = try document("two", hash: "b")
         let scripted = ScriptedIO(["Dave", "q"])
-        try session(scripted).run(documents: [one, two])
+        try session(scripted).run(documents: [.portable(one), .portable(two)])
         let document = try CanonicalTranscriptStore.load(from: one)
         XCTAssertEqual(document.speakerMatches["SPEAKER_0"]?.name, "Dave", "decision before quit is applied")
         XCTAssertNil(document.speakerMatches["SPEAKER_1"])
@@ -231,26 +231,26 @@ final class SpeakerReviewTests: XCTestCase {
     func testSkipWritesNothing() throws {
         let url = try document("one", hash: "a")
         let before = try Data(contentsOf: url)
-        try session(ScriptedIO(["s"])).run(documents: [url])
+        try session(ScriptedIO(["s"])).run(documents: [.portable(url)])
         XCTAssertEqual(try Data(contentsOf: url), before)
         XCTAssertTrue(try SpeakerProfileStore.profiles().isEmpty)
     }
 
     func testConfirmedSpeakersOnlyRevisitedWithIncludeConfirmed() throws {
         let url = try document("one", hash: "a")
-        try session(ScriptedIO(["Dave"])).run(documents: [url])
-        let settled = try SpeakerCommands.refreshedDocument(at: url)
+        try session(ScriptedIO(["Dave"])).run(documents: [.portable(url)])
+        let settled = try SpeakerCommands.refreshedDocument(.portable(url))
         XCTAssertFalse(session(ScriptedIO([])).needsAttention(settled))
 
         let corrective = ScriptedIO(["Matt"])
-        try session(corrective, includeConfirmed: true).run(documents: [url])
+        try session(corrective, includeConfirmed: true).run(documents: [.portable(url)])
         XCTAssertTrue(corrective.output.contains("confirmed: Dave"), "current name is shown when revisiting")
         XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"]?.name, "Matt")
     }
 
     func testEndOfInputQuitsCleanly() throws {
         let url = try document("one", hash: "a")
-        try session(ScriptedIO([])).run(documents: [url])
+        try session(ScriptedIO([])).run(documents: [.portable(url)])
         XCTAssertNil(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"])
     }
 
@@ -266,7 +266,7 @@ final class SpeakerReviewTests: XCTestCase {
         }
         let url = try document("one", hash: "a", segments: segments)
         let scripted = ScriptedIO(["m", "m", "s"])
-        try session(scripted).run(documents: [url])
+        try session(scripted).run(documents: [.portable(url)])
         for index in 0..<6 {
             // The scripted prompt has no terminal echo, so samples can share a
             // line with the prompt; count occurrences rather than lines.
@@ -282,13 +282,13 @@ final class SpeakerReviewTests: XCTestCase {
     func testDismissPersistsAndStopsPrompting() throws {
         let url = try document("one", hash: "a")
         let scripted = ScriptedIO(["u"])
-        try session(scripted).run(documents: [url])
+        try session(scripted).run(documents: [.portable(url)])
         XCTAssertTrue(scripted.output.contains("Marked SPEAKER_0 as unidentifiable"), scripted.output)
         let saved = try CanonicalTranscriptStore.load(from: url)
         XCTAssertEqual(saved.dismissedSpeakers, ["SPEAKER_0"])
         XCTAssertNil(saved.speakerMatches["SPEAKER_0"])
         XCTAssertFalse(
-            session(ScriptedIO([])).needsAttention(try SpeakerCommands.refreshedDocument(at: url)),
+            session(ScriptedIO([])).needsAttention(try SpeakerCommands.refreshedDocument(.portable(url))),
             "a dismissed speaker is not prompted again"
         )
         XCTAssertTrue(
@@ -299,24 +299,24 @@ final class SpeakerReviewTests: XCTestCase {
 
     func testDismissedSpeakerGetsNoFreshSuggestion() throws {
         let one = try document("one", hash: "a")
-        try session(ScriptedIO(["Dave"])).run(documents: [one])
+        try session(ScriptedIO(["Dave"])).run(documents: [.portable(one)])
         let two = try document("two", hash: "b")
         XCTAssertEqual(
-            try SpeakerCommands.refreshedDocument(at: two).speakerMatches["SPEAKER_0"]?.status,
+            try SpeakerCommands.refreshedDocument(.portable(two)).speakerMatches["SPEAKER_0"]?.status,
             .suggested, "the matching voice is suggested before dismissal"
         )
-        try session(ScriptedIO(["u"])).run(documents: [two])
+        try session(ScriptedIO(["u"])).run(documents: [.portable(two)])
         XCTAssertNil(
-            try SpeakerCommands.refreshedDocument(at: two).speakerMatches["SPEAKER_0"],
+            try SpeakerCommands.refreshedDocument(.portable(two)).speakerMatches["SPEAKER_0"],
             "refresh must not resurrect a dismissed speaker as a suggestion"
         )
     }
 
     func testConfirmingUnderAllClearsDismissal() throws {
         let url = try document("one", hash: "a")
-        try session(ScriptedIO(["u"])).run(documents: [url])
+        try session(ScriptedIO(["u"])).run(documents: [.portable(url)])
         let revisit = ScriptedIO(["Dave"])
-        try session(revisit, includeConfirmed: true).run(documents: [url])
+        try session(revisit, includeConfirmed: true).run(documents: [.portable(url)])
         XCTAssertTrue(revisit.output.contains("marked unidentifiable"), "the mark is shown when revisiting")
         let saved = try CanonicalTranscriptStore.load(from: url)
         XCTAssertNil(saved.dismissedSpeakers, "a confirmed name removes the mark")
@@ -325,9 +325,9 @@ final class SpeakerReviewTests: XCTestCase {
 
     func testDismissingAConfirmedSpeakerWithdrawsItsExample() throws {
         let url = try document("one", hash: "a")
-        try session(ScriptedIO(["Dave"])).run(documents: [url])
+        try session(ScriptedIO(["Dave"])).run(documents: [.portable(url)])
         XCTAssertEqual(try SpeakerProfileStore.profiles().first?.examples.count, 1)
-        try session(ScriptedIO(["u"]), includeConfirmed: true).run(documents: [url])
+        try session(ScriptedIO(["u"]), includeConfirmed: true).run(documents: [.portable(url)])
         let saved = try CanonicalTranscriptStore.load(from: url)
         XCTAssertEqual(saved.dismissedSpeakers, ["SPEAKER_0"])
         XCTAssertNil(saved.speakerMatches["SPEAKER_0"])
@@ -345,7 +345,7 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: txt).contains("SPEAKER_0"))
 
         let scripted = ScriptedIO(["Siva"])
-        try session(scripted).run(documents: [url])
+        try session(scripted).run(documents: [.portable(url)])
 
         XCTAssertTrue(try String(contentsOf: txt).contains("Siva"), "recorded export picks up the new name")
         XCTAssertTrue(scripted.output.contains("Refreshed 1 export"), scripted.output)
@@ -357,10 +357,92 @@ final class SpeakerReviewTests: XCTestCase {
         let txt = try seedTxtExport(at: url)
 
         let scripted = ScriptedIO(["Siva"])
-        try session(scripted, refreshExports: false).run(documents: [url])
+        try session(scripted, refreshExports: false).run(documents: [.portable(url)])
 
         XCTAssertFalse(try String(contentsOf: txt).contains("Siva"), "disabled refresh leaves files stale")
         XCTAssertTrue(scripted.output.contains("Export again to update rendered files."), scripted.output)
+    }
+
+    // MARK: - Managed documents
+
+    private func managedDocument(
+        _ name: String, hash: String,
+        segments: [TranscriptSegment]? = nil,
+        embeddings: [String: [Float]] = ["SPEAKER_0": [1, 0]]
+    ) throws -> UUID {
+        let url = try document(name, hash: hash, segments: segments, embeddings: embeddings)
+        return try CanonicalTranscriptStore.saveManaged(CanonicalTranscriptStore.load(from: url))
+    }
+
+    func testManagedSessionConfirmsAndRefreshesExportsAfterCommit() throws {
+        let id = try managedDocument("one", hash: "a")
+        let document = try CanonicalTranscriptStore.load(id: id)
+        let out = directory.appendingPathComponent("managed-exports")
+        let records = try writeOutputs(
+            output: document.output, audioPath: document.audioPath,
+            outputDir: out.path, basename: document.basename, formats: ["txt"],
+            overwrite: true, model: document.model, version: document.transcribeVersion,
+            createdAt: document.createdAt
+        )
+        try CanonicalTranscriptStore.mergeExports(records, into: .managed(id: id))
+        let txt = out.appendingPathComponent("one.txt")
+
+        let scripted = ScriptedIO(["Siva"])
+        try session(scripted).run(documents: [.managed(id: id)])
+
+        XCTAssertTrue(scripted.output.contains("Confirmed SPEAKER_0 as Siva"), scripted.output)
+        XCTAssertTrue(scripted.output.contains("Refreshed 1 export"), scripted.output)
+        XCTAssertTrue(try String(contentsOf: txt).contains("Siva"))
+        let saved = try CanonicalTranscriptStore.load(id: id)
+        XCTAssertEqual(saved.speakerMatches["SPEAKER_0"]?.status, .confirmed)
+        XCTAssertEqual(saved.exports?.first?.sha256, sha256Hex(try Data(contentsOf: txt)), "refreshed record committed")
+        XCTAssertEqual(try SpeakerProfileStore.profiles().map(\.name), ["Siva"])
+    }
+
+    /// A managed batch is one transaction: when a later decision fails, the
+    /// earlier ones roll back with it, and none is reported as confirmed.
+    func testFailedManagedBatchPrintsNoConfirmationsAndChangesNothing() throws {
+        let segments = [
+            segment("SPEAKER_0", 0, "First speaker saying quite a few words."),
+            segment("SPEAKER_1", 3, "Second speaker also saying quite a few words."),
+        ]
+        let id = try managedDocument(
+            "one", hash: "a", segments: segments,
+            embeddings: ["SPEAKER_0": [1, 0], "SPEAKER_1": [0, 1]]
+        )
+        let before = try CanonicalTranscriptStore.load(id: id)
+        let scripted = ScriptedIO([])
+
+        XCTAssertThrowsError(try SpeakerReview.apply(
+            [("SPEAKER_0", .newProfile(name: "Dave")), ("SPEAKER_1", .newProfile(name: "Bad\nName"))],
+            to: .managed(id: id), io: scripted.io, color: .disabled
+        ))
+
+        XCTAssertFalse(scripted.output.contains("Confirmed"), scripted.output)
+        XCTAssertTrue(try SpeakerProfileStore.profiles().isEmpty, "the first decision's profile rolled back")
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: id), before)
+    }
+
+    func testPortableBatchStillReportsEachDecisionAsItCommits() throws {
+        let segments = [
+            segment("SPEAKER_0", 0, "First speaker saying quite a few words."),
+            segment("SPEAKER_1", 3, "Second speaker also saying quite a few words."),
+        ]
+        let url = try document(
+            "one", hash: "a", segments: segments,
+            embeddings: ["SPEAKER_0": [1, 0], "SPEAKER_1": [0, 1]]
+        )
+        let scripted = ScriptedIO([])
+
+        XCTAssertThrowsError(try SpeakerReview.apply(
+            [("SPEAKER_0", .newProfile(name: "Dave")), ("SPEAKER_1", .newProfile(name: "Bad\nName"))],
+            to: .portable(url), io: scripted.io, color: .disabled
+        ))
+
+        // Two stores without a joint transaction: the first profile example
+        // did commit, so it is reported.
+        XCTAssertTrue(scripted.output.contains("Confirmed SPEAKER_0 as Dave"), scripted.output)
+        XCTAssertEqual(try SpeakerProfileStore.profiles().map(\.name), ["Dave"])
     }
 
     // MARK: - Color gating
@@ -387,7 +469,7 @@ final class SpeakerReviewTests: XCTestCase {
         let scripted = ScriptedIO(["Dave"])
         var colored = session(scripted)
         colored.color = TerminalColor(enabled: true)
-        try colored.run(documents: [url])
+        try colored.run(documents: [.portable(url)])
         XCTAssertTrue(scripted.output.contains("\u{1B}["), "styled session output contains ANSI sequences")
     }
 }

@@ -594,7 +594,7 @@ struct PipelineRunner {
                 logger.log("Writing outputs to \(resolvedDir): \(outputFiles)")
             }
 
-            var savedCanonicalURL: URL?
+            var savedCanonicalID: UUID?
             var savedCanonicalCreatedAt: Date?
             if let canonical = try prepareCanonicalTranscript(
                 stateless: options.stateless,
@@ -615,8 +615,8 @@ struct PipelineRunner {
                 // batch work. Under --no-outputs the canonical transcript is the only
                 // product of the run, so the same failure is fatal instead.
                 do {
-                    let canonicalURL = try CanonicalTranscriptStore.save(canonical)
-                    savedCanonicalURL = canonicalURL
+                    let canonicalID = try CanonicalTranscriptStore.saveManaged(canonical)
+                    savedCanonicalID = canonicalID
                     savedCanonicalCreatedAt = canonical.createdAt
                     out = canonical.renderedOutput()
                     let suggested = canonical.speakerMatches.values.filter { $0.status == .suggested }.count
@@ -627,7 +627,10 @@ struct PipelineRunner {
                             item: item,
                             outputDir: eventOutputDir,
                             extra: [
-                                TranscribeEventField("path", .string(canonicalURL.path)),
+                                // Managed documents have no file; the ID is
+                                // what transcripts, inspect, and speakers
+                                // commands take.
+                                TranscribeEventField("id", .string(canonicalID.uuidString.lowercased())),
                                 TranscribeEventField("suggested_matches", .int(suggested)),
                                 TranscribeEventField("automatic_matches", .int(automatic)),
                             ]
@@ -681,8 +684,8 @@ struct PipelineRunner {
                 writeMs = elapsedMs
                 // Remember what was written so a later speaker confirmation
                 // can regenerate exactly these files.
-                if let savedCanonicalURL {
-                    SpeakerCommands.updateExportRecords(at: savedCanonicalURL, adding: records)
+                if let savedCanonicalID {
+                    SpeakerCommands.updateExportRecords(for: .managed(id: savedCanonicalID), adding: records)
                 }
                 activeReporter?.info(
                     "phase_done",

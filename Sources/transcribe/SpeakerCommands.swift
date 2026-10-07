@@ -49,45 +49,31 @@ struct SpeakerClearArguments: ParsableArguments {
 enum SpeakerCommands {
     private static let color = Terminal.stdout
 
-    /// The only fields the listing prints. Decoding this instead of the whole
-    /// canonical document keeps one damaged, truncated or newer-schema file
-    /// from hiding every other saved transcript, and avoids reading embedding
-    /// vectors and recomputing evidence IDs just to print two columns.
-    private struct TranscriptListing: Decodable {
-        let basename: String
-    }
-
     static func transcripts(_ args: [String]) throws {
         if args == ["--help"] || args == ["-h"] {
-            print("USAGE: transcribe transcripts\nLists saved canonical transcripts: title, ID, and path. Pass the ID (any unique prefix works) or the path to inspect, speakers review/confirm/clear, or export.")
+            print("USAGE: transcribe transcripts\nLists saved canonical transcripts: title and ID. Pass the ID (any unique prefix works) to inspect, speakers review/confirm/clear, or export; those commands also accept a path to a portable .transcript.json file.")
             return
         }
         try require(args.isEmpty, "Usage: transcribe transcripts")
-        let directory = try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts")
-        guard FileManager.default.fileExists(atPath: directory.path) else {
-            print("No saved canonical transcripts.")
-            return
-        }
-        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasSuffix(".transcript.json") }.sorted { $0.path < $1.path }
-        if files.isEmpty { print("No saved canonical transcripts.") }
-        for file in files {
-            // A file this command cannot read is reported in place so the rest
+        let listing = try CanonicalTranscriptStore.listing(order: .id)
+        if listing.isEmpty { print("No saved canonical transcripts.") }
+        for entry in listing {
+            let id = entry.id?.uuidString.lowercased() ?? safeText(entry.rawID)
+            // A row this command cannot use is reported in place so the rest
             // of the listing still reaches the user.
-            do {
-                let listing = try JSONDecoder().decode(TranscriptListing.self, from: Data(contentsOf: file))
-                let basename = listing.basename.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !basename.isEmpty else { throw CanonicalTranscriptStore.StoreError.invalidData("basename is empty") }
-                // The ID is the argument speaker commands accept, so it gets
-                // its own copyable column; a foreign filename has no ID.
-                let stem = String(file.lastPathComponent.dropLast(".transcript.json".count))
-                var columns = [Terminal.stdout.bold(safeText(listing.basename))]
-                if UUID(uuidString: stem) != nil { columns.append(stem.lowercased()) }
-                columns.append(Terminal.stdout.dim(file.path))
-                print(columns.joined(separator: "\t"))
-            } catch {
-                print("\(Terminal.stdout.red("(unreadable)"))\t\(Terminal.stdout.dim(file.path))\t\(safeText(errorText(error)))")
+            guard entry.id != nil else {
+                let reason = errorText(CanonicalTranscriptStore.StoreError.invalidData("stored document ID is not a UUID"))
+                print("\(Terminal.stdout.red("(unreadable)"))\t\(id)\t\(safeText(reason))")
+                continue
             }
+            guard !entry.basename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                let reason = errorText(CanonicalTranscriptStore.StoreError.invalidData("basename is empty"))
+                print("\(Terminal.stdout.red("(unreadable)"))\t\(id)\t\(safeText(reason))")
+                continue
+            }
+            // The ID is the argument speaker commands accept, so it gets its
+            // own copyable column.
+            print("\(Terminal.stdout.bold(safeText(entry.basename)))\t\(id)")
         }
     }
 
@@ -105,11 +91,10 @@ enum SpeakerCommands {
 
         <transcript> is a saved document's ID — the UUID printed by
         transcripts, inspect, and review; any unique prefix of at least four
-        characters works — or a path to its .transcript.json file. <SPEAKER_n>
-        is a local speaker ID in that transcript (SPEAKER_0, or just 0);
-        inspect and review list them, and an unknown ID prints the valid
-        ones. Saved transcript paths usually contain spaces (Application
-        Support), so quote them in the shell.
+        characters works — or a path to a portable .transcript.json file,
+        which is edited in place. <SPEAKER_n> is a local speaker ID in that
+        transcript (SPEAKER_0, or just 0); inspect and review list them, and
+        an unknown ID prints the valid ones. Quote paths containing spaces.
 
         review, confirm, and clear take --[no-]refresh-exports (default on).
 
@@ -143,7 +128,7 @@ enum SpeakerCommands {
                transcribe export [transcript] --refresh
 
         <transcript> is a saved document's ID (from transcribe transcripts;
-        any unique prefix works) or a path to its .transcript.json file.
+        any unique prefix works) or a path to a portable .transcript.json file.
 
         Renders a saved canonical transcript without audio, models, or downloads.
         Saved confirmed and automatic names are used; suggestions remain local IDs.
@@ -176,66 +161,9 @@ enum SpeakerCommands {
         case "review":
             try review(parse(SpeakerReviewArguments.self, args), arguments: args)
         case "confirm":
-            let options = try parse(SpeakerConfirmArguments.self, args)
-            try require((options.name != nil) != (options.profile != nil), "Use exactly one of --name or --profile.")
-            let speaker = localSpeakerID(options.speaker)
-            let url = try transcriptURL(options.transcript)
-            try withDocumentLock(at: url) {
-                var document = try loadTranscript(at: url, arguments: args)
-                guard let embedding = document.output.speakerEmbeddings[speaker] else {
-                    throw unknownSpeaker(speaker, in: document)
-                }
-                let name: String
-                if let profileID = options.profile {
-                    guard let profile = try SpeakerProfileStore.profiles().first(where: { $0.id == profileID }) else {
-                        throw usage("Unknown profile '\(profileID)'. Run transcribe speakers list.")
-                    }
-                    name = profile.name
-                } else {
-                    name = options.name!
-                }
-                let match = try SpeakerProfileStore.confirm(
-                    name: name, profileID: options.profile, transcriptID: document.evidenceID,
-                    speakerID: speaker, embedding: embedding, modelID: document.embeddingModelID,
-                    sourceHashes: document.sourceHashes
-                )
-                document.speakerMatches[speaker] = match
-                document.clearDismissed(speaker)
-                do {
-                    _ = try CanonicalTranscriptStore.save(document, to: url)
-                } catch {
-                    throw TranscribeError(
-                        message: "Profile was confirmed, but the transcript could not be saved: \(error). Retry confirmation with --profile \(match.profileID); it will not duplicate the example.",
-                        exitCode: .outputWrite
-                    )
-                }
-                if ExportRefresh.enabled(flag: options.refreshExports) {
-                    print(color.green("Confirmed \(speaker) as \(safeText(match.name)) (\(match.profileID))."))
-                    ExportRefresh.run(document: document, at: url, color: color)
-                } else {
-                    print(color.green("Confirmed \(speaker) as \(safeText(match.name)) (\(match.profileID)).") + " Export again to update rendered files.")
-                }
-            }
+            try confirm(parse(SpeakerConfirmArguments.self, args), arguments: args)
         case "clear":
-            let options = try parse(SpeakerClearArguments.self, args)
-            let speaker = localSpeakerID(options.speaker)
-            let url = try transcriptURL(options.transcript)
-            try withDocumentLock(at: url) {
-                var document = try loadTranscript(at: url, arguments: args)
-                guard document.output.speakerEmbeddings[speaker] != nil else {
-                    throw unknownSpeaker(speaker, in: document)
-                }
-                // Remove any confirmed example, including a confirmation whose
-                // document save previously failed.
-                try SpeakerProfileStore.clearExamples(transcriptID: document.evidenceID, speakerID: speaker)
-                document.speakerMatches.removeValue(forKey: speaker)
-                document.clearDismissed(speaker)
-                _ = try CanonicalTranscriptStore.save(document, to: url)
-                print(color.green("Cleared \(speaker).") + " Future explicit review can suggest matches again.")
-                if ExportRefresh.enabled(flag: options.refreshExports) {
-                    ExportRefresh.run(document: document, at: url, color: color)
-                }
-            }
+            try clear(parse(SpeakerClearArguments.self, args), arguments: args)
         case "rename":
             try require(args.count == 2, "Usage: transcribe speakers rename <profile-id> <name>")
             try SpeakerProfileStore.rename(profileID: args[0], name: args[1])
@@ -248,6 +176,123 @@ enum SpeakerCommands {
             throw usage("Unknown speakers command '\(command)'. Run transcribe speakers --help.")
         }
     }
+
+    // MARK: - Confirm and clear
+
+    private static func confirm(_ options: SpeakerConfirmArguments, arguments args: [String]) throws {
+        try require((options.name != nil) != (options.profile != nil), "Use exactly one of --name or --profile.")
+        let speaker = localSpeakerID(options.speaker)
+        let ref = try transcriptRef(options.transcript, arguments: args)
+        let refresh = ExportRefresh.enabled(flag: options.refreshExports)
+        func report(_ match: SpeakerMatch) {
+            let line = color.green("Confirmed \(speaker) as \(safeText(match.name)) (\(match.profileID)).")
+            print(refresh ? line : line + " Export again to update rendered files.")
+        }
+        switch ref {
+        case .portable(let url):
+            // A portable file and the profile rows are two stores with no
+            // joint transaction, so a failed file save leaves the profile
+            // example committed; the message says how to finish.
+            try withDocumentLock(at: url) {
+                var document = try loadTranscript(ref, arguments: args)
+                let match = try confirmSpeaker(speaker, in: &document, options: options)
+                do {
+                    try CanonicalTranscriptStore.save(document, to: ref)
+                } catch {
+                    throw TranscribeError(
+                        message: "Profile was confirmed, but the transcript could not be saved: \(error). Retry confirmation with --profile \(match.profileID); it will not duplicate the example.",
+                        exitCode: .outputWrite
+                    )
+                }
+                report(match)
+                if refresh { ExportRefresh.run(document: document, at: ref, color: color) }
+            }
+        case .managed(let id):
+            // Profile and document rows commit together or not at all. A
+            // save failure still deserves the output-write exit code, not a
+            // generic failure; there is no partial state to recover from.
+            let match: SpeakerMatch
+            do {
+                match = try inWriteTransaction {
+                    var document = try loadTranscript(ref, arguments: args)
+                    let match = try confirmSpeaker(speaker, in: &document, options: options)
+                    try CanonicalTranscriptStore.save(document, to: ref)
+                    return match
+                }
+            } catch let error as StateDatabaseError {
+                throw TranscribeError(
+                    message: "Speaker was not confirmed; nothing was saved: \(error.localizedDescription)",
+                    exitCode: .outputWrite
+                )
+            } catch let error as CanonicalTranscriptStore.StoreError {
+                throw TranscribeError(
+                    message: "Speaker was not confirmed; nothing was saved: \(error.localizedDescription)",
+                    exitCode: .outputWrite
+                )
+            }
+            report(match)
+            if refresh { refreshManagedExports(id: id, color: color) }
+        }
+    }
+
+    private static func confirmSpeaker(
+        _ speaker: String, in document: inout CanonicalTranscript, options: SpeakerConfirmArguments
+    ) throws -> SpeakerMatch {
+        guard let embedding = document.output.speakerEmbeddings[speaker] else {
+            throw unknownSpeaker(speaker, in: document)
+        }
+        let name: String
+        if let profileID = options.profile {
+            guard let profile = try SpeakerProfileStore.profiles().first(where: { $0.id == profileID }) else {
+                throw usage("Unknown profile '\(profileID)'. Run transcribe speakers list.")
+            }
+            name = profile.name
+        } else {
+            name = options.name!
+        }
+        let match = try SpeakerProfileStore.confirm(
+            name: name, profileID: options.profile, transcriptID: document.evidenceID,
+            speakerID: speaker, embedding: embedding, modelID: document.embeddingModelID,
+            sourceHashes: document.sourceHashes
+        )
+        document.speakerMatches[speaker] = match
+        document.clearDismissed(speaker)
+        return match
+    }
+
+    private static func clear(_ options: SpeakerClearArguments, arguments args: [String]) throws {
+        let speaker = localSpeakerID(options.speaker)
+        let ref = try transcriptRef(options.transcript, arguments: args)
+        let refresh = ExportRefresh.enabled(flag: options.refreshExports)
+        func clearSpeaker() throws -> CanonicalTranscript {
+            var document = try loadTranscript(ref, arguments: args)
+            guard document.output.speakerEmbeddings[speaker] != nil else {
+                throw unknownSpeaker(speaker, in: document)
+            }
+            // Remove any confirmed example, including one left behind by a
+            // portable confirmation whose document save failed.
+            try SpeakerProfileStore.clearExamples(transcriptID: document.evidenceID, speakerID: speaker)
+            document.speakerMatches.removeValue(forKey: speaker)
+            document.clearDismissed(speaker)
+            try CanonicalTranscriptStore.save(document, to: ref)
+            return document
+        }
+        let cleared = color.green("Cleared \(speaker).") + " Future explicit review can suggest matches again."
+        switch ref {
+        case .portable(let url):
+            try withDocumentLock(at: url) {
+                let document = try clearSpeaker()
+                print(cleared)
+                if refresh { ExportRefresh.run(document: document, at: ref, color: color) }
+            }
+        case .managed(let id):
+            _ = try inWriteTransaction { try clearSpeaker() }
+            print(cleared)
+            if refresh { refreshManagedExports(id: id, color: color) }
+        }
+    }
+
+    // MARK: - Export
 
     static func export(_ args: [String]) throws {
         if args == ["--help"] || args == ["-h"] {
@@ -274,31 +319,33 @@ enum SpeakerCommands {
             )
         }
         let outputDir = options.outputDir ?? "."
-        let url = try transcriptURL(transcript)
-        // Load, render, write, and record under one document lock, so a
-        // concurrent speaker change cannot slip between the render and the
-        // record merge and leave a record whose hash describes files rendered
-        // from an older document.
-        try withDocumentLock(at: url) {
-            var document = try loadTranscript(at: url, arguments: args)
+        let ref = try transcriptRef(transcript, arguments: args)
+        // Load, render, write, and record under one lock, so a concurrent
+        // speaker change cannot slip between the render and the record merge
+        // and leave a record whose hash describes files rendered from an
+        // older document.
+        try withRenderingLock(for: ref) {
+            let document = try loadTranscript(ref, arguments: args)
             let formats = parseOutputFormats(options.format ?? "txt,json")
             try require(!formats.isEmpty && formats.allSatisfy(validOutputFormats.contains), "Unsupported or empty output format list.")
             let basename = options.outputPrefix ?? document.basename
-            let inputPath = url.standardizedFileURL.resolvingSymlinksInPath().path
-            let inputIdentity = fileIdentity(inputPath)
             let destinations = outputPaths(
                 outputDir: outputDir, basename: basename,
                 formats: formats, writeTxtFile: formats.contains("txt")
             )
-            // String equality alone misses a destination that names the input by
-            // another spelling: a case-flipped prefix on a case-insensitive
-            // volume, or a symlink. Compare on-disk identity whenever the
-            // destination already exists, since only an existing file can be
-            // replaced by the export.
-            for destination in destinations {
-                let sameFile = destination == inputPath
-                    || (inputIdentity != nil && fileIdentity(destination) == inputIdentity)
-                try require(!sameFile, "An export cannot replace its canonical transcript. Choose another output prefix or directory.")
+            if case .portable(let url) = ref {
+                let inputPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+                let inputIdentity = fileIdentity(inputPath)
+                // String equality alone misses a destination that names the
+                // input by another spelling: a case-flipped prefix on a
+                // case-insensitive volume, or a symlink. Compare on-disk
+                // identity whenever the destination already exists, since
+                // only an existing file can be replaced by the export.
+                for destination in destinations {
+                    let sameFile = destination == inputPath
+                        || (inputIdentity != nil && fileIdentity(destination) == inputIdentity)
+                    try require(!sameFile, "An export cannot replace its canonical transcript. Choose another output prefix or directory.")
+                }
             }
             let records = try writeOutputs(
                 output: document.renderedOutput(), audioPath: document.audioPath,
@@ -309,43 +356,26 @@ enum SpeakerCommands {
                 createdAt: document.createdAt
             )
             print(color.green("Exported \(formats.joined(separator: ",")) to \(resolvedOutputDir(outputDir))."))
-            document.exports = merging(records, into: document.exports)
             do {
-                _ = try CanonicalTranscriptStore.save(document, to: url)
+                try CanonicalTranscriptStore.mergeExports(records, into: ref)
             } catch {
-                emitWarning("Export records not saved to \(url.path): \(error.localizedDescription). Speaker changes will not auto-refresh these files until a later export records them.")
+                emitWarning("Export records not saved to \(ref.displayName): \(error.localizedDescription). Speaker changes will not auto-refresh these files until a later export records them.")
             }
         }
-    }
-
-    /// Records merge by path: writing the same destination again replaces its
-    /// entry, a new destination adds one.
-    private static func merging(_ records: [ExportRecord], into existing: [ExportRecord]?) -> [ExportRecord] {
-        var merged = existing ?? []
-        for record in records {
-            if let index = merged.firstIndex(where: { $0.path == record.path }) {
-                merged[index] = record
-            } else {
-                merged.append(record)
-            }
-        }
-        return merged
     }
 
     /// Remembers what a pipeline run just wrote, so later speaker changes can
-    /// regenerate the same files. The document is reloaded under its lock —
-    /// the render ran unlocked. Failure is a warning: the files the user
-    /// asked for were written.
-    static func updateExportRecords(at url: URL, adding records: [ExportRecord]) {
+    /// regenerate the same files. The merge reads the stored records under
+    /// the document's lock — the render ran unlocked. Failure is a warning:
+    /// the files the user asked for were written.
+    static func updateExportRecords(for ref: TranscriptRef, adding records: [ExportRecord]) {
         guard !records.isEmpty else { return }
         do {
-            try withDocumentLock(at: url) {
-                var document = try CanonicalTranscriptStore.load(from: url)
-                document.exports = merging(records, into: document.exports)
-                _ = try CanonicalTranscriptStore.save(document, to: url)
+            try withRenderingLock(for: ref) {
+                try CanonicalTranscriptStore.mergeExports(records, into: ref)
             }
         } catch {
-            emitWarning("Export records not saved to \(url.path): \(error.localizedDescription). Speaker changes will not auto-refresh these files until a later export records them.")
+            emitWarning("Export records not saved to \(ref.displayName): \(error.localizedDescription). Speaker changes will not auto-refresh these files until a later export records them.")
         }
     }
 
@@ -354,39 +384,64 @@ enum SpeakerCommands {
     /// whose recorded exports are all current print nothing.
     private static func refreshRecordedExports(transcript: String?, arguments: [String]) throws {
         if let transcript {
-            let url = try transcriptURL(transcript)
-            try withDocumentLock(at: url) {
-                let document = try loadTranscript(at: url, arguments: arguments)
-                ExportRefresh.run(document: document, at: url, color: color)
+            let ref = try transcriptRef(transcript, arguments: arguments)
+            try withRenderingLock(for: ref) {
+                let document = try loadTranscript(ref, arguments: arguments)
+                ExportRefresh.run(document: document, at: ref, color: color)
             }
             return
         }
-        let urls = try savedTranscriptURLs()
-        guard !urls.isEmpty else {
+        let listing = try CanonicalTranscriptStore.listing(order: .recentlyUpdated)
+        guard !listing.isEmpty else {
             print("No saved canonical transcripts.")
             return
         }
-        for url in urls {
+        for entry in listing {
+            guard let id = entry.id else {
+                print("\(color.red("(unreadable)"))\t\(safeText(entry.rawID))\t\(safeText(errorText(CanonicalTranscriptStore.StoreError.invalidData("stored document ID is not a UUID"))))")
+                continue
+            }
+            let ref = TranscriptRef.managed(id: id)
             do {
-                try withDocumentLock(at: url) {
-                    let document = try CanonicalTranscriptStore.load(from: url)
-                    ExportRefresh.run(document: document, at: url, color: color)
+                try withRenderingLock(for: ref) {
+                    let document = try CanonicalTranscriptStore.load(ref)
+                    ExportRefresh.run(document: document, at: ref, color: color)
                 }
             } catch {
-                print("\(color.red("(unreadable)"))\t\(color.dim(url.path))\t\(safeText(errorText(error)))")
+                print("\(color.red("(unreadable)"))\t\(ref.displayName)\t\(safeText(errorText(error)))")
             }
         }
     }
 
+    /// Regenerates a managed document's recorded exports after a committed
+    /// speaker change, under its render lock and from a fresh load, so the
+    /// rendered names are the committed ones even if another change landed
+    /// meanwhile. Like the refresh itself, failure is only a warning.
+    static func refreshManagedExports(
+        id: UUID, io: InteractiveIO = .standard, color: TerminalColor = Terminal.stdout
+    ) {
+        let ref = TranscriptRef.managed(id: id)
+        do {
+            try withRenderingLock(for: ref) {
+                let document = try CanonicalTranscriptStore.load(ref)
+                ExportRefresh.run(document: document, at: ref, io: io, color: color)
+            }
+        } catch {
+            emitWarning("Exports not refreshed for \(ref.displayName): \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Inspect and review
+
     static func inspect(_ args: [String]) throws {
         if args == ["--help"] || args == ["-h"] {
-            print("USAGE: transcribe inspect <transcript>\nShows metadata and saved assignments without printing voice embeddings. <transcript> is a saved document ID (from transcribe transcripts) or a path.")
+            print("USAGE: transcribe inspect <transcript>\nShows metadata and saved assignments without printing voice embeddings. <transcript> is a saved document ID (from transcribe transcripts) or a path to a portable .transcript.json file.")
             return
         }
         try require(args.count == 1, withSplitPathHint("Usage: transcribe inspect <transcript>", args))
-        let document = try loadTranscript(at: try transcriptURL(args[0]), arguments: args)
-        print("Transcript: \(document.id)\nModel: \(safeText(document.model))\nDuration: \(document.output.durationSeconds)s\nSegments: \(document.output.segments.count)")
-        printReview(document)
+        let summary = try loadSummary(transcriptRef(args[0], arguments: args), arguments: args)
+        print("Transcript: \(summary.id)\nModel: \(safeText(summary.model))\nDuration: \(summary.durationSeconds)s\nSegments: \(summary.segmentCount)")
+        printReview(summary)
     }
 
     /// Routes `speakers review`. On a terminal this is an interactive
@@ -399,18 +454,9 @@ enum SpeakerCommands {
             guard let transcript = options.transcript else {
                 throw usage("--apply needs a transcript path; run transcribe transcripts to list them.")
             }
-            let url = try transcriptURL(transcript)
-            try withDocumentLock(at: url) {
-                let document = try refreshed(loadTranscript(at: url, arguments: arguments))
-                printReview(document)
-                _ = try CanonicalTranscriptStore.save(document, to: url)
-                if ExportRefresh.enabled(flag: options.refreshExports) {
-                    print(color.green("Saved assignments to \(url.path)."))
-                    ExportRefresh.run(document: document, at: url, color: color)
-                } else {
-                    print(color.green("Saved assignments to \(url.path).") + " Export again to update rendered files.")
-                }
-            }
+            try applyRefreshedMatches(
+                transcriptRef(transcript, arguments: arguments), options: options, arguments: arguments
+            )
             return
         }
         let interactive = options.interactive ?? Terminal.isInteractive
@@ -419,44 +465,53 @@ enum SpeakerCommands {
             refreshExports: ExportRefresh.enabled(flag: options.refreshExports)
         )
         if let transcript = options.transcript {
-            let url = try transcriptURL(transcript)
+            let ref = try transcriptRef(transcript, arguments: arguments)
+            let summary = try refreshed(loadSummary(ref, arguments: arguments))
             guard interactive else {
-                let document = try refreshed(loadTranscript(at: url, arguments: arguments))
-                printReview(document)
-                print(color.dim("Transcript ID: \(document.id.uuidString.lowercased())"))
+                printReview(summary)
+                print(color.dim("Transcript ID: \(summary.id.uuidString.lowercased())"))
                 return
             }
-            let document = try refreshed(loadTranscript(at: url, arguments: arguments))
-            guard session.needsAttention(document) else {
-                print(idleMessage(for: document, all: options.all))
+            guard session.needsAttention(summary) else {
+                print(idleMessage(for: summary, all: options.all))
                 return
             }
-            try session.run(documents: [url])
+            try session.run(documents: [ref])
             return
         }
-        let urls = try savedTranscriptURLs()
-        guard !urls.isEmpty else {
+        let listing = try CanonicalTranscriptStore.listing(order: .recentlyUpdated)
+        guard !listing.isEmpty else {
             print("No saved canonical transcripts.")
             return
         }
         guard interactive else {
-            for url in urls {
+            for entry in listing {
+                let id = entry.id?.uuidString.lowercased() ?? safeText(entry.rawID)
                 do {
-                    let document = try refreshedDocument(at: url)
-                    print("\(color.bold(safeText(document.basename)))\t\(document.id.uuidString.lowercased())\t\(color.dim(url.path))")
-                    printReview(document)
+                    guard let uuid = entry.id else {
+                        throw CanonicalTranscriptStore.StoreError.invalidData("stored document ID is not a UUID")
+                    }
+                    let summary = try refreshed(CanonicalTranscriptStore.summary(id: uuid))
+                    print("\(color.bold(safeText(summary.basename)))\t\(id)")
+                    printReview(summary)
                 } catch {
-                    print("\(color.red("(unreadable)"))\t\(color.dim(url.path))\t\(safeText(errorText(error)))")
+                    print("\(color.red("(unreadable)"))\t\(id)\t\(safeText(errorText(error)))")
                 }
             }
             return
         }
-        var reviewable: [URL] = []
-        for url in urls {
+        var reviewable: [TranscriptRef] = []
+        for entry in listing {
+            let id = entry.id?.uuidString.lowercased() ?? safeText(entry.rawID)
             do {
-                if session.needsAttention(try refreshedDocument(at: url)) { reviewable.append(url) }
+                guard let uuid = entry.id else {
+                    throw CanonicalTranscriptStore.StoreError.invalidData("stored document ID is not a UUID")
+                }
+                if session.needsAttention(try refreshed(CanonicalTranscriptStore.summary(id: uuid))) {
+                    reviewable.append(.managed(id: uuid))
+                }
             } catch {
-                print("\(color.red("(unreadable)"))\t\(color.dim(url.path))\t\(safeText(errorText(error)))")
+                print("\(color.red("(unreadable)"))\t\(id)\t\(safeText(errorText(error)))")
             }
         }
         guard !reviewable.isEmpty else {
@@ -468,49 +523,85 @@ enum SpeakerCommands {
         try session.run(documents: reviewable)
     }
 
-    private static func idleMessage(for document: CanonicalTranscript, all: Bool) -> String {
-        if document.output.speakerEmbeddings.isEmpty {
+    /// `review --apply`: saves refreshed suggestions and automatic matches.
+    private static func applyRefreshedMatches(
+        _ ref: TranscriptRef, options: SpeakerReviewArguments, arguments: [String]
+    ) throws {
+        let refresh = ExportRefresh.enabled(flag: options.refreshExports)
+        func report(_ saved: String) {
+            print(refresh ? saved : saved + " Export again to update rendered files.")
+        }
+        switch ref {
+        case .portable(let url):
+            try withDocumentLock(at: url) {
+                let document = try refreshed(loadTranscript(ref, arguments: arguments))
+                printReview(TranscriptSummary(document))
+                try CanonicalTranscriptStore.save(document, to: ref)
+                report(color.green("Saved assignments to \(url.path)."))
+                if refresh { ExportRefresh.run(document: document, at: ref, color: color) }
+            }
+        case .managed(let id):
+            let document = try inWriteTransaction {
+                let document = try refreshed(loadTranscript(ref, arguments: arguments))
+                try CanonicalTranscriptStore.save(document, to: ref)
+                return document
+            }
+            printReview(TranscriptSummary(document))
+            report(color.green("Saved assignments for \(ref.displayName)."))
+            if refresh { refreshManagedExports(id: id, color: color) }
+        }
+    }
+
+    private static func idleMessage(for summary: TranscriptSummary, all: Bool) -> String {
+        if summary.speakerEmbeddings.isEmpty {
             return "No diarized speakers in this transcript."
         }
         if all { return "No diarized speakers to revisit in this transcript." }
-        return (document.dismissedSpeakers?.isEmpty == false)
+        return (summary.dismissedSpeakers?.isEmpty == false)
             ? "All speakers are confirmed or marked unidentifiable; run with --all to revisit them."
             : "All speakers are confirmed; run with --all to revisit them."
-    }
-
-    /// Saved canonical documents, newest first, so an all-documents review
-    /// reaches recent recordings before the backlog.
-    private static func savedTranscriptURLs() throws -> [URL] {
-        let directory = try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts")
-        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
-        let key = URLResourceKey.contentModificationDateKey
-        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [key])
-            .filter { $0.lastPathComponent.hasSuffix(".transcript.json") }
-        func modified(_ url: URL) -> Date {
-            (try? url.resourceValues(forKeys: [key]).contentModificationDate) ?? .distantPast
-        }
-        return files.sorted { (modified($0), $0.path) > (modified($1), $1.path) }
     }
 
     /// Loads a document and returns it with its speaker matches recomputed
     /// against the current profile store. The result is not saved; only
     /// review --apply writes it back.
-    static func refreshedDocument(at url: URL) throws -> CanonicalTranscript {
-        try refreshed(CanonicalTranscriptStore.load(from: url))
+    static func refreshedDocument(_ ref: TranscriptRef) throws -> CanonicalTranscript {
+        try refreshed(CanonicalTranscriptStore.load(ref))
     }
 
-    /// `refreshedDocument(at:)` for a document the caller already loaded.
+    /// `refreshedDocument(_:)` for a document the caller already loaded.
     private static func refreshed(_ loaded: CanonicalTranscript) throws -> CanonicalTranscript {
         var document = loaded
+        document.speakerMatches = try refreshedMatches(
+            embeddings: document.output.speakerEmbeddings, modelID: document.embeddingModelID,
+            evidenceID: document.evidenceID, sourceHashes: document.sourceHashes,
+            stored: document.speakerMatches, dismissed: document.dismissedSpeakers
+        )
+        return document
+    }
+
+    /// The same refresh over a payload-free summary.
+    private static func refreshed(_ loaded: TranscriptSummary) throws -> TranscriptSummary {
+        var summary = loaded
+        summary.speakerMatches = try refreshedMatches(
+            embeddings: summary.speakerEmbeddings, modelID: summary.embeddingModelID,
+            evidenceID: summary.evidenceID, sourceHashes: summary.sourceHashes,
+            stored: summary.speakerMatches, dismissed: summary.dismissedSpeakers
+        )
+        return summary
+    }
+
+    private static func refreshedMatches(
+        embeddings: [String: [Float]], modelID: String, evidenceID: String, sourceHashes: [String],
+        stored: [String: SpeakerMatch], dismissed: [String]?
+    ) throws -> [String: SpeakerMatch] {
         let matches = try SpeakerProfileStore.matches(
-            embeddings: document.output.speakerEmbeddings,
-            modelID: document.embeddingModelID,
-            excludingTranscriptID: document.evidenceID,
-            excludingSourceHashes: document.sourceHashes
+            embeddings: embeddings, modelID: modelID,
+            excludingTranscriptID: evidenceID, excludingSourceHashes: sourceHashes
         )
         let profiles = try SpeakerProfileStore.profiles()
         var refreshed = matches
-        for (speaker, existing) in document.speakerMatches where existing.status == .confirmed {
+        for (speaker, existing) in stored where existing.status == .confirmed {
             if let profile = profiles.first(where: { $0.id == existing.profileID }) {
                 refreshed[speaker] = SpeakerMatch(
                     profileID: existing.profileID, name: profile.name,
@@ -526,24 +617,89 @@ enum SpeakerCommands {
         // A dismissed speaker was decided to be unidentifiable, so a fresh
         // suggestion or automatic match must not resurrect it; an explicit
         // confirmation (which clears the dismissal) still wins defensively.
-        for speaker in document.dismissedSpeakers ?? [] where refreshed[speaker]?.status != .confirmed {
+        for speaker in dismissed ?? [] where refreshed[speaker]?.status != .confirmed {
             refreshed.removeValue(forKey: speaker)
         }
-        document.speakerMatches = SpeakerProfileStore.demoteConflictingAutomaticMatches(refreshed)
-        return document
+        return SpeakerProfileStore.demoteConflictingAutomaticMatches(refreshed)
     }
 
-    /// Serializes a read-modify-write of one canonical document. Speaker
+    private static func printReview(_ summary: TranscriptSummary) {
+        let speakers = Set(summary.segmentSpeakers).union(summary.speakerEmbeddings.keys).sorted()
+        if speakers.isEmpty { print("No diarized speakers in this transcript.") }
+        for speaker in speakers {
+            if let match = summary.speakerMatches[speaker] {
+                let distance = String(format: "%.3f", match.distance)
+                let status: String
+                switch match.status {
+                case .confirmed: status = color.green(match.status.rawValue)
+                case .automatic: status = color.cyan(match.status.rawValue)
+                case .suggested: status = color.yellow(match.status.rawValue)
+                }
+                print("\(safeText(speaker))\t\(status)\t\(color.bold(safeText(match.name)))\tprofile=\(match.profileID)\tdistance=\(distance)\texamples=\(match.confirmedExampleCount)")
+            } else if summary.isDismissed(speaker) {
+                print("\(safeText(speaker))\t\(color.dim("dismissed"))")
+            } else {
+                print("\(safeText(speaker))\t\(color.red("unidentified"))")
+            }
+        }
+    }
+
+    // MARK: - Locking and transactions
+
+    /// One write transaction on the shared state database. A managed
+    /// document edit runs its document and profile changes inside it, so
+    /// they commit together.
+    private static func inWriteTransaction<T>(_ body: () throws -> T) throws -> T {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) { try body() }
+        }
+    }
+
+    /// The lock that serializes rendering a document's exports with
+    /// recording them: the file lock of a portable document, the render lock
+    /// of a managed one.
+    static func withRenderingLock<T>(for ref: TranscriptRef, _ body: () throws -> T) throws -> T {
+        switch ref {
+        case .portable(let url): return try withDocumentLock(at: url, body)
+        case .managed(let id): return try withRenderLock(id: id, body)
+        }
+    }
+
+    /// Serializes a read-modify-write of one portable document. Speaker
     /// commands load, edit and save the same file, so two concurrent runs
     /// would otherwise both start from the same content and the later save
     /// would silently drop the earlier one's assignment. The lock file sits
-    /// beside the document; the profile store takes its own lock inside this
-    /// one, so document-then-profile is the single lock order in this tool.
+    /// beside the document and is taken before any database transaction
+    /// (file lock outer, transaction inner).
     static func withDocumentLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
         // A path with no document needs no lock; running the body unlocked
         // reports the missing file instead of leaving a lock beside a typo.
         guard FileManager.default.fileExists(atPath: url.path) else { return try body() }
-        let lock = url.appendingPathExtension("lock")
+        return try withFileLock(at: url.appendingPathExtension("lock"), body)
+    }
+
+    /// Serializes export rendering and record commit for one managed
+    /// document. Refresh replaces the whole record list and treats any hash
+    /// mismatch as a local edit, so two unserialized refreshes could leave a
+    /// fresh export marked "locally modified" forever. Database transactions
+    /// do not cover rendering, hence this advisory lock in
+    /// `<state>/locks/`. Plain speaker-state edits do not take it.
+    static func withRenderLock<T>(id: UUID, _ body: () throws -> T) throws -> T {
+        let directory = try StatePaths.locksDirectoryURL()
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            } catch {
+                // Another process may have created it first.
+                guard FileManager.default.fileExists(atPath: directory.path) else { throw error }
+            }
+            try tightenPermissions(ofPath: directory.path, to: privateDirectoryMode)
+        }
+        let lock = directory.appendingPathComponent("\(id.uuidString.lowercased()).lock", isDirectory: false)
+        return try withFileLock(at: lock, body)
+    }
+
+    private static func withFileLock<T>(at lock: URL, _ body: () throws -> T) throws -> T {
         let fd = open(lock.path, O_CREAT | O_RDWR | O_NOFOLLOW, privateFileMode)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(fd) }
@@ -553,62 +709,53 @@ enum SpeakerCommands {
         return try body()
     }
 
-    private static func printReview(_ document: CanonicalTranscript) {
-        let speakers = Set(document.output.segments.compactMap(\.speaker))
-            .union(document.output.speakerEmbeddings.keys).sorted()
-        if speakers.isEmpty { print("No diarized speakers in this transcript.") }
-        for speaker in speakers {
-            if let match = document.speakerMatches[speaker] {
-                let distance = String(format: "%.3f", match.distance)
-                let status: String
-                switch match.status {
-                case .confirmed: status = color.green(match.status.rawValue)
-                case .automatic: status = color.cyan(match.status.rawValue)
-                case .suggested: status = color.yellow(match.status.rawValue)
-                }
-                print("\(safeText(speaker))\t\(status)\t\(color.bold(safeText(match.name)))\tprofile=\(match.profileID)\tdistance=\(distance)\texamples=\(match.confirmedExampleCount)")
-            } else if document.isDismissed(speaker) {
-                print("\(safeText(speaker))\t\(color.dim("dismissed"))")
-            } else {
-                print("\(safeText(speaker))\t\(color.red("unidentified"))")
-            }
-        }
-    }
+    // MARK: - Transcript arguments
 
-    private static func transcriptURL(_ reference: String) throws -> URL {
-        // Use the same target for the sidecar lock, read, and atomic replace.
+    /// Resolves a command-line transcript argument. A path to an existing
+    /// file is a portable document, used in place. Otherwise a value shaped
+    /// like a saved-document ID (the UUID printed by transcripts, inspect,
+    /// and review, or a unique prefix of one) resolves against the stored
+    /// documents. Managed documents have no file, so any other path is an
+    /// error that points at the ID form — including the 2.x managed paths
+    /// scripts may still hold.
+    private static func transcriptRef(_ reference: String, arguments: [String]) throws -> TranscriptRef {
+        // Use the same target for a portable file's sidecar lock, read, and
+        // atomic replace.
         // Renaming over an unresolved symlink would detach it from its target.
         let url = URL(fileURLWithPath: (reference as NSString).expandingTildeInPath)
             .resolvingSymlinksInPath()
-        if FileManager.default.fileExists(atPath: url.path) { return url }
-        // Not a file: a value shaped like a saved-document ID (the UUID
-        // printed by transcripts, inspect, and review, or a unique prefix of
-        // one) resolves against the managed store, so commands do not demand
-        // the full Application Support path.
-        guard let candidate = transcriptIDCandidate(reference) else { return url }
-        let suffix = ".transcript.json"
-        let matches = try savedTranscriptURLs()
-            .filter { $0.lastPathComponent.dropLast(suffix.count).hasPrefix(candidate) }
-            .sorted { $0.path < $1.path }
+        if FileManager.default.fileExists(atPath: url.path) { return .portable(url) }
+        guard let candidate = transcriptIDCandidate(reference) else {
+            throw TranscribeError(
+                message: withSplitPathHint(
+                    "No transcript at \(safeText(url.path)). Run transcribe transcripts to list saved documents. Saved transcripts are addressed by ID (or a unique prefix of at least four characters), not by a path.",
+                    arguments
+                ),
+                exitCode: .inputFile
+            )
+        }
+        let matches = try CanonicalTranscriptStore.documentIDs(withPrefix: candidate)
         switch matches.count {
         case 1:
-            return matches[0]
+            guard let id = UUID(uuidString: matches[0]) else {
+                throw CanonicalTranscriptStore.StoreError.invalidData("stored document ID \(matches[0]) is not a UUID")
+            }
+            return .managed(id: id)
         case 0:
             throw TranscribeError(
                 message: "No transcript at \(safeText(reference)) and no saved transcript ID starts with it. Run transcribe transcripts to list saved documents.",
                 exitCode: .inputFile
             )
         default:
-            let ids = matches.map { String($0.lastPathComponent.dropLast(suffix.count)) }
             throw usage(
-                "Transcript ID '\(safeText(reference))' is ambiguous: \(ids.joined(separator: ", ")). Give more characters or the full ID."
+                "Transcript ID '\(safeText(reference))' is ambiguous: \(matches.joined(separator: ", ")). Give more characters or the full ID."
             )
         }
     }
 
     /// The lowercased saved-document ID an argument may name: hex digits and
     /// dashes only, at least four characters so a short filename cannot match
-    /// by accident, optionally carrying the listing's .transcript.json
+    /// by accident, optionally carrying the 2.x listing's .transcript.json
     /// suffix. Anything else is treated as a path.
     private static func transcriptIDCandidate(_ reference: String) -> String? {
         var text = reference.trimmingCharacters(in: .whitespaces).lowercased()
@@ -620,8 +767,9 @@ enum SpeakerCommands {
         return text
     }
 
-    /// One-line reason for a file that could not be listed. A decoding error's
-    /// localizedDescription drops the field that failed, so name it here.
+    /// One-line reason for a document that could not be listed or read. A
+    /// decoding error's localizedDescription drops the field that failed, so
+    /// name it here.
     private static func errorText(_ error: Error) -> String {
         switch error {
         case let error as DecodingError:
@@ -636,6 +784,8 @@ enum SpeakerCommands {
             @unknown default:
                 return error.localizedDescription
             }
+        case let error as TranscribeError:
+            return error.message
         case let error as LocalizedError:
             return error.errorDescription ?? error.localizedDescription
         default:
@@ -643,26 +793,47 @@ enum SpeakerCommands {
         }
     }
 
-    /// Loads a document named on the command line. A missing file or one that
-    /// does not decode is reported with its path and reason, plus a quoting
-    /// hint when the shell split the intended path at its spaces.
-    private static func loadTranscript(at url: URL, arguments: [String]) throws -> CanonicalTranscript {
-        guard FileManager.default.fileExists(atPath: url.path) else {
+    /// Loads a document named on the command line. A missing file or a
+    /// document that does not decode is reported with its path or ID and the
+    /// reason, plus a quoting hint when the shell split the intended path at
+    /// its spaces.
+    private static func loadTranscript(_ ref: TranscriptRef, arguments: [String]) throws -> CanonicalTranscript {
+        if case .portable(let url) = ref, !FileManager.default.fileExists(atPath: url.path) {
             throw TranscribeError(
                 message: withSplitPathHint("No transcript at \(safeText(url.path)). Run transcribe transcripts to list saved documents.", arguments),
                 exitCode: .inputFile
             )
         }
         do {
-            return try CanonicalTranscriptStore.load(from: url)
+            return try CanonicalTranscriptStore.load(ref)
         } catch {
-            var reason = safeText(errorText(error))
-            if !reason.hasSuffix(".") { reason += "." }
-            throw TranscribeError(
-                message: withSplitPathHint("Cannot read transcript \(safeText(url.path)): \(reason)", arguments),
-                exitCode: .inputFile
-            )
+            throw unreadable(ref, error, arguments: arguments)
         }
+    }
+
+    /// `loadTranscript` for commands that never need segment text. A managed
+    /// document's summary comes from lifted columns without reading the
+    /// payload; a portable file has to be read whole.
+    private static func loadSummary(_ ref: TranscriptRef, arguments: [String]) throws -> TranscriptSummary {
+        switch ref {
+        case .portable:
+            return TranscriptSummary(try loadTranscript(ref, arguments: arguments))
+        case .managed(let id):
+            do {
+                return try CanonicalTranscriptStore.summary(id: id)
+            } catch {
+                throw unreadable(ref, error, arguments: arguments)
+            }
+        }
+    }
+
+    private static func unreadable(_ ref: TranscriptRef, _ error: Error, arguments: [String]) -> TranscribeError {
+        var reason = safeText(errorText(error))
+        if !reason.hasSuffix(".") { reason += "." }
+        return TranscribeError(
+            message: withSplitPathHint("Cannot read transcript \(safeText(ref.displayName)): \(reason)", arguments),
+            exitCode: .inputFile
+        )
     }
 
     /// A path with spaces reaches the command as several arguments when it

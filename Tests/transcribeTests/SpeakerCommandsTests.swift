@@ -208,17 +208,18 @@ final class SpeakerCommandsTests: XCTestCase {
     }
 
     func testUnreadableTranscriptDoesNotHideTheListing() throws {
-        let original = try CanonicalTranscriptStore.load(from: try document("one", hash: "a"))
-        _ = try CanonicalTranscriptStore.save(original)
-        let managed = try StatePaths.stateDirectoryURL().appendingPathComponent("transcripts")
-        let corrupt = managed.appendingPathComponent("corrupt.transcript.json")
-        try Data("{ not json".utf8).write(to: corrupt)
+        let (_, good) = try managedDocument(hash: "a")
+        let (_, damaged) = try managedDocument(hash: "b")
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                try database.execute("UPDATE documents SET basename = '' WHERE id = ?", [.text(damaged)])
+            }
+        }
 
         let list = try run(["transcripts"])
         XCTAssertEqual(list.0, 0, list.1)
-        XCTAssertTrue(list.1.contains("meeting\t"), list.1)
-        // The listing resolves symlinked state directories, so match the name.
-        XCTAssertTrue(list.1.contains("(unreadable)\t") && list.1.contains(corrupt.lastPathComponent), list.1)
+        XCTAssertTrue(list.1.contains("meeting\t\(good)\n"), list.1)
+        XCTAssertTrue(list.1.contains("(unreadable)\t\(damaged)\t"), list.1)
     }
 
     /// A held document lock must stop a second command from starting its own
@@ -283,10 +284,10 @@ final class SpeakerCommandsTests: XCTestCase {
     func testInspectAndListExposeNoEmbeddings() throws {
         let one = try document("one", hash: "a")
         let original = try CanonicalTranscriptStore.load(from: one)
-        _ = try CanonicalTranscriptStore.save(original)
+        let id = try CanonicalTranscriptStore.saveManaged(original)
         let list = try run(["transcripts"])
         XCTAssertEqual(list.0, 0, list.1)
-        XCTAssertTrue(list.1.contains(".transcript.json"))
+        XCTAssertEqual(list.1, "meeting\t\(id.uuidString.lowercased())\n", "title and ID only, no path")
         let inspect = try run(["inspect", one.path])
         XCTAssertEqual(inspect.0, 0, inspect.1)
         XCTAssertTrue(inspect.1.contains("SPEAKER_0"))
@@ -336,16 +337,17 @@ final class SpeakerCommandsTests: XCTestCase {
     }
 
     func testReviewWithoutTranscriptSpansAllSavedDocuments() throws {
-        let one = try CanonicalTranscriptStore.save(CanonicalTranscriptStore.load(from: document("one", hash: "a")))
+        let one = try CanonicalTranscriptStore.saveManaged(CanonicalTranscriptStore.load(from: document("one", hash: "a")))
         let table = try run(["speakers", "review"])
         XCTAssertEqual(table.0, 0, table.1)
-        XCTAssertTrue(table.1.contains("meeting"), table.1)
+        // The header names the document by ID; managed documents have no path.
+        XCTAssertTrue(table.1.contains("meeting\t\(one.uuidString.lowercased())\n"), table.1)
         XCTAssertTrue(table.1.contains("SPEAKER_0\tunidentified"), table.1)
 
         let interactive = try run(["speakers", "review", "--interactive"], input: "Dave\n")
         XCTAssertEqual(interactive.0, 0, interactive.1)
         XCTAssertTrue(interactive.1.contains("Confirmed SPEAKER_0 as Dave"), interactive.1)
-        XCTAssertEqual(try CanonicalTranscriptStore.load(from: one).speakerMatches["SPEAKER_0"]?.name, "Dave")
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: one).speakerMatches["SPEAKER_0"]?.name, "Dave")
 
         let settled = try run(["speakers", "review", "--interactive"], input: "")
         XCTAssertEqual(settled.0, 0, settled.1)
@@ -371,6 +373,61 @@ final class SpeakerCommandsTests: XCTestCase {
         XCTAssertNil(try CanonicalTranscriptStore.load(from: one).dismissedSpeakers)
         let prompted = try run(["speakers", "review", one.path, "--interactive"], input: "Dave\n")
         XCTAssertTrue(prompted.1.contains("Confirmed SPEAKER_0 as Dave"), "clear makes the speaker promptable again")
+    }
+
+    func testManagedConfirmSaveFailureKeepsOutputWriteExitAndRollsBack() throws {
+        let (uuid, id) = try managedDocument(hash: "a")
+        // The trigger lives in the shared database file, so the CLI process
+        // hits it when its confirm transaction inserts the match row.
+        try StateStore.withDatabase { database in
+            try database.exec(
+                "CREATE TRIGGER reject_matches BEFORE INSERT ON speaker_matches BEGIN SELECT RAISE(ABORT, 'injected failure'); END"
+            )
+        }
+        let confirm = try run(["speakers", "confirm", id, "SPEAKER_0", "--name", "Dave"])
+        XCTAssertEqual(confirm.0, 5, "a failed managed save is an output-write failure, not a generic one: \(confirm.1)")
+        XCTAssertTrue(confirm.1.contains("nothing was saved"), confirm.1)
+        XCTAssertTrue(try SpeakerProfileStore.profiles().isEmpty, "the profile change rolls back with the document")
+        XCTAssertNil(try CanonicalTranscriptStore.load(id: uuid).speakerMatches["SPEAKER_0"])
+    }
+
+    func testInvalidStoredSpeakerStateFailsInspectAsInputError() throws {
+        let (uuid, id) = try managedDocument(hash: "a")
+        // A zero vector is exactly what a full load rejects; the payload-free
+        // summary must reject it too rather than quietly succeeding.
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                try database.execute(
+                    "UPDATE document_embeddings SET vector = ? WHERE document_id = ?",
+                    [.blob(Float32Blob.encode([0, 0])), .text(uuid.uuidString.lowercased())]
+                )
+            }
+        }
+        let inspect = try run(["inspect", id])
+        XCTAssertEqual(inspect.0, 3, inspect.1)
+        XCTAssertTrue(inspect.1.contains("Cannot read transcript"), inspect.1)
+    }
+
+    func testMalformedDocumentIDRowDoesNotHideTheListing() throws {
+        _ = try managedDocument(hash: "a")
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                try database.execute(
+                    """
+                    INSERT INTO documents (id, evidence_id, source_hashes, created_at, model,
+                      transcribe_version, audio_path, basename, embedding_model_id,
+                      duration_seconds, diarization_enabled, speaker_strategy, warnings,
+                      segment_count, segment_speakers, exports_recorded, updated_at)
+                    VALUES ('not-a-uuid', 'sha256:junk', '[]', 't', 'm', 'v', '/a', 'broken',
+                      'e', 1, 0, 's', '[]', 0, '[]', 0, 't')
+                    """
+                )
+            }
+        }
+        let list = try run(["transcripts"])
+        XCTAssertEqual(list.0, 0, list.1)
+        XCTAssertTrue(list.1.contains("meeting"), "healthy rows still list: \(list.1)")
+        XCTAssertTrue(list.1.contains("(unreadable)\tnot-a-uuid"), list.1)
     }
 
     func testReviewFlagValidation() throws {
@@ -478,53 +535,63 @@ final class SpeakerCommandsTests: XCTestCase {
 
     // MARK: - Transcript ID arguments
 
-    /// Saves a document into the managed store and returns its URL and the
-    /// ID its filename encodes, the handle commands accept instead of a path.
-    private func managedDocument(hash: String) throws -> (url: URL, id: String) {
-        let saved = try CanonicalTranscriptStore.save(
-            CanonicalTranscriptStore.load(from: document("managed-\(hash)", hash: hash))
+    /// Saves a document into the managed store and returns its UUID and the
+    /// lowercased ID string commands accept.
+    private func managedDocument(hash: String, id: UUID = UUID()) throws -> (uuid: UUID, id: String) {
+        let portable = try CanonicalTranscriptStore.load(from: document("managed-\(hash)", hash: hash))
+        let document = CanonicalTranscript(
+            id: id, evidenceID: portable.evidenceID, sourceHashes: portable.sourceHashes,
+            createdAt: portable.createdAt, model: portable.model,
+            transcribeVersion: portable.transcribeVersion, audioPath: portable.audioPath,
+            basename: portable.basename, output: portable.output
         )
-        return (saved, String(saved.lastPathComponent.dropLast(".transcript.json".count)))
+        let saved = try CanonicalTranscriptStore.saveManaged(document)
+        return (saved, saved.uuidString.lowercased())
     }
 
     func testTranscriptArgumentsAcceptSavedDocumentIDs() throws {
-        let (url, id) = try managedDocument(hash: "a")
+        let (uuid, id) = try managedDocument(hash: "a")
 
         let list = try run(["transcripts"])
         XCTAssertEqual(list.0, 0, list.1)
-        XCTAssertTrue(list.1.contains("\t\(id)\t"), "listing shows the ID column: \(list.1)")
+        XCTAssertTrue(list.1.contains("\t\(id)\n"), "listing shows the ID column: \(list.1)")
 
         let inspect = try run(["inspect", String(id.prefix(8))])
         XCTAssertEqual(inspect.0, 0, inspect.1)
         XCTAssertTrue(inspect.1.contains("SPEAKER_0"), inspect.1)
+        XCTAssertTrue(inspect.1.contains("Segments: 1"), inspect.1)
 
         let confirm = try run(["speakers", "confirm", id, "0", "--name", "Dave"])
         XCTAssertEqual(confirm.0, 0, confirm.1)
-        XCTAssertEqual(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"]?.name, "Dave")
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: uuid).speakerMatches["SPEAKER_0"]?.name, "Dave")
 
         let clear = try run(["speakers", "clear", String(id.prefix(12)), "SPEAKER_0"])
         XCTAssertEqual(clear.0, 0, clear.1)
-        XCTAssertNil(try CanonicalTranscriptStore.load(from: url).speakerMatches["SPEAKER_0"])
+        XCTAssertNil(try CanonicalTranscriptStore.load(id: uuid).speakerMatches["SPEAKER_0"])
+        XCTAssertEqual(try SpeakerProfileStore.profiles().first?.examples.count, 0)
+
+        // The 2.x listing printed IDs with the file suffix; that spelling
+        // still resolves by ID.
+        let suffixed = try run(["inspect", id + ".transcript.json"])
+        XCTAssertEqual(suffixed.0, 0, suffixed.1)
     }
 
     func testUnknownAndAmbiguousTranscriptIDsAreRejected() throws {
-        let (url, id) = try managedDocument(hash: "a")
+        let (_, id) = try managedDocument(hash: "a")
 
         let unknown = try run(["speakers", "clear", "deadbeef", "0"])
         XCTAssertEqual(unknown.0, 3, unknown.1)
         XCTAssertTrue(unknown.1.contains("no saved transcript ID starts with it"), unknown.1)
 
-        // A second filename sharing the first eight characters makes that
-        // prefix ambiguous; only the filename matters to resolution.
+        // A second document whose ID shares the first eight characters makes
+        // that prefix ambiguous.
         let flipped = id[id.index(id.startIndex, offsetBy: 9)] == "0" ? "1" : "0"
         var otherID = id
         otherID.replaceSubrange(
             otherID.index(otherID.startIndex, offsetBy: 9)...otherID.index(otherID.startIndex, offsetBy: 9),
             with: flipped
         )
-        try FileManager.default.copyItem(
-            at: url, to: url.deletingLastPathComponent().appendingPathComponent(otherID + ".transcript.json")
-        )
+        _ = try managedDocument(hash: "b", id: try XCTUnwrap(UUID(uuidString: otherID)))
         let ambiguous = try run(["inspect", String(id.prefix(8))])
         XCTAssertEqual(ambiguous.0, 2, ambiguous.1)
         XCTAssertTrue(ambiguous.1.contains("ambiguous"), ambiguous.1)
@@ -532,6 +599,20 @@ final class SpeakerCommandsTests: XCTestCase {
 
         let full = try run(["inspect", id])
         XCTAssertEqual(full.0, 0, "the full ID stays unambiguous: \(full.1)")
+    }
+
+    /// Scripts may hold 2.x managed paths; those dangle now, and the error
+    /// says how saved documents are addressed instead.
+    func testDanglingManagedPathPointsAtTheIDForm() throws {
+        let (_, id) = try managedDocument(hash: "a")
+        let legacyPath = try StatePaths.stateDirectoryURL()
+            .appendingPathComponent("transcripts/\(id).transcript.json").path
+
+        let result = try run(["speakers", "review", legacyPath])
+        XCTAssertEqual(result.0, 3, result.1)
+        XCTAssertTrue(result.1.contains("No transcript at "), result.1)
+        XCTAssertTrue(result.1.contains("Run transcribe transcripts"), result.1)
+        XCTAssertTrue(result.1.contains("addressed by ID"), result.1)
     }
 
     func testReviewPrintsTheTranscriptID() throws {
@@ -547,9 +628,73 @@ final class SpeakerCommandsTests: XCTestCase {
         XCTAssertTrue(interactive.1.contains("Transcript ID: \(id)"), interactive.1)
     }
 
+    func testReviewApplyOnAManagedDocumentNamesItsID() throws {
+        let (uuid, id) = try managedDocument(hash: "a")
+        let one = try document("one", hash: "b")
+        XCTAssertEqual(try run(["speakers", "confirm", one.path, "SPEAKER_0", "--name", "Dave"]).0, 0)
+
+        let applied = try run(["speakers", "review", id, "--apply"])
+        XCTAssertEqual(applied.0, 0, applied.1)
+        XCTAssertTrue(applied.1.contains("Saved assignments for \(id)."), applied.1)
+        XCTAssertTrue(applied.1.contains("suggested"), applied.1)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: uuid).speakerMatches["SPEAKER_0"]?.status, .suggested)
+
+        let portable = try run(["speakers", "review", one.path, "--apply"])
+        XCTAssertTrue(portable.1.contains("Saved assignments to \(one.resolvingSymlinksInPath().path)."), portable.1)
+    }
+
+    func testManagedExportRecordsRefreshUnderTheRenderLock() throws {
+        let (uuid, id) = try managedDocument(hash: "a")
+        let out = directory.appendingPathComponent("managed-out")
+        let exported = try run(["export", id, "--format", "txt,srt", "-o", out.path])
+        XCTAssertEqual(exported.0, 0, exported.1)
+        let records = try XCTUnwrap(CanonicalTranscriptStore.load(id: uuid).exports)
+        XCTAssertEqual(Set(records.map(\.format)), ["txt", "srt"])
+
+        let confirm = try run(["speakers", "confirm", id, "SPEAKER_0", "--name", "Dave"])
+        XCTAssertEqual(confirm.0, 0, confirm.1)
+        XCTAssertTrue(confirm.1.contains("Refreshed 2 exports"), confirm.1)
+        XCTAssertTrue(try String(contentsOf: out.appendingPathComponent("meeting.txt")).contains("Dave"))
+
+        let locks = try StatePaths.locksDirectoryURL()
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: locks.path)) & 0o777, 0o700)
+        let lock = locks.appendingPathComponent("\(id).lock")
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: lock.path)) & 0o777, 0o600)
+
+        XCTAssertEqual(try run(["speakers", "clear", id, "SPEAKER_0", "--no-refresh-exports"]).0, 0)
+        let refresh = try run(["export", "--refresh"])
+        XCTAssertEqual(refresh.0, 0, refresh.1)
+        XCTAssertTrue(refresh.1.contains("Refreshed 2 exports"), refresh.1)
+        XCTAssertFalse(try String(contentsOf: out.appendingPathComponent("meeting.txt")).contains("Dave"))
+    }
+
+    /// A held render lock stops a second export of the same managed
+    /// document from rendering until the first has recorded its result.
+    func testRenderLockBlocksASecondManagedExport() throws {
+        let (uuid, id) = try managedDocument(hash: "a")
+        let out = directory.appendingPathComponent("locked-out")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CLITests.transcribePath)
+        process.arguments = ["export", id, "--format", "txt", "-o", out.path]
+        var environment = ProcessInfo.processInfo.environment
+        environment["XDG_STATE_HOME"] = directory.path
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try SpeakerCommands.withRenderLock(id: uuid) {
+            try process.run()
+            Thread.sleep(forTimeInterval: 1)
+            XCTAssertTrue(process.isRunning, "export must wait for the render lock")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("meeting.txt").path))
+        }
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertEqual(try CanonicalTranscriptStore.load(id: uuid).exports?.count, 1)
+    }
+
     func testColorAppearsOnlyWhenForcedOntoPipes() throws {
         let original = try CanonicalTranscriptStore.load(from: document("one", hash: "a"))
-        _ = try CanonicalTranscriptStore.save(original)
+        _ = try CanonicalTranscriptStore.saveManaged(original)
         let plain = try run(["transcripts"])
         XCTAssertEqual(plain.0, 0, plain.1)
         XCTAssertFalse(plain.1.contains("\u{1B}["), "piped output stays plain")

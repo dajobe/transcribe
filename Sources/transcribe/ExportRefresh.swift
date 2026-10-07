@@ -38,25 +38,29 @@ enum ExportRefresh {
     }
 
     /// Refreshes every recorded export of `document`, which the caller has
-    /// loaded under its document lock, and saves the document when records
-    /// changed. Every failure degrades to a warning: a confirmation that
-    /// triggered the refresh must stand whatever happens to derived files.
+    /// loaded while holding the lock that serializes rendering for it (the
+    /// file lock of a portable document, the render lock of a managed one),
+    /// and saves the records when they changed. Every failure degrades to a
+    /// warning: a confirmation that triggered the refresh must stand whatever
+    /// happens to derived files.
     @discardableResult
     static func run(
-        document: CanonicalTranscript, at url: URL,
+        document: CanonicalTranscript, at ref: TranscriptRef,
         io: InteractiveIO = .standard, color: TerminalColor = Terminal.stdout
     ) -> Summary {
         var document = document
         guard document.exports?.isEmpty == false else {
-            if let hint = staleExportHint(for: document, at: url) {
+            if let hint = staleExportHint(for: document, at: ref) {
                 io.write(hint + "\n")
             }
             return Summary()
         }
-        let summary = refresh(document: &document, documentURL: url)
+        var documentURL: URL?
+        if case .portable(let url) = ref { documentURL = url }
+        let summary = refresh(document: &document, documentURL: documentURL)
         if summary.recordsChanged {
             do {
-                _ = try CanonicalTranscriptStore.save(document, to: url)
+                try CanonicalTranscriptStore.saveExports(of: document, to: ref)
             } catch {
                 emitWarning("Export records not saved for \(document.basename): \(error.localizedDescription). The refreshed files themselves were written.")
             }
@@ -69,16 +73,17 @@ enum ExportRefresh {
 
     /// The per-record decision loop. Mutates `document.exports` in place and
     /// leaves saving to the caller; write failures are warnings so the
-    /// remaining records still refresh.
-    static func refresh(document: inout CanonicalTranscript, documentURL: URL) -> Summary {
+    /// remaining records still refresh. `documentURL` is a portable
+    /// document's own file; a managed document has none.
+    static func refresh(document: inout CanonicalTranscript, documentURL: URL?) -> Summary {
         var summary = Summary()
-        let documentIdentity = fileIdentity(documentURL.path)
+        let documentIdentity = documentURL.flatMap { fileIdentity($0.path) }
         var kept: [ExportRecord] = []
         for var record in document.exports ?? [] {
             // The guard export applies at record creation, re-checked here in
             // case a document was assembled by hand: refresh must never turn
             // the canonical transcript into one of its own renderings.
-            if record.path == documentURL.path
+            if record.path == documentURL?.path
                 || (documentIdentity != nil && fileIdentity(record.path) == documentIdentity) {
                 emitWarning("Export record for \(record.path) names the canonical transcript itself; not refreshed.")
                 kept.append(record)
@@ -172,7 +177,7 @@ enum ExportRefresh {
     /// records carry output paths but no content hashes. Nothing is ever
     /// overwritten automatically on this path; running the printed command
     /// once seeds records and makes the document self-refreshing.
-    static func staleExportHint(for document: CanonicalTranscript, at url: URL) -> String? {
+    static func staleExportHint(for document: CanonicalTranscript, at ref: TranscriptRef) -> String? {
         guard let records = try? ProcessingStore.loadRecords() else {
             return "Export again to update rendered files."
         }
@@ -186,7 +191,9 @@ enum ExportRefresh {
             .map { ($0 as NSString).pathExtension.lowercased() }
             .filter { validOutputFormats.contains($0) }
         guard !formats.isEmpty else { return "Export again to update rendered files." }
-        var command = "transcribe export \(shellQuoted(url.path)) --format \(Array(Set(formats)).sorted().joined(separator: ","))"
+        // A managed document is addressed by its ID, a portable one by the
+        // path it was opened from.
+        var command = "transcribe export \(shellQuoted(ref.displayName)) --format \(Array(Set(formats)).sorted().joined(separator: ","))"
         if let dir = match.output_dir {
             command += " -o \(shellQuoted(dir))"
         }

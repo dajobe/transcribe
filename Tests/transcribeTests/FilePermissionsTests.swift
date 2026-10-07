@@ -32,6 +32,33 @@ final class FilePermissionsTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: try StatePaths.timingHistoryURL().path))
     }
 
+    /// Render locks live in `<state>/locks/`, created owner-only on first
+    /// use, one owner-only file per managed document.
+    func testRenderLocksAreOwnerOnly() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcribe-perms-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let previous = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+        setenv("XDG_STATE_HOME", dir.path, 1)
+        defer {
+            if let previous { setenv("XDG_STATE_HOME", previous, 1) } else { unsetenv("XDG_STATE_HOME") }
+        }
+        try FileManager.default.createDirectory(at: try StatePaths.stateDirectoryURL(), withIntermediateDirectories: true)
+        let id = UUID()
+
+        var ran = false
+        try SpeakerCommands.withRenderLock(id: id) { ran = true }
+        XCTAssertTrue(ran)
+        // Reuse of an existing directory and lock file must work too.
+        try SpeakerCommands.withRenderLock(id: id) {}
+
+        let locks = try StatePaths.locksDirectoryURL()
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: locks.path)) & 0o777, 0o700)
+        let lock = locks.appendingPathComponent("\(id.uuidString.lowercased()).lock")
+        XCTAssertEqual(try XCTUnwrap(fileModeBits(atPath: lock.path)) & 0o777, 0o600)
+    }
+
     func testTightenPermissionsAppliesOwnerOnlyMode() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("transcribe-perms-\(UUID().uuidString)", isDirectory: true)

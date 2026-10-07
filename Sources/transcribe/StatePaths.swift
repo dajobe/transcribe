@@ -32,6 +32,18 @@ enum StatePaths {
         try stateDirectoryURL().appendingPathComponent("processing_history.jsonl", isDirectory: false)
     }
 
+    /// The 2.x speaker profile store, superseded by the `profiles` and
+    /// `profile_examples` tables; kept as the legacy location migration reads.
+    static func legacySpeakerProfilesURL() throws -> URL {
+        try stateDirectoryURL().appendingPathComponent("speaker_profiles.json", isDirectory: false)
+    }
+
+    /// The 2.x managed `.transcript.json` directory, superseded by the
+    /// `documents` tables; kept as the legacy location migration reads.
+    static func legacyTranscriptsDirectoryURL() throws -> URL {
+        try stateDirectoryURL().appendingPathComponent("transcripts", isDirectory: true)
+    }
+
     /// SQLite state database (`StateDatabase`); its `-wal` and `-shm`
     /// companions sit beside it.
     static func stateDatabaseURL() throws -> URL {
