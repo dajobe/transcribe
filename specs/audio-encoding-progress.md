@@ -139,6 +139,10 @@ Implementation choice:
 
 ## Migration Script
 
+Retired in 3.0.0: timing history moved into the state database, so the file this
+script rewrote no longer exists after migration, and the script and its tests
+were deleted (see `specs/sqlite-state-store.md`). The original design follows.
+
 Add `scripts/migrate-timing-history-v2.swift`, runnable with:
 
 ```bash

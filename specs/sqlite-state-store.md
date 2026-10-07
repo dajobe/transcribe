@@ -2,11 +2,13 @@
 
 ## Status and scope
 
-Approved 2026-10-07, not yet implemented. Replaces the JSON-file state store in
-the transcribe state directory with a single SQLite database while keeping
-`.transcript.json` as the portable interchange format. Covers canonical
-transcripts, speaker profiles, processing history, and timing history; does not
-change output formats, the pipeline, or `--stateless` behavior.
+Approved 2026-10-07; implemented in 3.0.0 (2026-10-07). Replaces the JSON-file
+state store in the transcribe state directory with a single SQLite database
+while keeping `.transcript.json` as the portable interchange format. Covers
+canonical transcripts, speaker profiles, processing history, and timing history;
+does not change output formats or the pipeline. The one `--stateless` change is
+that it no longer reads or writes timing history, because it must not open the
+database (see Portable documents and compatibility).
 
 **Ships as transcribe 3.0.0.** This is a major version bump: the state layout,
 internal APIs, and the CLI output that referenced managed file paths all change,
@@ -250,11 +252,13 @@ CREATE INDEX timing_history_key ON timing_history(model, diarization, rowid);
 
 CREATE TABLE migration_sources (          -- see Migration
   source_path   TEXT PRIMARY KEY,
-  status        TEXT NOT NULL,            -- imported|skipped|conflict
+  status        TEXT NOT NULL,            -- imported|skipped|conflict|
+                                          -- imported-later
   detail        TEXT,                     -- skip/conflict reason
   planned_path  TEXT,                     -- written BEFORE the rename
-  archived_path TEXT                      -- confirmed after the rename
-);
+  archived_path TEXT,                     -- confirmed after the rename
+  source_sha256 TEXT                      -- imported bytes; resume checks
+);                                        -- a found destination against it
 ```
 
 Design notes:
@@ -306,13 +310,17 @@ Design notes:
   be finite and non-zero.
 - **Ledger rows are verbatim.** The `record` column holds the exact JSONL line
   text, never a decode/re-encode, because rows legally carry fields this binary
-  does not know (`MigrationScriptTests` pins an `"unknown_field"` surviving).
-  The lifted columns — `(source_kind, source_id)` for processing, `(model,
-  diarization)` for timing — are extracted leniently at insert; a row they
-  cannot be extracted from still imports with placeholder keys rather than being
-  dropped. Decisions keep R8's model: one snapshot per planning run, now one
-  indexed `SELECT` instead of three file parses (plus `staleExportHint`'s). R8's
-  compaction becomes `DELETE`s instead of a file-rewrite design.
+  does not know (`StateMigrationTests` and the store tests pin an
+  `"unknown_field"` surviving). The lifted columns — `(source_kind, source_id)`
+  for processing, `(model, diarization)` for timing — are extracted leniently at
+  insert; a row they cannot be extracted from still imports with placeholder
+  keys rather than being dropped. Decisions keep R8's model: one snapshot per
+  planning run, now one indexed `SELECT` instead of three file parses (plus
+  `staleExportHint`'s). R8's compaction becomes `DELETE`s instead of a
+  file-rewrite design. As implemented in 3.0.0, the import-baseline and
+  completion decisions are indexed per-source queries, but `contentDecision` and
+  `staleExportHint` still read every processing row per call; the one snapshot
+  per planning run remains R8 work.
 - **Validation moves with the store.** The checks in
   `CanonicalTranscriptStore.validate` run on load and before save exactly as
   now; the database adds referential integrity (every match, dismissal, and
@@ -343,9 +351,10 @@ updates that go with them:
 - Non-interactive `speakers review` headers and `(unreadable)` rows name the ID,
   not a path.
 - `review --apply` prints "Saved assignments for <id>." instead of a path.
-- The `canonical_saved` event keeps its `path` field for portable saves and adds
-  `id`; for managed saves `path` is omitted. README's event documentation
-  updates accordingly.
+- The `canonical_saved` event carries `id` and no `path`. (As implemented, the
+  event is emitted only by the pipeline's managed save, so there is no portable
+  case that would keep `path`.) README's event documentation updates
+  accordingly.
 - `staleExportHint` suggests `transcribe export <id>` instead of a path.
 - `history` with no records names the database, not `processing_history.jsonl`.
 
@@ -422,15 +431,22 @@ here.
     JSON for a stored document.
   - `transcribe transcripts import <path>` — load a portable JSON document into
     the store (same evidence-ID replacement semantics as a managed save today).
-    This is also the retry path for files migration skipped.
+    This is also the retry path for files migration skipped. One deliberate
+    difference from a managed save: a file whose own `id` already belongs to a
+    stored document with a different evidence ID is stored under a fresh ID (and
+    the command says so), because replace-by-ID would silently delete that other
+    document — a migration `conflict` file is exactly this case. A successful
+    import of a file that has a `skipped` or `conflict` manifest row (matched by
+    the file identity of the descriptor import read) marks the row
+    `imported-later`; the file stays where it is.
   - `transcribe transcripts export-legacy <directory>` — write the complete
     state as legacy-format JSON files (per-document `.transcript.json`,
-    `speaker_profiles.json`, both JSONL ledgers) into an empty directory. This
-    is a dump, not an in-place un-migrate; its output formats are frozen at the
-    2.x shapes, and the command errors on any future state it cannot represent
-    in them rather than silently dropping it. It exists for lossless rollback
-    and doubles as the migration test harness: migrate, export, and compare
-    decoded values against the sources.
+    `speaker_profiles.json`, both JSONL ledgers) into a new or empty directory.
+    This is a dump, not an in-place un-migrate; its output formats are frozen at
+    the 2.x shapes, and the command errors on any future state it cannot
+    represent in them rather than silently dropping it. It exists for lossless
+    rollback and doubles as the migration test harness: migrate, export, and
+    compare decoded values against the sources.
 - Commands that take "ID or path" keep both meanings: an ID (or any unique
   prefix) resolves against `documents.id` in the database; a path to an existing
   `.transcript.json` file is read as a portable document and operated on in
@@ -448,9 +464,11 @@ here.
 - The JSON schema version (currently 1) remains the compatibility contract for
   portable files and is unaffected by database schema versions.
 - `--stateless` continues to touch no state at all — it must not open the
-  database or take `init.lock`. `XDG_STATE_HOME` continues to select the state
-  directory, so tests and experiments keep their isolation and get a fresh
-  database per test directory.
+  database or take `init.lock`. Because timing history now lives in the
+  database, `--stateless` also disables ETA-from-history and timing appends (2.x
+  still wrote `timing_history.jsonl` under `--stateless`). `XDG_STATE_HOME`
+  continues to select the state directory, so tests and experiments keep their
+  isolation and get a fresh database per test directory.
 - **Any state-opening command migrates**, including read-only ones
   (`transcripts`, `history`, `--dry-run` planning): they cannot read JSON state
   the database has superseded, and migration is non-destructive (the sources are
@@ -475,7 +493,21 @@ under the lock; present with both markers → check for reappeared legacy files
 (below), then proceed. The guard closes the two-process first-run race, covers
 both phases, and prevents one process rebuilding a database another is
 importing. The lock is bootstrap-only; normal operation uses database
-transactions.
+transactions. As implemented, the markers carry a value: `migrated` when 2.x
+state was imported, `fresh` when the database was created with no legacy state
+to import (`migration-status` distinguishes the two).
+
+**Ledger locks.** `init.lock` excludes other 3.x processes but not a 2.x binary,
+whose `LockedAppendWriter` takes an exclusive `flock` on the ledger file for
+each append. Migration therefore takes that same lock on both ledger paths
+(always in the same order, creating a missing ledger so a late 2.x writer queues
+behind it) before the import transaction begins and holds it through the rename
+into `migrated-v1/`, so no append lands between the read and the move and no
+half-written line is read. A placeholder ledger created only to hold the lock is
+removed on release if still empty. The residual window — a 2.x process that
+opened the file before the rename writes to the moved file after the lock is
+released — is accepted and covered by the "stop every transcribe process"
+instruction.
 
 **Phase 1 — import** (one transaction):
 
@@ -515,11 +547,19 @@ transactions.
    to it (same-volume), then commit `archived_path`, then delete the source's
    `.lock` sidecar. On resume, "source absent and planned destination present"
    counts as completed and is recorded; write-ahead means a crash between rename
-   and record cannot lose track of a file. A pre-existing file at a planned
-   destination gets a numeric suffix chosen at planning time.
+   and record cannot lose track of a file. As implemented, a found destination
+   counts as the completed move only when its bytes hash to the row's
+   `source_sha256` (recorded at import); a different file there is left alone
+   and the source, if still present, moves to a fresh destination. Both
+   directories are fsynced before `archived_path` commits. A pre-existing file
+   at a planned destination gets a numeric suffix chosen at planning time.
 3. Write `<state>/migrated-v1/MANIFEST.tsv` — a plain-text copy of the manifest
-   (source path, status, archived path) — so rollback does not depend on reading
-   the database. The `archive_complete` marker commits last.
+   with a header row and four tab-separated columns (source path, status,
+   archived path, detail; tabs, newlines, and backslashes escaped) — so rollback
+   does not depend on reading the database. The `archive_complete` marker
+   commits last. A `manifest_dirty` meta flag commits with every manifest row
+   change and clears only after a successful rewrite, so a stale `MANIFEST.tsv`
+   is rewritten on the next open.
 
 **Reappeared legacy files.** An older binary that keeps running (a long batch or
 Folder Action straddling the upgrade) recreates `processing_history.jsonl`,
@@ -531,7 +571,12 @@ Findings are handled per store: reappeared ledger files are imported verbatim
 and then archived with a new manifest row; reappeared transcript files are
 listed by `migration-status` for `transcripts import`; a reappeared profile
 store is never auto-merged — the command warns loudly and names it, because
-merging divergent profile stores needs a human.
+merging divergent profile stores needs a human. As implemented, every
+reappearance gets its own manifest row, keyed by the legacy path with a
+`#reappeared-N` suffix when that path already has a row (the column is the
+primary key); its detail starts "reappeared after migration". Reappeared
+transcript files and profile stores are recorded as `skipped` and left in place,
+and the profile warning repeats on every run while the file exists.
 
 **Rollback** is lossless via `export-legacy`: stop every transcribe process, run
 `transcribe transcripts export-legacy <dir>`, replace the state directory's
@@ -544,8 +589,11 @@ binary itself cannot run; it loses post-migration changes and says so. There is
 no dual-write period either way.
 
 `transcribe transcripts migration-status` prints the manifest: imported, skipped
-(with reasons), conflict rows, and any reappeared legacy files, so a user can
-see exactly what moved and retry skipped files after repairing them.
+(with reasons), conflict rows, rows `imported-later` by `transcripts import`,
+and any reappeared legacy files, so a user can see exactly what moved and retry
+skipped files after repairing them. An `imported-later` row keeps its original
+reason in the detail, is never archived, and still counts as left in place, so
+its file is not reported as reappeared.
 
 ## Code touchpoints
 
@@ -573,7 +621,8 @@ see exactly what moved and retry skipped files after repairing them.
 - `StatePaths`: adds `stateDatabaseURL()`, the init-lock path, and the locks
   directory.
 - `scripts/migrate-timing-history-v2.swift`: its default target file no longer
-  exists after migration; retire it or point it at the archive.
+  exists after migration; retired (deleted with `MigrationScriptTests`) in
+  3.0.0.
 - Docs: README (speaker workflow paths → IDs, `canonical_saved` event,
   state-storage description), hacking.md's state-layout notes, and the R8/R12
   entries in TODO.md.

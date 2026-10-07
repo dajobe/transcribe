@@ -21,6 +21,19 @@ The Swift package currently has one executable target:
 - `Sources/transcribe/SQLiteReader.swift`: small read-only SQLite wrapper
   (`ReadOnlyDatabase`, `Statement`) used by `VoiceMemosImport`. Built on `import
   SQLite3` from the macOS SDK; opens with `SQLITE_OPEN_READONLY`.
+- `Sources/transcribe/StateDatabase.swift`: writable SQLite wrapper for the
+  state store: init guard, pragmas, `inTransaction(.read | .write)`, prepared
+  statements, float32 blob helpers, and the schema (`StateDatabase.schemaV1`).
+- `Sources/transcribe/StateStore.swift`: the process-wide lazily opened
+  `StateDatabase` connection the stores share.
+- `Sources/transcribe/StateMigration.swift`: one-way phased migration of 2.x
+  JSON state into the database, the `migration_sources` manifest and
+  `MANIFEST.tsv`, and detection of legacy files an older binary recreated.
+- `Sources/transcribe/LegacyExport.swift`: `transcripts export-legacy`, the dump
+  of the whole database as 2.x JSON files.
+- `Sources/transcribe/TranscriptRef.swift`: `.managed(id:)` versus
+  `.portable(URL)` document references threaded through speaker and export
+  commands.
 - `Sources/transcribe/SessionGrouper.swift`: pure gap-based grouping of ordered
   clips into sessions.
 - `Sources/transcribe/TranscriptionPipeline.swift`: audio loading/preflight,
@@ -28,18 +41,21 @@ The Swift package currently has one executable target:
   transcript assembly helpers.
 - `Sources/transcribe/OutputWriter.swift`: output basenames, overwrite checks,
   renderers, and atomic writes.
-- `Sources/transcribe/ProcessingStore.swift`: append-only idempotency ledger.
+- `Sources/transcribe/ProcessingStore.swift`: append-only idempotency ledger
+  (the `processing_history` table).
 - `Sources/transcribe/CanonicalTranscript.swift`: versioned private inference
-  documents, validation, and accepted-name export views.
-- `Sources/transcribe/SpeakerProfiles.swift`: locked profile persistence and
-  conservative centroid matching using explicit human confirmations.
+  documents, validation, accepted-name export views, the managed store over the
+  `documents` tables, and the portable `.transcript.json` code path.
+- `Sources/transcribe/SpeakerProfiles.swift`: profile persistence (the
+  `profiles` and `profile_examples` tables) and conservative centroid matching
+  using explicit human confirmations.
 - `Sources/transcribe/SpeakerCommands.swift`: transcript listing/inspection,
   inference-free export, and speaker review/confirmation commands. See
   `specs/persistent-speaker-identities.md` for schema and policy details.
 - `Sources/transcribe/HistoryCommand.swift`: `transcribe history` command and
   `HistoryFormatter` (relative-time and column rendering).
-- `Sources/transcribe/TimingStore.swift`: append-only timing history used for
-  ETA hints.
+- `Sources/transcribe/TimingStore.swift`: append-only timing history (the
+  `timing_history` table) used for ETA hints.
 - `Sources/transcribe/PhaseETA.swift`: remaining-time estimator that blends
   history predictors with live per-phase progress.
 - `Sources/transcribe/ComputeOptions.swift`: compute-unit option parsing and
@@ -164,11 +180,12 @@ audio files are warnings and skipped rows, not fatal by themselves.
 
 ## Idempotency
 
-Processing history is an append-only JSON Lines file named
-`processing_history.jsonl`, located via `StatePaths.processingHistoryURL()` (see
-"State Files" below for the resolved directory). Each record is one line of
-canonical JSON; `ProcessingStore.append` writes under `flock(LOCK_EX)` on a
-shared `O_APPEND` fd so concurrent `transcribe` processes serialize cleanly.
+Processing history is the append-only `processing_history` table of the state
+database (see "State Files" below). Each row's `record` column holds the record
+as one line of canonical JSON, verbatim, so rows written by other versions keep
+fields this binary does not know; `source_kind` and `source_id` are lifted into
+indexed columns for the skip decisions. `ProcessingStore.append` inserts one row
+in a write transaction, which serializes concurrent `transcribe` processes.
 
 The ledger records completed source sessions and imported baselines. It stores:
 
@@ -220,7 +237,7 @@ ledgers render consistently in `transcribe history`.
 Use `transcribe history` to inspect the most recent records (newest first,
 relative timestamps within seven days, ISO 8601 beyond, original recording date
 in its own column). The command does not mutate the ledger; treat it as a
-read-only viewer over `processing_history.jsonl`.
+read-only viewer over the `processing_history` table.
 
 ## Outputs
 
@@ -255,13 +272,56 @@ model component and falls back when a preferred GPU/Metal path fails.
 
 ## State Files
 
-`StatePaths` follows XDG state conventions:
+`StatePaths` resolves the state directory: `$XDG_STATE_HOME/transcribe` when
+`XDG_STATE_HOME` is set, else `~/Library/Application Support/transcribe`. Since
+3.0.0 it holds:
 
-- timing history: `timing_history.jsonl`
-- processing history: `processing_history.jsonl`
+- `state.db` (with `-wal` and `-shm`): the SQLite state database, WAL mode,
+  `synchronous=FULL`, 30 s `busy_timeout`, files `0600`. It holds canonical
+  documents (`documents`, `document_segments`, `document_embeddings`,
+  `speaker_matches`, `dismissed_speakers`, `exports`), speaker profiles
+  (`profiles`, `profile_examples`), both ledgers (`processing_history`,
+  `timing_history`), and the migration manifest (`migration_sources`). The
+  schema is `StateDatabase.schemaV1`; its version is `PRAGMA user_version`, and
+  a binary refuses a database newer than it understands.
+- `init.lock`: bootstrap `flock` taken while a process creates, rebuilds, or
+  migrates the database and while it checks for reappeared legacy files. Normal
+  state access uses database transactions, not this lock.
+- `locks/<id>.lock`: per-document advisory lock held around export render plus
+  record commit for managed documents (`SpeakerCommands.withRenderLock`), so two
+  `export --refresh` runs cannot interleave. Plain state mutations do not take
+  it. Portable `.transcript.json` files keep their 2.x sidecar lock beside the
+  file (`withDocumentLock`).
+- `migrated-v1/`: the archived 2.x files, in their original layout, plus
+  `MANIFEST.tsv` (source path, status, archived path, detail) so a snapshot
+  restore never needs the database.
 
-Both stores use append-only writes and file locking on Darwin. Timing records
-feed the progress ETA medians; processing records feed idempotency.
+All state goes through `StateStore.withDatabase`, which opens one connection per
+process lazily; a `--stateless` run never calls a store, so it never creates the
+database or takes `init.lock`. Transactions join rather than nest, and a
+`.write` joining an active `.read` is a precondition failure. A managed confirm
+(document rows plus profile rows) commits in one transaction.
+
+Migration (`StateMigration`) runs under `init.lock` from `StateDatabase` init
+whenever any 2.x state exists and the database does not: phase 1 imports every
+legacy store inside the schema-creating transaction and commits the
+`import_complete` meta marker with it; phase 2 moves each imported file under
+`migrated-v1/`, recording a write-ahead `planned_path` and a `source_sha256` so
+a resume after a crash neither loses nor double-moves a file, then sets
+`archive_complete`. Both ledgers stay `flock`ed (the lock a 2.x writer takes per
+append) from read through rename. On every later open the guard looks for legacy
+files an older binary recreated. `transcripts migration-status` prints the
+manifest; `transcripts export-legacy` (`LegacyExport`) is both the rollback path
+and the migration tests' comparison harness. The design record is
+`specs/sqlite-state-store.md`.
+
+Timing records feed the progress ETA medians; processing records feed
+idempotency.
+
+Tests must never touch the real state directory: every test that reaches a store
+points `XDG_STATE_HOME` at a fresh temporary directory, which gets its own
+database. `StateStore` re-resolves the database path on each call, so a test
+switching `XDG_STATE_HOME` mid-process gets a new connection.
 
 ETA predictors are wall-clock medians (`parallel_ms` / `transcribe_only_ms`,
 `whisper_first_progress_ms`, `whisper_init_ms`), never WhisperKit's `encoding`
@@ -295,6 +355,13 @@ Main test groups:
 - `ExportRefreshTests`: export-refresh decision table (stale, modified, missing,
   up to date), option precedence, stale-export hints
 - `TimingStoreTests`: timing append/load and median calculations
+- `StateDatabaseTests`: wrapper, transactions, init guard and rebuild, newer
+  schema refusal, busy handling, checkpointing, permissions
+- `StateMigrationTests`: 2.x fixture migration, crash/resume points, conflicts,
+  reappeared legacy files, `MANIFEST.tsv`
+- `TranscriptPortabilityTests`: `transcripts import` / `export-document` /
+  `export-legacy`: round trips, ID reassignment, and a faithful, all-or-nothing
+  2.x dump
 - `TranscriptionPipelineTests`: cheap audio preflight failure path
 - `ComputeOptionsTests` and `LiveProgressTests`: compute fallback and progress
   rendering behavior
@@ -324,7 +391,10 @@ Specs are still useful as design records:
 - `specs/voice-memos-cli-cleanup.md`: 2.0 release-plan spec covering CLI, Voice
   Memos, idempotency, and automation changes
 - `specs/folder-action-markdown.md`: Markdown output and Automator helper
-- `specs/timing-history.md`: timing history schema and ETA behavior
+- `specs/timing-history.md`: timing history schema and ETA behavior (the JSONL
+  file it describes is now the `timing_history` table)
+- `specs/sqlite-state-store.md`: the 3.0.0 SQLite state database, document
+  references, locking, and migration
 - `specs/library-embedding.md`: future library split
 - `specs/voice-memos-direct-sqlite.md`: in-process read-only SQLite for Voice
   Memos import (replaces the `/usr/bin/sqlite3` subprocess)

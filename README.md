@@ -105,19 +105,24 @@ transcribe \
 
 ### Saved transcripts and persistent speaker names
 
-Stateful runs save a private canonical transcript before writing exports. Run
-`transcribe transcripts` to list each document's title, ID, and path; plain logs
-also include a `canonical_saved` event. These files preserve local speaker
-labels and voice embeddings independently of output formats.
+Stateful runs save a private canonical transcript in the state database before
+writing exports. Run `transcribe transcripts` to list each document's title and
+ID; plain logs also include a `canonical_saved` event whose `id` field carries
+the document ID (the event has no `path` field, because saved documents are not
+files). Canonical transcripts preserve local speaker labels and voice embeddings
+independently of output formats.
 
-Commands that take a transcript accept either the document's ID (any unique
-prefix of at least four characters) or a path to its `.transcript.json` file;
-`transcripts`, `inspect`, and `speakers review` all print the ID.
+Saved documents are addressed by ID: commands that take a transcript accept the
+document's ID or any unique prefix of at least four characters. `transcripts`,
+`inspect`, and `speakers review` all print the ID. The same commands also accept
+a path to a portable `.transcript.json` file (see [State
+storage](#state-storage)), which they read and update in place without adding it
+to the database.
 
 The fastest way to name speakers is the interactive review. On a terminal it
 walks every saved transcript that still needs attention (or one document when
-given a path), shows speech samples for each speaker drawn from the beginning,
-middle, and end of the recording, and prompts for a name:
+given an ID or portable file path), shows speech samples for each speaker drawn
+from the beginning, middle, and end of the recording, and prompts for a name:
 
 ```bash
 transcribe speakers review            # all saved transcripts needing attention
@@ -151,7 +156,7 @@ transcribe speakers review
 The scripted commands remain for specific corrections:
 
 ```bash
-transcribe transcripts                # titles, IDs, and paths
+transcribe transcripts                # titles and IDs
 transcribe inspect TRANSCRIPT_ID
 transcribe speakers confirm TRANSCRIPT_ID SPEAKER_0 --name "Dave"
 transcribe speakers list
@@ -172,8 +177,8 @@ name/profile corrects an assignment.
 
 Local speaker IDs such as `SPEAKER_0` (or just `0`) are listed by `inspect` and
 `speakers review`; an unknown ID prints the ones the document has. When passing
-a path instead of a transcript ID, remember that saved transcript paths usually
-contain spaces (for example `Application Support`), so quote them in the shell.
+a portable file path instead of a transcript ID, quote it in the shell if it
+contains spaces.
 
 Use `speakers clear <transcript> <SPEAKER_n>` to remove an assignment and its
 confirmed example, `speakers rename <profile-id> <name>` to rename a profile,
@@ -192,9 +197,9 @@ the same regeneration on demand (without a document it walks every saved
 transcript), and documents exported before this feature print the exact `export
 --overwrite` command that seeds their records.
 
-Canonical files live under the application's state directory in `transcripts/`;
-profiles live in `speaker_profiles.json`. Both use owner-only permissions and
-contain identifying voice data. Ordinary JSON exports contain no embeddings.
+Canonical transcripts and speaker profiles live in the state database (see
+[State storage](#state-storage)), which has owner-only permissions and contains
+identifying voice data. Ordinary JSON exports contain no embeddings.
 `--stateless` disables profile lookup, automatic naming, and canonical storage.
 Model acquisition may use the network; identity matching stays local.
 
@@ -202,6 +207,88 @@ Existing completed runs need an explicit redo to create canonical documents. Use
 `export` for reuse: automatic inference-cache lookup is not yet implemented. The
 [speaker identity spec](specs/persistent-speaker-identities.md) documents the
 schema, matching policy, correction behavior, and limitations.
+
+### State storage
+
+All persistent state — canonical transcripts, speaker profiles, processing
+history, and timing history — lives in one SQLite database, `state.db`, in the
+transcribe state directory: `$XDG_STATE_HOME/transcribe` when `XDG_STATE_HOME`
+is set, otherwise `~/Library/Application Support/transcribe`. The database runs
+in WAL mode, so `state.db-wal` and `state.db-shm` sit beside it; all three are
+owner-only (`0600`). The schema is plain SQL, so the stock `sqlite3` CLI can
+inspect it, for example:
+
+```bash
+sqlite3 ~/Library/Application\ Support/transcribe/state.db \
+  'SELECT id, basename, updated_at FROM documents ORDER BY updated_at DESC'
+```
+
+Use read-only queries; transcribe validates what it writes, and edits made
+behind its back are not checked. `--stateless` never opens the database.
+
+`.transcript.json` remains the portable interchange format: a file you can copy,
+share, or keep next to the recording. The `transcripts` subcommands move
+documents across that boundary:
+
+- `transcribe transcripts export-document <id> <path> [--overwrite]` writes a
+  saved document to `<path>` as a portable `.transcript.json` file.
+- `transcribe transcripts import <path>` stores a portable file as a saved
+  document and prints its ID. A saved document for the same recording is
+  replaced and keeps its ID, confirmed speakers, unidentifiable marks, and
+  recorded exports. A file whose own ID already belongs to a different recording
+  is stored under a new ID instead. This is also how to retry a file migration
+  skipped.
+- `transcribe transcripts export-legacy <directory>` writes the complete state
+  as 2.x files (`transcripts/<id>.transcript.json`, `speaker_profiles.json`,
+  `processing_history.jsonl`, `timing_history.jsonl`) into a new or empty
+  directory. It fails, writing nothing, if any state has no 2.x form.
+- `transcribe transcripts migration-status` shows what the 3.0.0 migration
+  imported, archived, skipped, or left in place, and any 2.x files an older
+  transcribe wrote after the migration.
+
+#### Upgrading from 2.x
+
+**Stop every transcribe process, including Folder Action invocations, before
+first running 3.0.0.** The first run of any command that opens state (including
+`transcripts`, `history`, and `--dry-run`) migrates the 2.x JSON state
+automatically: the managed `transcripts/*.transcript.json` files,
+`speaker_profiles.json`, `processing_history.jsonl`, and `timing_history.jsonl`
+are imported into `state.db`, then the originals are moved under
+`<state>/migrated-v1/` with the same layout, alongside a plain-text
+`MANIFEST.tsv` recording each file's outcome. Nothing is deleted. A transcript
+file that cannot be read, or that duplicates another document, is left in place
+and listed by `transcribe transcripts migration-status`; repair it and run
+`transcribe transcripts import <path>`. An unreadable `speaker_profiles.json`
+stops the migration with no changes made.
+
+To go back to 2.x without losing anything done since the upgrade:
+
+1. Stop every transcribe process, including Folder Action invocations.
+2. Run `transcribe transcripts export-legacy <dir>` with the 3.0.0 binary.
+3. Move the contents of `<dir>` into the state directory as its 2.x files,
+   replacing any there.
+4. Delete `state.db`, `state.db-wal`, and `state.db-shm` from the state
+   directory.
+5. Run the 2.x binary.
+
+If the 3.0.0 binary cannot run at all, moving the `migrated-v1/` files back to
+the paths recorded in `MANIFEST.tsv` and deleting `state.db*` restores the state
+as it was at migration time, without later changes.
+
+#### Breaking changes in 3.0.0
+
+- **State layout:** the JSON files in the state directory are replaced by
+  `state.db`; scripts that read `processing_history.jsonl`,
+  `timing_history.jsonl`, `speaker_profiles.json`, or `transcripts/` directly
+  need to query the database or use `export-legacy`.
+- **IDs instead of managed paths:** saved transcripts are addressed by ID only.
+  `transcribe transcripts` prints title and ID with no path, and 2.x paths such
+  as `…/transcripts/<uuid>.transcript.json` no longer resolve; the error points
+  at `transcribe transcripts`. Review headers, `review --apply`, and export
+  hints name the ID. Paths to portable `.transcript.json` files still work.
+- **`canonical_saved` event:** carries `id` and no longer has a `path` field.
+- **`--stateless`:** no longer reads or writes timing history (ETA hints come
+  only from the live run), since it never opens the database.
 
 ### Directory input
 
@@ -308,7 +395,7 @@ file/directory alias. Run `transcribe --help` to see these options.
 | `--model-dir <path>`                            | Model cache directory (default: `~/.cache/transcribe`)                                                 |
 | `--overwrite`                                   | Replace existing output files                                                                          |
 | `--redo`                                        | Reprocess inputs even when processing history says they already completed                              |
-| `--stateless`                                   | Do not consult or write idempotent processing history                                                  |
+| `--stateless`                                   | Do not open the state database: no processing or timing history, profiles, or saved transcripts        |
 | `--mark-imported`                               | Mark planned inputs as already imported without transcribing                                           |
 | `--dry-run` / `--dryrun`                        | Show what would process or skip without loading models, writing outputs, or updating history           |
 | `--verbose`                                     | Include debug-level progress, timing, and cache details in event logs or TUI diagnostics               |
@@ -361,14 +448,15 @@ same model and is refined as the run proceeds using WhisperKit's chunk progress,
 so the total ETA becomes more accurate the further a run gets. Disable with
 `--eta-hints off` or **`TRANSCRIBE_ETA_HINTS=0`** (inherited by the process
 environment). **`TRANSCRIBE_TIMING_STATS=0`** is still honored as a legacy
-alias.
+alias. `--stateless` also turns timing history off. Timing records are stored in
+the `timing_history` table of the [state database](#state-storage).
 
 Full schema, paths, and ETA behavior:
 **[specs/timing-history.md](specs/timing-history.md)**.
 
 ### Processing history and idempotency
 
-Successful transcription sessions are recorded in a processing history file so
+Successful transcription sessions are recorded in processing history so
 rerunning the same command can skip work that is already complete. The history
 tracks the input source, SHA-256 audio fingerprint, important transcription
 settings, requested output files, and completion metadata. `transcribe history`
@@ -396,8 +484,9 @@ whether they were processed, skipped, imported, or reprocessed.
   what would process or skip without preflighting audio, loading models, writing
   outputs, or updating processing history.
 
-The processing history lives next to the timing history under the transcribe
-state directory as `processing_history.jsonl`.
+Processing history lives in the `processing_history` table of the [state
+database](#state-storage), next to the timing history. Each row keeps the same
+JSON record 2.x wrote as one line of `processing_history.jsonl`.
 
 ### Voice Memos import
 

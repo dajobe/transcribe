@@ -172,20 +172,31 @@ completed sessions remain reusable.
 
 ### R8: Index history once per run and control ledger growth
 
-- [ ] Eliminate repeated complete history reads during planning.
+- [x] Move both ledgers into indexed storage (3.0.0; see the [SQLite state store
+  spec](specs/sqlite-state-store.md)). Both ledgers are tables in `state.db`
+  with verbatim JSON rows; import-baseline and completion decisions are indexed
+  queries on `(source_kind, source_id)`, and `TimingStore.loadRecent` reads
+  newest-first per `(model, diarization)` instead of decoding the whole file.
+- [ ] Take one processing snapshot per planning run. `contentDecision` (and
+  `staleExportHint`) still read every processing row per call, so planning N
+  sessions still scans the table N times.
+- [ ] Design retention/compaction. Verbatim rows make compaction a `DELETE`, but
+  what is safe to delete still depends on the completion-versus-audit-event
+  distinction below and R5's session identity.
 
-**Problem:** `importedBaselineDecision`, `completionDecision`, and
-`contentDecision` each call `loadRecords`. Planning N sessions can parse the
-entire ledger up to three times per session. Duplicate checks also append skip
-records, growing the input to future scans. `TimingStore.loadRecent` reads and
-decodes the complete timing file before keeping its recent suffix.
+**Problem (2.x, before the storage move):** `importedBaselineDecision`,
+`completionDecision`, and `contentDecision` each call `loadRecords`. Planning N
+sessions can parse the entire ledger up to three times per session. Duplicate
+checks also append skip records, growing the input to future scans.
+`TimingStore.loadRecent` reads and decodes the complete timing file before
+keeping its recent suffix.
 
 **Approach:** Load a processing snapshot once, index it by source and content,
 and pass it through planning. Distinguish completion state from skip audit
 events. Add a retention/compaction design that preserves imported baselines and
-usable completions; use measurements to decide whether SQLite is warranted.
-Bound timing-history reads or retained working data. Coordinate concurrency
-semantics with R12 rather than treating a snapshot as a lock.
+usable completions (SQLite was adopted in 3.0.0, so this is now row deletion).
+Coordinate concurrency semantics with R12 rather than treating a snapshot as a
+lock.
 
 **Acceptance:** Benchmark increasing session and ledger sizes. Verify one
 snapshot load per planning run, equivalent decisions on existing fixtures, and
@@ -263,12 +274,22 @@ inference is on-device while model acquisition can use the network.
 
 ### R12: Coordinate overlapping processes
 
-- [ ] Add native locking around conflicting transcription work.
+- [x] Serialize state mutations natively (3.0.0; see the [SQLite state store
+  spec](specs/sqlite-state-store.md)). Document, profile, and ledger writes are
+  SQLite transactions, so a managed confirm commits document and profile rows
+  together; export render plus record commit for a managed document is
+  serialized by `<state>/locks/<id>.lock`; the per-document and profile `.lock`
+  sidecars of the managed store are gone (portable files keep theirs).
+- [ ] Add native locking around conflicting transcription work: the wider
+  session/claim lock over the check/process/write sequence below. The database
+  gives it a home (a session claims a row held across the pipeline), but nothing
+  implements it yet.
 
-**Problem:** `LockedAppendWriter` protects ledger appends, not the
-check/process/write sequence. Two invocations can both decide work is new,
-perform duplicate inference, and race on outputs. The Folder Action wrapper's
-optional external `flock` command does not cover every CLI invocation.
+**Problem:** Ledger appends (formerly `LockedAppendWriter`, now database
+transactions) are serialized, but not the check/process/write sequence. Two
+invocations can both decide work is new, perform duplicate inference, and race
+on outputs. The Folder Action wrapper's optional external `flock` command does
+not cover every CLI invocation.
 
 **Approach:** Define an appropriate native lock scope for conflicting sessions
 and output paths. Acquire it before the final skip/overwrite decision and
@@ -463,7 +484,9 @@ that path to redirect the write.
 ### [FIXED] Timing history file permissions (Informational)
 
 `TimingStore.swift` and `ProcessingStore.swift` now create and tighten history
-files to mode `0600` (owner-only) via `LockedAppendWriter`.
+files to mode `0600` (owner-only) via `LockedAppendWriter`. (Since 3.0.0 both
+ledgers live in `state.db`, which with its `-wal` and `-shm` files is `0600`;
+`LockedAppendWriter` was removed.)
 
 ### [PARTIAL] Input size limit (Informational)
 
