@@ -617,17 +617,59 @@ enum CanonicalTranscriptStore {
         }
     }
 
+    /// Every stored document ID as written, including rows whose ID does not
+    /// parse as a UUID: `IDAbbreviator` needs the complete prefix space.
+    static func allDocumentIDs() throws -> [String] {
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                try database.query("SELECT id FROM documents") { $0.text(0) ?? "" }
+            }
+        }
+    }
+
+    /// Saved document IDs keyed by `HistoryFormatter.sourceHashesKey` of
+    /// their source hashes, for joining processing-history records to the
+    /// documents they produced. A row whose hashes do not decode is skipped:
+    /// it only loses that row's history annotation. Should two rows share a
+    /// hash set, the most recently updated one wins (ties broken by ID).
+    static func documentIDsBySourceHashes() throws -> [String: String] {
+        let rows = try StateStore.withDatabase { database in
+            try database.inTransaction(.read) {
+                try database.query("SELECT id, source_hashes FROM documents ORDER BY updated_at, id") { row in
+                    (row.text(0) ?? "", row.text(1) ?? "")
+                }
+            }
+        }
+        var map: [String: String] = [:]
+        for (id, hashesJSON) in rows {
+            guard !id.isEmpty,
+                  let hashes = try? JSONDecoder().decode([String].self, from: Data(hashesJSON.utf8)),
+                  let key = HistoryFormatter.sourceHashesKey(hashes) else { continue }
+            map[key] = id
+        }
+        return map
+    }
+
     /// Stored document IDs beginning with `prefix` (lowercase hex and
     /// dashes), sorted.
     static func documentIDs(withPrefix prefix: String) throws -> [String] {
         try StateStore.withDatabase { database in
-            try database.inTransaction(.read) {
-                try database.query(
-                    "SELECT id FROM documents WHERE substr(id, 1, ?) = ? ORDER BY id",
-                    [.integer(Int64(prefix.count)), .text(prefix)]
-                ) { $0.text(0) ?? "" }
-            }
+            try database.inTransaction(.read) { try documentIDs(withPrefix: prefix, in: database) }
         }
+    }
+
+    /// `documentIDs(withPrefix:)` through `StateDatabase.probeExisting`, for
+    /// an argument that may name a plain file: nil whenever the state
+    /// database cannot be read without side effects.
+    static func probeDocumentIDs(withPrefix prefix: String) -> [String]? {
+        StateDatabase.probeExisting { try documentIDs(withPrefix: prefix, in: $0) }
+    }
+
+    private static func documentIDs(withPrefix prefix: String, in database: StateDatabase) throws -> [String] {
+        try database.query(
+            "SELECT id FROM documents WHERE substr(id, 1, ?) = ? ORDER BY id",
+            [.integer(Int64(prefix.count)), .text(prefix)]
+        ) { $0.text(0) ?? "" }
     }
 
     /// Distinct segment speaker labels, sorted: the lifted

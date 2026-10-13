@@ -76,9 +76,13 @@ enum SpeakerCommands {
                transcribe transcripts import <path>
                transcribe transcripts export-legacy <directory>
 
-        Lists saved canonical transcripts: title and ID. Pass the ID (any unique
-        prefix works) to inspect, speakers review/confirm/clear, or export;
-        those commands also accept a path to a portable .transcript.json file.
+        Lists saved canonical transcripts: ID, last update time, and title.
+        IDs are shown shortened to their unique prefix, git-style; pass the
+        shown ID (or any longer unique prefix) to inspect, speakers
+        review/confirm/clear, or export; those commands also accept a path to
+        a portable .transcript.json file. A bare ID-shaped argument that
+        uniquely matches a saved document wins over a same-named file; use
+        ./name to reach the file.
 
         migration-status shows what the move from 2.x JSON state files into the
         state database imported, archived, skipped, or left in place.
@@ -122,25 +126,52 @@ enum SpeakerCommands {
         }
         try require(args.isEmpty, "Usage: transcribe transcripts [migration-status | export-document | import | export-legacy]. Run transcribe transcripts --help.")
         let listing = try CanonicalTranscriptStore.listing(order: .id)
-        if listing.isEmpty { print("No saved canonical transcripts.") }
-        for entry in listing {
-            let id = entry.id?.uuidString.lowercased() ?? safeText(entry.rawID)
-            // A row this command cannot use is reported in place so the rest
-            // of the listing still reaches the user.
-            guard entry.id != nil else {
-                let reason = errorText(CanonicalTranscriptStore.StoreError.invalidData("stored document ID is not a UUID"))
-                print("\(Terminal.stdout.red("(unreadable)"))\t\(id)\t\(safeText(reason))")
-                continue
-            }
-            guard !entry.basename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                let reason = errorText(CanonicalTranscriptStore.StoreError.invalidData("basename is empty"))
-                print("\(Terminal.stdout.red("(unreadable)"))\t\(id)\t\(safeText(reason))")
-                continue
-            }
-            // The ID is the argument speaker commands accept, so it gets its
-            // own copyable column.
-            print("\(Terminal.stdout.bold(safeText(entry.basename)))\t\(id)")
+        guard !listing.isEmpty else {
+            print("No saved canonical transcripts.")
+            return
         }
+        // Shortening considers every row, readable or not: resolution
+        // matches against the same stored text.
+        let abbreviator = IDAbbreviator(ids: listing.map(\.rawID))
+        let idWidth = max(
+            IDAbbreviator.floor,
+            listing.map { abbreviator.shorten($0.rawID).count }.max() ?? 0
+        )
+        print(Terminal.stdout.bold(transcriptsListingHeader(idWidth: idWidth)))
+        let now = Date()
+        for entry in listing {
+            print(transcriptsListingLine(entry, now: now, abbreviator: abbreviator, idWidth: idWidth))
+        }
+    }
+
+    static func transcriptsListingHeader(idWidth: Int = IDAbbreviator.floor) -> String {
+        HistoryFormatter.pad("ID", idWidth) + "  "
+            + HistoryFormatter.pad("UPDATED", HistoryFormatter.timeColumnWidth) + "  "
+            + "TITLE"
+    }
+
+    static func transcriptsListingLine(
+        _ entry: TranscriptListing, now: Date,
+        abbreviator: IDAbbreviator, idWidth: Int = IDAbbreviator.floor
+    ) -> String {
+        let id = safeText(abbreviator.shorten(entry.rawID))
+        let updated = entry.updatedAt.isEmpty
+            ? "-" : safeText(HistoryFormatter.formatTimestamp(entry.updatedAt, now: now))
+        let columns = HistoryFormatter.pad(id, idWidth) + "  "
+            + HistoryFormatter.pad(updated, HistoryFormatter.timeColumnWidth) + "  "
+        // A row this command cannot use is reported in place so the rest of
+        // the listing still reaches the user.
+        guard entry.id != nil else {
+            let reason = errorText(CanonicalTranscriptStore.StoreError.invalidData("stored document ID is not a UUID"))
+            return columns + "\(Terminal.stdout.red("(unreadable)")) \(safeText(reason))"
+        }
+        guard !entry.basename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            let reason = errorText(CanonicalTranscriptStore.StoreError.invalidData("basename is empty"))
+            return columns + "\(Terminal.stdout.red("(unreadable)")) \(safeText(reason))"
+        }
+        // Styling only the last column keeps the padding arithmetic visibly
+        // untouched by ANSI codes.
+        return columns + Terminal.stdout.bold(safeText(entry.basename))
     }
 
     /// Prints the migration manifest (`migration_sources`) grouped by
@@ -253,7 +284,7 @@ enum SpeakerCommands {
                 exitCode: .outputWrite
             )
         }
-        print(color.green("Exported \(id.uuidString.lowercased()) to \(safeText(destination.path))."))
+        print(color.green("Exported \(IDAbbreviator.fromStore().shorten(id.uuidString.lowercased())) to \(safeText(destination.path))."))
     }
 
     /// Test seam: runs after import has read its file and before it opens
@@ -304,11 +335,12 @@ enum SpeakerCommands {
             // the rows, so a failed rewrite is retried next time.
             try? StateStore.withDatabase { try StateMigration.writeManifest($0) }
         }
-        let id = outcome.id.uuidString.lowercased()
+        let abbreviator = IDAbbreviator.fromStore()
+        let id = abbreviator.shorten(outcome.id.uuidString.lowercased())
         if outcome.replacedExisting {
             print(color.green("Imported \(safeText(url.path)) as \(id), replacing the saved transcript of the same recording; its confirmed speakers, unidentifiable marks, and recorded exports carry forward."))
         } else if let previous = outcome.reassignedFrom {
-            print(color.green("Imported \(safeText(url.path)) as \(id).") + " Its own ID \(previous.uuidString.lowercased()) belongs to a different saved recording, so it was given a new one.")
+            print(color.green("Imported \(safeText(url.path)) as \(id).") + " Its own ID \(abbreviator.shorten(previous.uuidString.lowercased())) belongs to a different saved recording, so it was given a new one.")
         } else {
             print(color.green("Imported \(safeText(url.path)) as \(id)."))
         }
@@ -692,8 +724,14 @@ enum SpeakerCommands {
             return
         }
         try require(args.count == 1, withSplitPathHint("Usage: transcribe inspect <transcript>", args))
-        let summary = try loadSummary(transcriptRef(args[0], arguments: args), arguments: args)
-        print("Transcript: \(summary.id)\nModel: \(safeText(summary.model))\nDuration: \(summary.durationSeconds)s\nSegments: \(summary.segmentCount)")
+        let ref = try transcriptRef(args[0], arguments: args)
+        let summary = try loadSummary(ref, arguments: args)
+        let shownID: String
+        switch ref {
+        case .managed: shownID = shortManagedID(summary.id)
+        case .portable: shownID = summary.id.uuidString.lowercased()
+        }
+        print("Transcript: \(shownID)\nModel: \(safeText(summary.model))\nDuration: \(summary.durationSeconds)s\nSegments: \(summary.segmentCount)")
         printReview(summary)
     }
 
@@ -722,7 +760,12 @@ enum SpeakerCommands {
             let summary = try refreshed(loadSummary(ref, arguments: arguments))
             guard interactive else {
                 printReview(summary)
-                print(color.dim("Transcript ID: \(summary.id.uuidString.lowercased())"))
+                let shown: String
+                switch ref {
+                case .managed: shown = shortManagedID(summary.id)
+                case .portable: shown = summary.id.uuidString.lowercased()
+                }
+                print(color.dim("Transcript ID: \(shown)"))
                 return
             }
             guard session.needsAttention(summary) else {
@@ -737,9 +780,10 @@ enum SpeakerCommands {
             print("No saved canonical transcripts.")
             return
         }
+        let abbreviator = IDAbbreviator(ids: listing.map(\.rawID))
         guard interactive else {
             for entry in listing {
-                let id = entry.id?.uuidString.lowercased() ?? safeText(entry.rawID)
+                let id = safeText(abbreviator.shorten(entry.rawID))
                 do {
                     guard let uuid = entry.id else {
                         throw CanonicalTranscriptStore.StoreError.invalidData("stored document ID is not a UUID")
@@ -755,7 +799,7 @@ enum SpeakerCommands {
         }
         var reviewable: [TranscriptRef] = []
         for entry in listing {
-            let id = entry.id?.uuidString.lowercased() ?? safeText(entry.rawID)
+            let id = safeText(abbreviator.shorten(entry.rawID))
             do {
                 guard let uuid = entry.id else {
                     throw CanonicalTranscriptStore.StoreError.invalidData("stored document ID is not a UUID")
@@ -800,9 +844,16 @@ enum SpeakerCommands {
                 return document
             }
             printReview(TranscriptSummary(document))
-            report(color.green("Saved assignments for \(ref.displayName)."))
+            report(color.green("Saved assignments for \(shortManagedID(id))."))
             if refresh { refreshManagedExports(id: id, color: color) }
         }
+    }
+
+    /// A saved document's ID as listings show it. Managed refs only:
+    /// abbreviating opens the state database, which a command on a portable
+    /// file must not do (see `uniqueStoredID(shadowedBy:)`).
+    private static func shortManagedID(_ id: UUID) -> String {
+        IDAbbreviator.fromStore().shorten(id.uuidString.lowercased())
     }
 
     private static func idleMessage(for summary: TranscriptSummary, all: Bool) -> String {
@@ -964,20 +1015,30 @@ enum SpeakerCommands {
 
     // MARK: - Transcript arguments
 
-    /// Resolves a command-line transcript argument. A path to an existing
-    /// file is a portable document, used in place. Otherwise a value shaped
-    /// like a saved-document ID (the UUID printed by transcripts, inspect,
-    /// and review, or a unique prefix of one) resolves against the stored
-    /// documents. Managed documents have no file, so any other path is an
-    /// error that points at the ID form — including the 2.x managed paths
-    /// scripts may still hold.
+    /// Resolves a command-line transcript argument. A bare value shaped like
+    /// a saved-document ID (the UUID printed by transcripts, inspect, and
+    /// review, or a unique prefix of one) that matches exactly one stored
+    /// document names that document, even when a file of the same name sits
+    /// in the working directory; `./name` reaches the file. Otherwise a path
+    /// to an existing file is a portable document, used in place, and an
+    /// ID-shaped value resolves against the stored documents. Managed
+    /// documents have no file, so any other path is an error that points at
+    /// the ID form — including the 2.x managed paths scripts may still hold.
     private static func transcriptRef(_ reference: String, arguments: [String]) throws -> TranscriptRef {
         // Use the same target for a portable file's sidecar lock, read, and
         // atomic replace.
         // Renaming over an unresolved symlink would detach it from its target.
         let url = URL(fileURLWithPath: (reference as NSString).expandingTildeInPath)
             .resolvingSymlinksInPath()
-        if FileManager.default.fileExists(atPath: url.path) { return .portable(url) }
+        if FileManager.default.fileExists(atPath: url.path) {
+            if let id = uniqueStoredID(shadowedBy: reference) {
+                emitWarning(
+                    "\(safeText(reference)) was read as saved document \(IDAbbreviator.fromStore().shorten(id.uuidString.lowercased())); use ./\(safeText(reference)) (or any path containing /) for the file."
+                )
+                return .managed(id: id)
+            }
+            return .portable(url)
+        }
         guard let candidate = transcriptIDCandidate(reference) else {
             throw TranscribeError(
                 message: withSplitPathHint(
@@ -1004,6 +1065,22 @@ enum SpeakerCommands {
                 "Transcript ID '\(safeText(reference))' is ambiguous: \(matches.joined(separator: ", ")). Give more characters or the full ID."
             )
         }
+    }
+
+    /// The stored document a bare ID-shaped argument names when a file of
+    /// that name also exists, or nil to keep the file. Only a unique match
+    /// takes precedence: an unknown or ambiguous prefix would otherwise turn
+    /// a working file argument into an error. A `.transcript.json` suffix is
+    /// a filename, so it keeps the path reading. The lookup is a side-effect
+    /// free probe: a normal open runs migration and reappeared-file imports,
+    /// which a command reading a portable file must never trigger.
+    private static func uniqueStoredID(shadowedBy reference: String) -> UUID? {
+        guard !reference.lowercased().hasSuffix(".transcript.json"),
+              let candidate = transcriptIDCandidate(reference),
+              let matches = CanonicalTranscriptStore.probeDocumentIDs(withPrefix: candidate),
+              matches.count == 1
+        else { return nil }
+        return UUID(uuidString: matches[0])
     }
 
     /// The lowercased saved-document ID an argument may name: hex digits and

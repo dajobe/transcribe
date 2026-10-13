@@ -117,8 +117,14 @@ enum SpeakerReview {
         /// quits; decisions are applied per document either way.
         func run(documents: [TranscriptRef]) throws {
             var changedAnything = false
+            // Short IDs name managed documents only; a portable file shows
+            // its full ID, since a prefix could resolve to a managed copy.
+            let hasManaged = documents.contains {
+                if case .managed = $0 { return true } else { return false }
+            }
+            let abbreviator = hasManaged ? IDAbbreviator.fromStore() : nil
             for ref in documents {
-                let outcome = try review(document: ref)
+                let outcome = try review(document: ref, abbreviator: abbreviator)
                 changedAnything = changedAnything || outcome.changed
                 if outcome.quit { break }
             }
@@ -159,7 +165,7 @@ enum SpeakerReview {
             }
         }
 
-        private func review(document ref: TranscriptRef) throws -> (changed: Bool, quit: Bool) {
+        private func review(document ref: TranscriptRef, abbreviator: IDAbbreviator?) throws -> (changed: Bool, quit: Bool) {
             let document = try SpeakerCommands.refreshedDocument(ref)
             let pending = promptableSpeakers(of: document)
             guard !pending.isEmpty else { return (false, false) }
@@ -184,7 +190,13 @@ enum SpeakerReview {
             )
             // The ID is what speakers confirm/clear take to revise a
             // decision, so leave it on screen when the session moves on.
-            io.write(color.dim("Transcript ID: \(document.id.uuidString.lowercased())") + "\n")
+            let fullID = document.id.uuidString.lowercased()
+            let shownID: String
+            switch ref {
+            case .managed: shownID = abbreviator?.shorten(fullID) ?? fullID
+            case .portable: shownID = fullID
+            }
+            io.write(color.dim("Transcript ID: \(shownID)") + "\n")
             return (changed, quit)
         }
 

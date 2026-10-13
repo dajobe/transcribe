@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import transcribe
@@ -37,11 +38,13 @@ final class SpeakerCommandsTests: XCTestCase {
     }
 
     private func run(
-        _ args: [String], input: String? = nil, environment extra: [String: String] = [:]
+        _ args: [String], input: String? = nil, environment extra: [String: String] = [:],
+        currentDirectory: URL? = nil
     ) throws -> (Int32, String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: CLITests.transcribePath)
         process.arguments = args
+        if let currentDirectory { process.currentDirectoryURL = currentDirectory }
         var environment = ProcessInfo.processInfo.environment
         environment["XDG_STATE_HOME"] = directory.path
         environment["TRANSCRIBE_CONFIG"] = directory.appendingPathComponent("missing-config.json").path
@@ -218,8 +221,9 @@ final class SpeakerCommandsTests: XCTestCase {
 
         let list = try run(["transcripts"])
         XCTAssertEqual(list.0, 0, list.1)
-        XCTAssertTrue(list.1.contains("meeting\t\(good)\n"), list.1)
-        XCTAssertTrue(list.1.contains("(unreadable)\t\(damaged)\t"), list.1)
+        let lines = list.1.split(separator: "\n").map(String.init)
+        XCTAssertTrue(lines.contains { $0.hasPrefix(String(good.prefix(8))) && $0.hasSuffix("meeting") }, list.1)
+        XCTAssertTrue(lines.contains { $0.hasPrefix(String(damaged.prefix(8))) && $0.contains("(unreadable)") }, list.1)
     }
 
     /// A held document lock must stop a second command from starting its own
@@ -287,7 +291,12 @@ final class SpeakerCommandsTests: XCTestCase {
         let id = try CanonicalTranscriptStore.saveManaged(original)
         let list = try run(["transcripts"])
         XCTAssertEqual(list.0, 0, list.1)
-        XCTAssertEqual(list.1, "meeting\t\(id.uuidString.lowercased())\n", "title and ID only, no path")
+        let listLines = list.1.split(separator: "\n").map(String.init)
+        XCTAssertEqual(listLines.count, 2, "header and one row: \(list.1)")
+        XCTAssertTrue(listLines[0].hasPrefix("ID"), list.1)
+        XCTAssertTrue(listLines[1].hasPrefix(String(id.uuidString.lowercased().prefix(8)) + "  "), list.1)
+        XCTAssertTrue(listLines[1].hasSuffix("meeting"), list.1)
+        XCTAssertFalse(list.1.contains(one.path), "title and ID only, no path")
         let inspect = try run(["inspect", one.path])
         XCTAssertEqual(inspect.0, 0, inspect.1)
         XCTAssertTrue(inspect.1.contains("SPEAKER_0"))
@@ -341,7 +350,7 @@ final class SpeakerCommandsTests: XCTestCase {
         let table = try run(["speakers", "review"])
         XCTAssertEqual(table.0, 0, table.1)
         // The header names the document by ID; managed documents have no path.
-        XCTAssertTrue(table.1.contains("meeting\t\(one.uuidString.lowercased())\n"), table.1)
+        XCTAssertTrue(table.1.contains("meeting\t\(String(one.uuidString.lowercased().prefix(8)))\n"), table.1)
         XCTAssertTrue(table.1.contains("SPEAKER_0\tunidentified"), table.1)
 
         let interactive = try run(["speakers", "review", "--interactive"], input: "Dave\n")
@@ -427,7 +436,10 @@ final class SpeakerCommandsTests: XCTestCase {
         let list = try run(["transcripts"])
         XCTAssertEqual(list.0, 0, list.1)
         XCTAssertTrue(list.1.contains("meeting"), "healthy rows still list: \(list.1)")
-        XCTAssertTrue(list.1.contains("(unreadable)\tnot-a-uuid"), list.1)
+        XCTAssertTrue(
+            list.1.split(separator: "\n").contains { $0.hasPrefix("not-a-uu") && $0.contains("(unreadable)") },
+            list.1
+        )
     }
 
     func testReviewFlagValidation() throws {
@@ -554,7 +566,10 @@ final class SpeakerCommandsTests: XCTestCase {
 
         let list = try run(["transcripts"])
         XCTAssertEqual(list.0, 0, list.1)
-        XCTAssertTrue(list.1.contains("\t\(id)\n"), "listing shows the ID column: \(list.1)")
+        XCTAssertTrue(
+            list.1.split(separator: "\n").contains { $0.hasPrefix(String(id.prefix(8)) + "  ") },
+            "listing shows the shortened ID column: \(list.1)"
+        )
 
         let inspect = try run(["inspect", String(id.prefix(8))])
         XCTAssertEqual(inspect.0, 0, inspect.1)
@@ -601,6 +616,136 @@ final class SpeakerCommandsTests: XCTestCase {
         XCTAssertEqual(full.0, 0, "the full ID stays unambiguous: \(full.1)")
     }
 
+    /// Listings print shortened IDs for pasting back, so a same-named file in
+    /// the working directory must not capture the argument; `./` still
+    /// reaches the file.
+    func testUniqueSavedIDTakesPrecedenceOverSameNamedFile() throws {
+        let (_, id) = try managedDocument(hash: "a")
+        let short = String(id.prefix(8))
+        let cwd = directory.appendingPathComponent("cwd")
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        try Data("not a transcript\n".utf8).write(to: cwd.appendingPathComponent(short))
+
+        let byID = try run(["inspect", short], currentDirectory: cwd)
+        XCTAssertEqual(byID.0, 0, byID.1)
+        XCTAssertTrue(byID.1.contains("Segments: 1"), byID.1)
+        XCTAssertTrue(byID.1.contains("Transcript: \(short)\n"), byID.1)
+        XCTAssertTrue(byID.1.contains("was read as saved document \(short)"), byID.1)
+        XCTAssertTrue(byID.1.contains("./\(short)"), byID.1)
+
+        let byPath = try run(["inspect", "./" + short], currentDirectory: cwd)
+        XCTAssertEqual(byPath.0, 3, byPath.1)
+        XCTAssertTrue(byPath.1.contains("Cannot read transcript"), byPath.1)
+        XCTAssertFalse(byPath.1.contains("was read as saved document"), byPath.1)
+    }
+
+    /// An ID-shaped name that matches no saved document keeps reading the
+    /// file, with no warning.
+    func testUnmatchedIDShapedFileNameStillReadsTheFile() throws {
+        _ = try managedDocument(hash: "a", id: try XCTUnwrap(UUID(uuidString: "aaaaaaaa-0000-4000-8000-000000000000")))
+        let cwd = directory.appendingPathComponent("cwd")
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        let source = try document("portable", hash: "b")
+        let name = "deadbeef"
+        try FileManager.default.copyItem(at: source, to: cwd.appendingPathComponent(name))
+
+        let result = try run(["inspect", name], currentDirectory: cwd)
+        XCTAssertEqual(result.0, 0, result.1)
+        XCTAssertTrue(result.1.contains("Segments: 1"), result.1)
+        XCTAssertFalse(result.1.contains("was read as saved document"), result.1)
+        // A portable file's ID is not abbreviated: that would open the store.
+        let portableID = try CanonicalTranscriptStore.load(from: source).id.uuidString.lowercased()
+        XCTAssertTrue(result.1.contains("Transcript: \(portableID)\n"), result.1)
+    }
+
+    /// The shadow lookup behind a bare ID-shaped file argument must not run
+    /// the database's startup phases: here a normal open would import the
+    /// recreated 2.x ledger and move it to migrated-v1/.
+    func testShadowLookupLeavesTheStateDirectoryUntouched() throws {
+        let stored = try XCTUnwrap(UUID(uuidString: "aaaaaaaa-0000-4000-8000-000000000000"))
+        _ = try managedDocument(hash: "a", id: stored)
+        StateStore.closeShared()
+        let state = try StatePaths.stateDirectoryURL()
+        let ledger = state.appendingPathComponent("processing_history.jsonl")
+        let fingerprint = "{\"files\":[{\"path\":\"/rec/a.m4a\",\"sha256\":\"0\",\"bytes\":0,\"mtime\":null}]}"
+        let line = "{\"basename\":\"a.m4a\",\"completed_at\":\"2026-06-01T10:00:00Z\",\"output_paths\":[],\"recorded_at\":null,\"recording_title\":null,\"schema_version\":1,\"source_fingerprint\":\(fingerprint),\"source_id\":\"file:/rec/a.m4a\",\"source_kind\":\"file\",\"voice_memos_path\":null,\"voice_memos_unique_id\":null,\"warning_count\":0}\n"
+        try Data(line.utf8).write(to: ledger)
+        let cwd = directory.appendingPathComponent("cwd")
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: try document("portable", hash: "b"), to: cwd.appendingPathComponent("deadbeef"))
+        let before = try snapshot(of: state)
+
+        let result = try run(["inspect", "deadbeef"], currentDirectory: cwd)
+        XCTAssertEqual(result.0, 0, result.1)
+        XCTAssertTrue(result.1.contains("Segments: 1"), result.1)
+        XCTAssertFalse(result.1.contains("was read as saved document"), result.1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ledger.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: state.appendingPathComponent("migrated-v1").path))
+        XCTAssertEqual(try snapshot(of: state), before)
+
+        // The probe still sees the stored document through the same files.
+        try Data("not a transcript\n".utf8).write(to: cwd.appendingPathComponent("aaaaaaaa"))
+        let clash = try run(["inspect", "aaaaaaaa"], currentDirectory: cwd)
+        XCTAssertEqual(clash.0, 0, clash.1)
+        XCTAssertTrue(clash.1.contains("was read as saved document aaaaaaaa"), clash.1)
+        XCTAssertTrue(clash.1.contains("Transcript: aaaaaaaa\n"), clash.1)
+    }
+
+    /// A schema this binary does not understand is never opened for the
+    /// shadow lookup, let alone refused loudly: the file argument wins.
+    func testShadowLookupIgnoresANewerSchema() throws {
+        let stored = try XCTUnwrap(UUID(uuidString: "aaaaaaaa-0000-4000-8000-000000000000"))
+        _ = try managedDocument(hash: "a", id: stored)
+        try StateStore.withDatabase { try $0.exec("PRAGMA user_version = \(StateDatabase.schemaVersion + 1)") }
+        StateStore.closeShared()
+        let state = try StatePaths.stateDirectoryURL()
+        let cwd = directory.appendingPathComponent("cwd")
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: try document("portable", hash: "b"), to: cwd.appendingPathComponent("aaaaaaaa"))
+        let before = try snapshot(of: state)
+
+        let result = try run(["inspect", "aaaaaaaa"], currentDirectory: cwd)
+        XCTAssertEqual(result.0, 0, result.1)
+        XCTAssertFalse(result.1.contains("was read as saved document"), result.1)
+        XCTAssertTrue(result.1.contains("Segments: 1"), result.1)
+        XCTAssertEqual(try snapshot(of: state), before)
+    }
+
+    /// Every entry under `root` with its POSIX mode and, for files, a digest
+    /// of the bytes.
+    private func snapshot(of root: URL) throws -> [String: String] {
+        var entries: [String: String] = [:]
+        let paths = try FileManager.default.subpathsOfDirectory(atPath: root.path)
+        for path in paths {
+            let full = root.appendingPathComponent(path).path
+            let attributes = try FileManager.default.attributesOfItem(atPath: full)
+            let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1
+            var isDirectory: ObjCBool = false
+            _ = FileManager.default.fileExists(atPath: full, isDirectory: &isDirectory)
+            let content = isDirectory.boolValue
+                ? "dir"
+                : SHA256.hash(data: try Data(contentsOf: URL(fileURLWithPath: full))).map { String(format: "%02x", $0) }.joined()
+            entries[path] = "\(String(mode, radix: 8)) \(content)"
+        }
+        return entries
+    }
+
+    func testCorruptUpdatedAtIsSanitisedInTheListing() throws {
+        let (uuid, _) = try managedDocument(hash: "a")
+        try StateStore.withDatabase { database in
+            try database.inTransaction(.write) {
+                try database.execute(
+                    "UPDATE documents SET updated_at = ? WHERE id = ?",
+                    [.text("bad\u{1B}[31mtime"), .text(uuid.uuidString.lowercased())]
+                )
+            }
+        }
+        let list = try run(["transcripts"])
+        XCTAssertEqual(list.0, 0, list.1)
+        XCTAssertTrue(list.1.contains("meeting"), list.1)
+        XCTAssertFalse(list.1.contains("\u{1B}"), list.1)
+    }
+
     /// Scripts may hold 2.x managed paths; those dangle now, and the error
     /// says how saved documents are addressed instead.
     func testDanglingManagedPathPointsAtTheIDForm() throws {
@@ -620,12 +765,30 @@ final class SpeakerCommandsTests: XCTestCase {
 
         let table = try run(["speakers", "review", id])
         XCTAssertEqual(table.0, 0, table.1)
-        XCTAssertTrue(table.1.contains("Transcript ID: \(id)"), table.1)
+        XCTAssertTrue(table.1.contains("Transcript ID: \(String(id.prefix(8)))\n"), table.1)
 
         let interactive = try run(["speakers", "review", id, "--interactive"], input: "Dave\n")
         XCTAssertEqual(interactive.0, 0, interactive.1)
         XCTAssertTrue(interactive.1.contains("Confirmed SPEAKER_0 as Dave"), interactive.1)
-        XCTAssertTrue(interactive.1.contains("Transcript ID: \(id)"), interactive.1)
+        XCTAssertTrue(interactive.1.contains("Transcript ID: \(String(id.prefix(8)))\n"), interactive.1)
+    }
+
+    /// A short prefix resolves to managed documents, so a portable file whose
+    /// ID also names an imported managed copy must show its full ID.
+    func testReviewOfAPortableFilePrintsTheFullID() throws {
+        let file = try document("portable", hash: "b")
+        let uuid = try CanonicalTranscriptStore.load(from: file).id
+        let id = uuid.uuidString.lowercased()
+        _ = try managedDocument(hash: "a", id: uuid)
+
+        let table = try run(["speakers", "review", file.path])
+        XCTAssertEqual(table.0, 0, table.1)
+        XCTAssertTrue(table.1.contains("Transcript ID: \(id)\n"), table.1)
+
+        let interactive = try run(["speakers", "review", file.path, "--interactive"], input: "Dave\n")
+        XCTAssertEqual(interactive.0, 0, interactive.1)
+        XCTAssertTrue(interactive.1.contains("Confirmed SPEAKER_0 as Dave"), interactive.1)
+        XCTAssertTrue(interactive.1.contains("Transcript ID: \(id)\n"), interactive.1)
     }
 
     func testReviewApplyOnAManagedDocumentNamesItsID() throws {
@@ -635,7 +798,8 @@ final class SpeakerCommandsTests: XCTestCase {
 
         let applied = try run(["speakers", "review", id, "--apply"])
         XCTAssertEqual(applied.0, 0, applied.1)
-        XCTAssertTrue(applied.1.contains("Saved assignments for \(id)."), applied.1)
+        XCTAssertTrue(applied.1.contains("Saved assignments for \(String(id.prefix(8)))."), applied.1)
+        XCTAssertFalse(applied.1.contains(id), applied.1)
         XCTAssertTrue(applied.1.contains("suggested"), applied.1)
         XCTAssertEqual(try CanonicalTranscriptStore.load(id: uuid).speakerMatches["SPEAKER_0"]?.status, .suggested)
 

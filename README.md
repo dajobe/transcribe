@@ -114,10 +114,16 @@ independently of output formats.
 
 Saved documents are addressed by ID: commands that take a transcript accept the
 document's ID or any unique prefix of at least four characters. `transcripts`,
-`inspect`, and `speakers review` all print the ID. The same commands also accept
+`inspect`, and `speakers review` all print the ID, shortened git-style to the
+smallest prefix (at least eight characters) that is unique among the saved
+documents; the shortened form is always accepted back. `transcribe transcripts`
+lists ID, last update time, and title; `transcribe history` shows each entry's
+saved document ID when one covers the same audio. The same commands also accept
 a path to a portable `.transcript.json` file (see [State
 storage](#state-storage)), which they read and update in place without adding it
-to the database.
+to the database. When a bare argument both names a file in the current directory
+and uniquely matches a saved document ID, the saved document wins with a
+warning; write `./name` to read the file instead.
 
 The fastest way to name speakers is the interactive review. On a terminal it
 walks every saved transcript that still needs attention (or one document when

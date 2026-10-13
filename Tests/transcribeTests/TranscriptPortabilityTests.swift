@@ -209,9 +209,12 @@ final class TranscriptPortabilityTests: XCTestCase {
 
         let result = try run(["transcripts", "import", file.path])
         XCTAssertEqual(result.status, 0, result.stderr)
-        XCTAssertEqual(result.stdout, "Imported \(file.path) as \(idA.uuidString.lowercased()).\n")
+        XCTAssertEqual(result.stdout, "Imported \(file.path) as aaaaaaaa.\n", "IDs display git-style shortened")
         let listing = try run(["transcripts"])
-        XCTAssertTrue(listing.stdout.contains("meeting\t\(idA.uuidString.lowercased())"), listing.stdout)
+        XCTAssertTrue(
+            listing.stdout.split(separator: "\n").contains { $0.hasPrefix("aaaaaaaa") && $0.hasSuffix("meeting") },
+            listing.stdout
+        )
         XCTAssertEqual(try CanonicalTranscriptStore.load(id: idA), original)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + ".lock"), "import leaves no sidecar")
     }

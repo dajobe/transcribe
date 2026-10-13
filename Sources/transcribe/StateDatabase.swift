@@ -95,6 +95,48 @@ final class StateDatabase {
         }
     }
 
+    /// Read-only connection for `probeExisting`; runs none of `initialize`.
+    private init(probing url: URL, busyTimeoutMilliseconds: Int32) throws {
+        databaseURL = url
+        self.busyTimeoutMilliseconds = busyTimeoutMilliseconds
+        // `mode=ro` alone still lets SQLite create the `-wal` and `-shm`
+        // companions and write the WAL index; `readonly_shm=1` forbids both.
+        let uri = URL(fileURLWithPath: url.path, isDirectory: false).absoluteString + "?mode=ro&readonly_shm=1"
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI
+        let status = sqlite3_open_v2(uri, &handle, flags, nil)
+        if status != SQLITE_OK {
+            let message = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "code \(status)"
+            closeConnection()
+            throw StateDatabaseError.sqlite(code: status, message: "cannot open \(url.path): \(message)")
+        }
+        sqlite3_busy_timeout(handle, busyTimeoutMilliseconds)
+    }
+
+    /// Runs `body` against the existing state database over a read-only
+    /// connection that skips every startup phase, or returns nil when that
+    /// is not possible. For lookups triggered by what may be a plain file
+    /// argument: such a probe must leave the state directory byte-for-byte
+    /// untouched — no `init.lock`, no mode tightening, no schema creation or
+    /// upgrade, no archive phase, no import of reappeared legacy files.
+    ///
+    /// Every obstacle is nil, never an error, so the caller falls back to
+    /// treating the argument as a file: no database, a symlinked one, missing
+    /// `-wal`/`-shm` companions (SQLite may not create them here), a WAL
+    /// index that needs recovery, a lock held past the short timeout, an
+    /// interrupted setup, or a schema version other than `schemaVersion`.
+    static func probeExisting<T>(_ body: (StateDatabase) throws -> T) -> T? {
+        guard let url = try? StatePaths.stateDatabaseURL() else { return nil }
+        var linkStat = stat()
+        guard lstat(url.path, &linkStat) == 0, linkStat.st_mode & S_IFMT == S_IFREG else { return nil }
+        guard let database = try? StateDatabase(probing: url, busyTimeoutMilliseconds: 2_000) else { return nil }
+        return try? database.inTransaction(.read) { () -> T? in
+            guard try database.userVersion() == schemaVersion,
+                  try database.metaValue("import_complete") != nil
+            else { return nil }
+            return try body(database)
+        }
+    }
+
     deinit {
         if handle != nil {
             sqlite3_close_v2(handle)

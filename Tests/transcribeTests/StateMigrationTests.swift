@@ -912,8 +912,9 @@ final class StateMigrationTests: XCTestCase {
         XCTAssertEqual(first.status, 0, first.stderr)
         XCTAssertTrue(first.stderr.contains("Migrated transcribe state into \(databaseURL.path)"), first.stderr)
         XCTAssertTrue(first.stderr.contains("migrated-v1"), first.stderr)
-        XCTAssertTrue(first.stdout.contains("alpha\t\(idA.uuidString.lowercased())"), first.stdout)
-        XCTAssertTrue(first.stdout.contains("beta\t\(idB.uuidString.lowercased())"), first.stdout)
+        let rows = first.stdout.split(separator: "\n").map(String.init)
+        XCTAssertTrue(rows.contains { $0.hasPrefix("aaaaaaaa") && $0.hasSuffix("alpha") }, first.stdout)
+        XCTAssertTrue(rows.contains { $0.hasPrefix("bbbbbbbb") && $0.hasSuffix("beta") }, first.stdout)
 
         let second = try run(["transcripts"])
         XCTAssertEqual(second.status, 0, second.stderr)
@@ -1126,7 +1127,7 @@ final class StateMigrationTests: XCTestCase {
         _ = try CanonicalTranscriptStore.save(repaired, to: bad)
         let imported = try run(["transcripts", "import", bad.path])
         XCTAssertEqual(imported.status, 0, imported.stderr)
-        XCTAssertTrue(imported.stdout.hasPrefix("Imported \(bad.path) as dddddddd-0000-4000-8000-000000000004.\n"), imported.stdout)
+        XCTAssertTrue(imported.stdout.hasPrefix("Imported \(bad.path) as dddddddd.\n"), imported.stdout)
         XCTAssertTrue(imported.stdout.contains("migration-status lists it as imported later"), imported.stdout)
 
         var status = try run(["transcripts", "migration-status"])
@@ -1143,7 +1144,7 @@ final class StateMigrationTests: XCTestCase {
         // alpha in place, keeping alpha's ID.
         let replaced = try run(["transcripts", "import", conflict.path])
         XCTAssertEqual(replaced.status, 0, replaced.stderr)
-        XCTAssertTrue(replaced.stdout.contains("as \(idA.uuidString.lowercased()), replacing the saved transcript of the same recording"), replaced.stdout)
+        XCTAssertTrue(replaced.stdout.contains("as aaaaaaaa, replacing the saved transcript of the same recording"), replaced.stdout)
         status = try run(["transcripts", "migration-status"])
         XCTAssertTrue(status.stdout.contains("Imported later with transcripts import (2):"), status.stdout)
         XCTAssertFalse(status.stdout.contains("Conflicts ("), status.stdout)

@@ -1,5 +1,9 @@
 import Foundation
 
+private func safeText(_ text: String) -> String {
+    text.components(separatedBy: .controlCharacters).joined(separator: " ")
+}
+
 /// Renders entries from the processing-history ledger.
 enum HistoryCommand {
     static func run(count: Int) throws {
@@ -21,7 +25,17 @@ enum HistoryCommand {
             return
         }
 
-        let rendered = HistoryFormatter.format(records: recent, now: Date()) + "\n"
+        // Document IDs are a convenience join; a failure to read them must
+        // not take the history listing down with it.
+        let join = (try? CanonicalTranscriptStore.documentIDsBySourceHashes()) ?? [:]
+        let abbreviator = IDAbbreviator.fromStore()
+        var documentIDs: [String: String] = [:]
+        for record in recent {
+            guard let key = HistoryFormatter.sourceHashesKey(record.source_fingerprint.files.map(\.sha256)),
+                  let id = join[key] else { continue }
+            documentIDs[key] = abbreviator.shorten(id)
+        }
+        let rendered = HistoryFormatter.format(records: recent, now: Date(), documentIDs: documentIDs) + "\n"
         HistoryCommand.write(rendered)
     }
 
@@ -31,37 +45,72 @@ enum HistoryCommand {
 }
 
 enum HistoryFormatter {
-    static let timeColumnWidth = 18
+    /// Wide enough for a full stored timestamp ("2026-10-12T15:54:03Z", 20
+    /// characters), which the relative phrasing falls back to after a week.
+    static let timeColumnWidth = 20
+    /// Minimum ID column width: `IDAbbreviator.floor`. The caller passes IDs
+    /// already shortened git-style, and the column widens to the longest one.
+    static let idColumnWidth = IDAbbreviator.floor
     static let whyColumnWidth = 11
     static let kindColumnWidth = 6
     static let recordedColumnWidth = 12
 
-    static func format(records: [ProcessingRecord], now: Date) -> String {
+    static func format(records: [ProcessingRecord], now: Date, documentIDs: [String: String] = [:]) -> String {
+        let idWidth = max(
+            idColumnWidth,
+            records.map { displayDocumentID($0, documentIDs: documentIDs).count }.max() ?? 0
+        )
         // Style the header as one whole line: ANSI codes inside padded
         // columns would not change visible alignment, but styling after
         // padding keeps the width arithmetic obviously untouched.
-        ([Terminal.stdout.bold(header())] + records.map { line(for: $0, now: now) }).joined(separator: "\n")
+        return ([Terminal.stdout.bold(header(idWidth: idWidth))]
+            + records.map { line(for: $0, now: now, documentIDs: documentIDs, idWidth: idWidth) })
+            .joined(separator: "\n")
     }
 
-    static func header() -> String {
+    static func header(idWidth: Int = idColumnWidth) -> String {
         pad("WHEN", timeColumnWidth) + "  "
+            + pad("ID", idWidth) + "  "
             + pad("WHY", whyColumnWidth) + "  "
             + pad("KIND", kindColumnWidth) + "  "
             + pad("RECORDED", recordedColumnWidth) + "  "
             + "FILE"
     }
 
-    static func line(for record: ProcessingRecord, now: Date) -> String {
-        let time = formatTimestamp(record.completed_at, now: now)
+    static func line(for record: ProcessingRecord, now: Date, documentIDs: [String: String] = [:], idWidth: Int = idColumnWidth) -> String {
+        // The timestamp fallback and the label come from ledger records,
+        // which imports can fill with arbitrary text; sanitize like the ID.
+        let time = safeText(formatTimestamp(record.completed_at, now: now))
+        let id = displayDocumentID(record, documentIDs: documentIDs)
         let why = displayReason(record)
         let kind = displayKind(record)
         let recorded = displayRecordedAt(record)
-        let label = displayLabel(record)
+        let label = safeText(displayLabel(record))
         return pad(time, timeColumnWidth) + "  "
+            + pad(id, idWidth) + "  "
             + pad(why, whyColumnWidth) + "  "
             + pad(kind, kindColumnWidth) + "  "
             + pad(recorded, recordedColumnWidth) + "  "
             + label
+    }
+
+    /// The saved document covering the same audio bytes, joined through the
+    /// source fingerprint, or "-" when none matches (stateless runs, deleted
+    /// documents, records without fingerprints). A corrupt stored ID may
+    /// hold control characters, so they are replaced before the text sizes
+    /// the column or reaches the terminal.
+    static func displayDocumentID(_ record: ProcessingRecord, documentIDs: [String: String]) -> String {
+        guard let key = sourceHashesKey(record.source_fingerprint.files.map(\.sha256)),
+              let id = documentIDs[key] else { return "-" }
+        return safeText(id)
+    }
+
+    /// Canonical lookup key for a set of source content hashes: the match is
+    /// set equality, the same rule `ExportRefresh.staleExportHint` applies.
+    static func sourceHashesKey(_ hashes: [String]) -> String? {
+        let normalized = Set(hashes.map { $0.lowercased() })
+        guard !normalized.isEmpty else { return nil }
+        return normalized.sorted().joined(separator: "\n")
     }
 
     /// Relative phrase for the most recent week ("just now", "5 mins ago",

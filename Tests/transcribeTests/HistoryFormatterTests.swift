@@ -138,7 +138,8 @@ final class HistoryFormatterTests: XCTestCase {
 
         XCTAssertEqual(lines.count, 2)
         XCTAssertEqual(lines[0], HistoryFormatter.header())
-        XCTAssertTrue(lines[0].hasPrefix("WHEN              "))
+        XCTAssertTrue(lines[0].hasPrefix("WHEN                "))
+        XCTAssertTrue(lines[0].contains("ID      "))
         XCTAssertTrue(lines[0].contains("WHY        "))
         XCTAssertTrue(lines[0].contains("KIND  "))
         XCTAssertTrue(lines[0].contains("RECORDED    "))
@@ -172,11 +173,83 @@ final class HistoryFormatterTests: XCTestCase {
             files: [fingerprintFile("/tmp/Memo5.m4a")]
         )
         let line = HistoryFormatter.line(for: record, now: now)
-        XCTAssertTrue(line.hasPrefix("5 mins ago        "), "line: \(line)")
+        XCTAssertTrue(line.hasPrefix("5 mins ago          "), "line: \(line)")
+        XCTAssertTrue(line.contains("-         "), "unmatched ID shows a dash: \(line)")
         XCTAssertTrue(line.contains("legacy       "), "line: \(line)")
         XCTAssertTrue(line.contains("voice   "), "line: \(line)")
         XCTAssertTrue(line.contains("2014-05-13  "), "line: \(line)")
         XCTAssertTrue(line.hasSuffix("Memo5.m4a"), "line: \(line)")
+    }
+
+    func testFullISOTimestampFitsTheWhenColumn() {
+        // Entries older than a week fall back to the stored ISO string;
+        // the column must hold all 20 characters without pushing the row.
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let stored = isoString(now.addingTimeInterval(-30 * 86400))
+        XCTAssertEqual(stored.count, 20)
+        XCTAssertGreaterThanOrEqual(HistoryFormatter.timeColumnWidth, stored.count)
+        let record = makeRecord(completed_at: stored, files: [fingerprintFile("/tmp/Memo5.m4a")])
+        let map = [HistoryFormatter.sourceHashesKey(["0"])!: "0cfd0332"]
+        let line = HistoryFormatter.line(for: record, now: now, documentIDs: map)
+        let header = HistoryFormatter.header()
+        guard let headerID = header.range(of: "ID"), let dataID = line.range(of: "0cfd0332") else {
+            XCTFail("could not locate ID columns")
+            return
+        }
+        XCTAssertEqual(
+            header.distance(from: header.startIndex, to: headerID.lowerBound),
+            line.distance(from: line.startIndex, to: dataID.lowerBound)
+        )
+    }
+
+    func testDocumentIDResolvesThroughSourceHashes() {
+        let record = makeRecord(files: [
+            FileFingerprint(path: "/tmp/b.m4a", sha256: "BBB", bytes: 0, mtime: nil),
+            FileFingerprint(path: "/tmp/a.m4a", sha256: "aaa", bytes: 0, mtime: nil),
+        ])
+        // Keys normalize case and order, matching the set-equality rule used
+        // when documents are joined to history records.
+        let key = HistoryFormatter.sourceHashesKey(["AAA", "bbb"])
+        XCTAssertNotNil(key)
+        let map = [key!: "0cfd0332"]
+        XCTAssertEqual(HistoryFormatter.displayDocumentID(record, documentIDs: map), "0cfd0332")
+
+        let unmatched = makeRecord(files: [fingerprintFile("/tmp/x.m4a")])
+        XCTAssertEqual(HistoryFormatter.displayDocumentID(unmatched, documentIDs: map), "-")
+
+        let noFingerprint = makeRecord(files: [])
+        XCTAssertEqual(HistoryFormatter.displayDocumentID(noFingerprint, documentIDs: map), "-")
+        XCTAssertNil(HistoryFormatter.sourceHashesKey([]))
+    }
+
+    func testIDColumnWidensToTheLongestDisplayedID() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let longID = "0cfd0332-bbbb"
+        let map = [HistoryFormatter.sourceHashesKey(["0"])!: longID]
+        let matched = makeRecord(
+            completed_at: isoString(now.addingTimeInterval(-300)),
+            files: [fingerprintFile("/tmp/Memo5.m4a")]
+        )
+        let rendered = HistoryFormatter.format(records: [matched], now: now, documentIDs: map)
+        let lines = rendered.split(separator: "\n").map(String.init)
+        guard let headerWhy = lines[0].range(of: "WHY"), let dataWhy = lines[1].range(of: "legacy") else {
+            XCTFail("could not locate why columns")
+            return
+        }
+        XCTAssertEqual(
+            lines[0].distance(from: lines[0].startIndex, to: headerWhy.lowerBound),
+            lines[1].distance(from: lines[1].startIndex, to: dataWhy.lowerBound),
+            "a longer ID must widen the header too: \(rendered)"
+        )
+        XCTAssertTrue(lines[1].contains(longID + "  "), rendered)
+    }
+
+    func testCorruptDocumentIDIsSanitised() {
+        let record = makeRecord(files: [fingerprintFile("/tmp/Memo6.m4a")])
+        let map = [HistoryFormatter.sourceHashesKey(["0"])!: "0cfd\u{1B}[2J0332"]
+        XCTAssertEqual(HistoryFormatter.displayDocumentID(record, documentIDs: map), "0cfd [2J0332")
+        let line = HistoryFormatter.line(for: record, now: Date(), documentIDs: map)
+        XCTAssertFalse(line.unicodeScalars.contains("\u{1B}"), line)
     }
 
     // MARK: - helpers
